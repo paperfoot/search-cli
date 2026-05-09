@@ -55,6 +55,7 @@ impl Exa {
                 .post(&url)
                 .header("x-api-key", api_key.as_str())
                 .header("Content-Type", "application/json")
+                .header("Accept-Encoding", "gzip")
                 .json(&body)
                 .send()
                 .await?;

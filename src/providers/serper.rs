@@ -54,6 +54,7 @@ impl Serper {
                 .post(&url)
                 .header("X-API-KEY", api_key.as_str())
                 .header("Content-Type", "application/json")
+                .header("Accept-Encoding", "gzip")
                 .json(&body)
                 .send()
                 .await?;

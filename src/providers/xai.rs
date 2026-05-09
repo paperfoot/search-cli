@@ -67,6 +67,7 @@ impl Xai {
                     .post("https://api.x.ai/v1/responses")
                     .header("Authorization", format!("Bearer {key}"))
                     .header("Content-Type", "application/json")
+                    .header("Accept-Encoding", "gzip")
                     .json(&body)
                     .send()
                     .await?;
