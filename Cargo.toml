@@ -2,7 +2,7 @@
 name = "agent-search"
 version = "0.5.1"
 edition = "2021"
-description = "Unified multi-provider search CLI for AI agents — 12 providers, 14 modes, email verification, one binary"
+description = "Unified multi-provider search CLI for AI agents — 13 providers, 14 modes, one binary"
 license = "MIT"
 repository = "https://github.com/paperfoot/search-cli"
 homepage = "https://github.com/paperfoot/search-cli"

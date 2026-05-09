@@ -39,6 +39,47 @@ fn has_json_flag() -> bool {
     false
 }
 
+/// Strip/replace invalid arguments coming from JS tool wrappers.
+/// JS `null` becomes string "null", JS `undefined` becomes string "undefined".
+/// Clap can't parse these, so we normalize them before clap sees them.
+fn sanitize_argv() -> Vec<String> {
+    let mut cleaned: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    let args: Vec<String> = std::env::args().collect();
+    for (i, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        // Skip standalone "null" or "undefined" args
+        if arg == "null" || arg == "undefined" {
+            continue;
+        }
+        // Handle -m null / -m undefined / --mode null / --mode undefined
+        if arg == "-m" || arg == "--mode" {
+            if let Some(next_val) = args.get(i + 1) {
+                if next_val == "null" || next_val == "undefined" {
+                    // Skip both the flag and its invalid value; clap will use default
+                    skip_next = true;
+                    continue;
+                }
+            }
+        }
+        // Handle -c null / -c undefined / --count null / --count undefined
+        if arg == "-c" || arg == "--count" {
+            if let Some(next_val) = args.get(i + 1) {
+                if next_val == "null" || next_val == "undefined" {
+                    // Skip both the flag and its invalid value
+                    skip_next = true;
+                    continue;
+                }
+            }
+        }
+        cleaned.push(arg.clone());
+    }
+    cleaned
+}
+
 fn init_tracing() {
     // Quiet by default unless caller explicitly opts in.
     let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
@@ -89,7 +130,7 @@ async fn main() {
     let json_flag = has_json_flag();
 
     // 4. CLI Parsing — use try_parse so we own error handling
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(sanitize_argv()) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(

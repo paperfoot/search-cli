@@ -2,7 +2,7 @@
 
 # Search CLI
 
-**One binary, 12 providers, 14 modes. The web search tool your AI agent is missing.**
+**One binary, 13 providers, 14 modes. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -19,7 +19,7 @@
 
 ---
 
-A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily, SerpApi, Perplexity, xAI, You.com, and more into one unified search interface. Designed from day one for AI agents -- structured JSON output, semantic exit codes, auto-JSON when piped, and parallel fan-out across providers in under 2 seconds.
+A single Rust binary that aggregates Parallel, Brave, Serper, Exa, Jina, Firecrawl, Tavily, SerpApi, Perplexity, xAI, You.com, and more into one unified search interface. Designed from day one for AI agents -- structured JSON output, semantic exit codes, auto-JSON when piped, and parallel fan-out across providers in under 2 seconds.
 
 [Install](#install) | [How It Works](#how-it-works) | [Features](#features) | [Providers](#providers) | [Contributing](#contributing)
 
@@ -27,7 +27,7 @@ A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily
 
 ## Why This Exists
 
-Every search API is good at something different. Brave has its own 35-billion page index. Serper gives you raw Google results plus Scholar, Patents, and Places. Exa does neural/semantic search. Perplexity gives AI-synthesized answers with citations. Jina reads any URL into clean markdown. Firecrawl renders JavaScript-heavy pages. xAI searches X/Twitter. You.com provides LLM-ready web + news snippets with low-latency responses.
+Every search API is good at something different. Parallel provides fast multi-mode AI search across general, news, and deep queries. Brave has its own 35-billion page index. Serper gives you raw Google results plus Scholar, Patents, and Places. Exa does neural/semantic search. Perplexity gives AI-synthesized answers with citations. Jina reads any URL into clean markdown. Firecrawl renders JavaScript-heavy pages. xAI searches X/Twitter. You.com provides LLM-ready web + news snippets with low-latency responses.
 
 You shouldn't have to wire up each one separately, handle their different response formats, manage rate limits, or figure out which provider to use for which query type. `search` does all of that for you -- routes your query to the right combination automatically, fans out in parallel, deduplicates results, and gives you a single clean response.
 
@@ -66,6 +66,7 @@ Binary size is ~6 MB. Startup is ~2 ms. Memory is ~5 MB. No Python, no Node, no 
 
 ```bash
 # Set your API keys (any combination works -- even just one)
+search config set keys.parallel YOUR_PARALLEL_KEY
 search config set keys.brave YOUR_BRAVE_KEY
 search config set keys.serper YOUR_SERPER_KEY
 search config set keys.exa YOUR_EXA_KEY
@@ -125,11 +126,11 @@ search "your query here"
 | Mode | What it does | Providers used |
 |------|-------------|----------------|
 | `auto` | Detects intent from your query | *varies* |
-| `general` | Broad web search | Brave + Serper + Exa + Jina + Tavily + Perplexity + You.com |
-| `news` | Breaking news, current events | Brave News + Serper News + Tavily + Perplexity + You.com |
+| `general` | Broad web search | Parallel + Brave + Serper + Exa + Jina + Tavily + Perplexity + You.com |
+| `news` | Breaking news, current events | Parallel + Brave News + Serper News + Tavily + Perplexity + You.com |
 | `academic` | Research papers, studies | Exa + Serper + Tavily + Perplexity |
 | `people` | LinkedIn profiles, bios | Exa |
-| `deep` | Maximum coverage | Brave (LLM Context) + Exa + Serper + Tavily + Perplexity + xAI + You.com |
+| `deep` | Maximum coverage | Parallel + Brave (LLM Context) + Exa + Serper + Tavily + Perplexity + xAI + You.com |
 | `scholar` | Google Scholar | Serper + SerpApi |
 | `patents` | Patent search | Serper |
 | `images` | Image search | Serper |
@@ -174,6 +175,18 @@ search "query" --json
 | 3 | Auth missing | Set API key |
 | 4 | Rate limited | Back off and retry |
 
+### Agent Integration Assets
+
+Search CLI ships with built-in agent integration files:
+
+- **Skill file** (`assets/.agents/skills/search-cli/SKILL.md`) — Describes search-cli capabilities, modes, and usage patterns for AI coding agents. Install it with:
+  ```bash
+  search skill install
+  ```
+  After installation, AI agents automatically discover search-cli's capabilities and use the right modes for each query type.
+
+- **OpenCode tool schema** (`assets/.agents/tool/opencode/search.ts`) — TypeScript tool definition for [OpenCode](https://github.com/opencode-ai/opencode) that integrates search-cli as a native tool with structured input/output.
+
 ### Usage Examples
 
 ```bash
@@ -200,12 +213,46 @@ search search -q "latest AI model releases" -p you -f day
 search "query" --json | jq '.results[].url'
 search "query" -c 20                   # 20 results
 search "query" 2>/dev/null             # suppress diagnostics
+
+# Filter by recency
+search "query" -f day                  # only today's results
+search "query" --freshness week        # last 7 days
+
+# Domain filtering
+search "query" -d arxiv.org            # only results from arxiv.org
+search "query" -d github.com,docs.rs   # only from listed domains
+search "query" --exclude-domain pinterest.com  # exclude specific domains
+
+# Replay last cached result
+search --last                          # replay most recent query from cache
+```
+
+### Subcommands
+
+```bash
+# List all providers with their status (active, needs-key, etc.)
+search providers
+
+# Manage agent skill files
+search skill install     # Install SKILL.md for AI agent integration
+search skill status      # Check skill file installation status
+
+# Show config file location
+search config path
+
+# Verify an email address via SMTP
+search verify user@example.com
+
+# Self-update from GitHub releases
+search update
+search update --check    # Check without installing
 ```
 
 ## Providers
 
 | Provider | What it does | Best for |
 |----------|-------------|----------|
+| **[Parallel](https://api.parallel.ai/)** | Multi-mode AI search (general, news, deep) | Broad coverage, fast responses |
 | **[Brave](https://brave.com/search/api/)** | Independent 35B-page index + LLM Context API | Web search, news, RAG-ready content |
 | **[Serper](https://serper.dev/)** | Raw Google SERP + specialist endpoints | Scholar, patents, images, places |
 | **[Exa](https://exa.ai/)** | Neural/semantic search, category filters | Research papers, people search, similar sites |
@@ -232,6 +279,7 @@ search config set K V    # Set a value
 Environment variables override the config file. Prefix with `SEARCH_KEYS_`:
 
 ```bash
+export SEARCH_KEYS_PARALLEL=your-key
 export SEARCH_KEYS_BRAVE=your-key
 export SEARCH_KEYS_SERPER=your-key
 export SEARCH_KEYS_EXA=your-key
@@ -292,12 +340,37 @@ EXA_API_KEY=test-key EXA_BASE_URL=http://127.0.0.1:9999 \
 
 If you only want results and no human diagnostics in scripts, keep using JSON mode and parse the structured fields.
 
-## Updating
+## Reliability
+
+Every provider request is wrapped in automatic retry with exponential backoff:
+
+- **3 attempts** per provider before declaring failure
+- **1–4 s backoff** between retries (exponential, capped)
+- Retries only on **server errors** and **transport failures** — client errors (auth, rate-limit) fail immediately
+- **`provider_timeout`** config key (seconds, default `0` = no per-provider limit) — sets a hard deadline per provider
+- **`min_results`** config key (default `0`) — if total results fall below this threshold, search reports a warning in metadata
+
+```toml
+# config.toml
+retry_count = 3           # max attempts per provider
+provider_timeout = 15     # 15s hard deadline per provider
+min_results = 5           # warn if fewer than 5 results returned
+```
+
+## Caching
+
+Search results are cached locally to avoid redundant API calls:
+
+- **5-minute TTL** — cached responses expire after 300 seconds
+- **Failures are never cached** — only successful responses and responses with results are stored; degraded-empty responses (0 results + provider failures) are excluded
+- **`--last` flag** — replay the most recent cached result instantly, without hitting any provider
 
 ```bash
-search update             # Self-update from GitHub releases
-search update --check     # Check without installing
+search "latest AI news"     # fresh search, result cached
+search --last               # replay cached result (no API calls)
 ```
+
+Cache lives alongside the config at `~/.config/search/` (Linux) or `~/Library/Application Support/search/` (macOS).
 
 ## Building from Source
 
