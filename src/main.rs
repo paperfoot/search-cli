@@ -332,6 +332,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 include_domains: args.domain.unwrap_or_default(),
                 exclude_domains: args.exclude_domain.unwrap_or_default(),
                 freshness: args.freshness,
+                extra: None,
             };
 
             // Check query cache (5min TTL)

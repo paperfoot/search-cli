@@ -1,0 +1,3 @@
+interface:
+  display_name: "Search CLI Coding Research"
+  short_description: "Provider-aware OpenCode search-cli query planning for coding agents."

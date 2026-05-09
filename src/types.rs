@@ -108,12 +108,16 @@ pub struct ProviderFailureDetail {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchOpts {
     pub include_domains: Vec<String>,
     pub exclude_domains: Vec<String>,
     /// day, week, month, year
     pub freshness: Option<String>,
+    /// Provider-specific extra parameters as JSON.
+    /// E.g., for you.com: {"livecrawl": "all", "livecrawl_formats": ["markdown"], "crawl_timeout": 10}
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
