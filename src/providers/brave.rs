@@ -95,6 +95,7 @@ impl super::Provider for Brave {
                 .get(&endpoint)
                 .header("X-Subscription-Token", api_key.as_str())
                 .header("Accept", "application/json")
+                .header("Accept-Encoding", "gzip")
                 .query(&[("q", q.as_str()), ("count", &count_str), ("extra_snippets", "true")]);
 
             if let Some(f) = freshness {
@@ -182,6 +183,7 @@ impl super::Provider for Brave {
                 .get(&endpoint)
                 .header("X-Subscription-Token", api_key.as_str())
                 .header("Accept", "application/json")
+                .header("Accept-Encoding", "gzip")
                 .query(&[("q", q.as_str()), ("count", &count_str)]);
 
             if let Some(f) = freshness {
@@ -263,6 +265,7 @@ impl Brave {
                 .get(&endpoint)
                 .header("X-Subscription-Token", api_key.as_str())
                 .header("Accept", "application/json")
+                .header("Accept-Encoding", "gzip")
                 .query(&[
                     ("q", q.as_str()),
                     ("count", &count_str),
