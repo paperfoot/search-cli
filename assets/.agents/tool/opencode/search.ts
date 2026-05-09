@@ -299,6 +299,7 @@ AGENT RULES:
 8. Use query_plan=multi when a task benefits from separate keyword, semantic, and synthesis queries.
 9. Use operation=extract after discovery to read the most relevant official URL, changelog, issue, or article.
 10. Cite URLs from returned results when relying on external facts in the final answer.
+11. Check current_date. The tool response includes a top-level current_date field (YYYY-MM-DD format) and the tool block also carries it. Incorporate this date into your query to avoid targeting outdated years. Anti-pattern: "latest info on React 2024" when current_date is 2026 — this returns stale results. Correct pattern: use the current_date value to date-stamp queries.
 `.trim()
 
 let providerCache: { expiresAt: number; loadedAt: number; data: ProviderDiscovery } | undefined
@@ -834,7 +835,7 @@ function buildInvocations(input: Required<Pick<SearchArgs, "operation" | "mode" 
   } else {
     calls.push(
       { category: "keyword", mode, strategy: input.strategy, providers: categoryProviders("keyword", discovery), label: "keyword" },
-      { category: "semantic", mode, strategy: input.strategy === "auto" ? "semantic" : input.strategy, providers: categoryProviders("semantic", discovery), label: "semantic" },
+      { category: "semantic", mode, strategy: ["semantic", "hyde", "step_back"].includes(input.strategy) ? input.strategy : "semantic", providers: categoryProviders("semantic", discovery), label: "semantic" },
       { category: "synthesis", mode, strategy: input.strategy, providers: categoryProviders("synthesis", discovery), label: "synthesis" },
     )
   }
@@ -1123,6 +1124,7 @@ export default tool({
 
   async execute(rawArgs: SearchArgs, context: any) {
     const started = Date.now()
+    const currentDate = new Date().toISOString().slice(0, 10)
     const operation = rawArgs.operation || "search"
     const mode = rawArgs.mode || "auto"
     const strategy = rawArgs.strategy || "auto"
@@ -1148,12 +1150,14 @@ export default tool({
       return JSON.stringify(
         {
           version: "1",
+          current_date: currentDate,
           status: discovery.status,
           provider_discovery: discovery,
           guidance: {
             availability_rule: "api key present in env/config means active; no provider API probes are made",
             cooldown_rule: "providers that return quota/rate-limit failures are hidden for this OpenCode process for 24 hours",
             routing_rule: "query fanout is adaptive and uses only active providers",
+            date_rule: "The response includes current_date (YYYY-MM-DD). Incorporate this date into your query to avoid targeting outdated information.",
           },
         },
         null,
@@ -1187,6 +1191,7 @@ export default tool({
       active_providers: discovery.configured,
       warnings: plan.warnings,
       elapsed_ms: 0,
+      current_date: currentDate,
     }
 
     if (plan.errors.length > 0) {
@@ -1194,6 +1199,7 @@ export default tool({
       return JSON.stringify(
         {
           version: "1",
+          current_date: currentDate,
           status: "error",
           error: {
             code: "bad_input_or_unavailable_provider",
@@ -1213,9 +1219,21 @@ export default tool({
     let aggregateStatus = "success"
 
     try {
-      for (const invocation of plan.invocations) {
-        const { stdout, stderr } = await runSearchCli(binary, invocation.binaryArgs, timeoutMs, cwd, signal)
-        const payload = parseJsonMaybe(stdout) ?? parseJsonMaybe(stderr) ?? stdout.trim()
+      // Run all CLI invocations in parallel for multi-plan calls
+      const promises = plan.invocations.map((invocation) =>
+        runSearchCli(binary, invocation.binaryArgs, timeoutMs, cwd, signal).then(({ stdout, stderr }) => {
+          const payload = parseJsonMaybe(stdout) ?? parseJsonMaybe(stderr) ?? stdout.trim()
+          return { invocation, payload }
+        })
+      )
+
+      let settled = await Promise.allSettled(promises)
+      for (const result of settled) {
+        if (result.status === "rejected") {
+          // Propagate the rejection to the catch block
+          throw result.reason
+        }
+        const { invocation, payload } = result.value
 
         if (commandOnly) {
           toolDebug.elapsed_ms = Date.now() - started
@@ -1253,10 +1271,14 @@ export default tool({
         return JSON.stringify({ tool: toolDebug, provider_discovery: finalDiscovery, calls }, null, 2)
       }
 
+      const estimatedProviderCalls = plan.invocations.reduce((sum, inv) => sum + inv.providers.length, 0)
+
       return JSON.stringify(
         {
           version: "1",
+          current_date: currentDate,
           status: results.length === 0 && aggregateStatus === "success" ? "no_results" : aggregateStatus,
+          estimated_provider_calls: estimatedProviderCalls,
           provider_discovery: finalDiscovery,
           calls,
           results,
@@ -1291,6 +1313,7 @@ export default tool({
       return JSON.stringify(
         {
           version: "1",
+          current_date: currentDate,
           status: "error",
           error: {
             code: notFound ? "binary_not_found" : isTimeout ? "timeout" : semanticExitCodeLabel(exitCode),
