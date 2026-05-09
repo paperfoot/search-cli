@@ -164,7 +164,7 @@ pub mod skill {
     use crate::output::Ctx;
     use std::path::PathBuf;
 
-    const SKILL_CONTENT: &str = include_str!("../SKILL.md");
+    const SKILL_CONTENT: &str = include_str!("../assets/.agents/skills/search-cli/SKILL.md");
 
     struct Target {
         name: &'static str,
