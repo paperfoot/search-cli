@@ -752,6 +752,37 @@ function resolveFreshnessForCall(strategy: QueryStrategy, mode: SearchMode, requ
   return resolveFreshness(strategy, mode, requested)
 }
 
+/**
+ * Extract file-path suffixes from inline `site:` operators and route them properly:
+ * - `site:domain/path` → domain added to `-d` flag, path becomes a regular query term
+ * - `-site:domain/path` → path stripped, `-site:domain` kept in query, path becomes a term
+ *
+ * This prevents Brave API 422 errors (which rejects `/` in `site:` values) and ensures
+ * path segments are preserved as search terms rather than silently dropped.
+ */
+function extractSiteOperators(rawQuery: string, existingDomains: string[]): { cleanQuery: string; domains: string[] } {
+  const re = /(?<!\S)(-?site:)([^\s/]+)\/([^\s]+)/gi
+  const domains = [...existingDomains]
+  const extraTerms: string[] = []
+
+  const cleanQuery = rawQuery.replace(re, (_full, operator, domain, path) => {
+    if (operator.startsWith("-")) {
+      // Negative site: keep operator in query but strip path
+      extraTerms.push(path)
+      return `-site:${domain}`
+    }
+    // Positive site: extract domain to -d flag, remove operator from query
+    domains.push(domain)
+    extraTerms.push(path)
+    return ""
+  })
+
+  if (extraTerms.length === 0) return { cleanQuery, domains }
+
+  const final = `${extraTerms.join(" ")} ${cleanQuery}`.replace(/\s+/g, " ").trim()
+  return { cleanQuery: final, domains: unique(domains) }
+}
+
 function buildCliSearchArgs(query: string, mode: SearchMode, count: number, freshness: Freshness, providers: string[], domains: string[], excludes: string[]): string[] {
   const args = ["search", "-q", query, "-m", mode, "-c", String(count), "--json"]
   if (freshness !== "none" && !["extract", "scrape", "similar", "images", "places"].includes(mode)) {
@@ -776,12 +807,16 @@ function buildInvocations(input: Required<Pick<SearchArgs, "operation" | "mode" 
   if (operation === "agent_info") return { invocations: [{ label: "agent_info", mode: "command", binaryArgs: ["agent-info", "--json"], warnings }], errors, warnings }
   if (operation === "config_check") return { invocations: [{ label: "config_check", mode: "command", binaryArgs: ["config", "check", "--json"], warnings }], errors, warnings }
 
-  const query = input.query?.trim()
+  let query = input.query?.trim()
   if (!query) return { invocations: [], errors: ["query is required for search, extract, scrape, and similar operations"], warnings }
 
   const mode = inferMode(operation, input.mode)
   const freshness = resolveFreshnessForCall(input.strategy, mode, input.freshness)
-  const domains = splitCsv(input.domains)
+  let domains = splitCsv(input.domains)
+
+  // Extract site:domain/path operators so path segments don't cause 422 errors on providers
+  // that validate site: values as plain domains (Brave).
+  ;({ cleanQuery: query, domains } = extractSiteOperators(query, domains))
   const excludes = unique([...LOW_SIGNAL_EXCLUDE_DOMAINS, ...splitCsv(input.exclude_domains)])
   const requested = resolveRequestedProviders(input.providers, discovery, input.provider_policy)
   warnings.push(...requested.warnings)

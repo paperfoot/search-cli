@@ -3,8 +3,36 @@ use crate::errors::SearchError;
 use crate::providers::augment_query;
 use crate::types::{map_freshness, SearchOpts, SearchResult};
 use async_trait::async_trait;
+use regex::Regex;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::sync::OnceLock;
+
+/// Sanitize a query for Brave's API by stripping file paths from `site:` operators.
+///
+/// Brave's API validates `site:` values as domain names; forward slashes cause HTTP 422.
+/// This function extracts the path portion and prepends it as regular query terms
+/// so search intent is preserved.
+///
+/// Examples:
+/// - `site:github.com/repo term` → `repo site:github.com term`
+/// - `-site:github.com/repo term` → `repo -site:github.com term`
+/// - `site:github.com term` (no path) → unchanged
+fn sanitize_brave_query(query: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)(?<!\S)(-?site:)([^\s/]+)/([^\s]+)").unwrap()
+    });
+
+    if let Some(caps) = re.captures(query) {
+        let domain_only = format!("{}{}", &caps[1], &caps[2]);
+        let path = &caps[3];
+        let sanitized = re.replace(query, domain_only.as_str());
+        format!("{} {}", path, sanitized).trim().to_string()
+    } else {
+        query.to_string()
+    }
+}
 
 pub struct Brave {
     ctx: Arc<AppContext>,
@@ -88,6 +116,7 @@ impl super::Provider for Brave {
         let endpoint = format!("{}/res/v1/web/search", self.base_url());
         let count_str = count.to_string();
         let q = augment_query(query, opts);
+        let q = sanitize_brave_query(&q);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
         super::retry_request(|| async {
@@ -176,6 +205,7 @@ impl super::Provider for Brave {
         let endpoint = format!("{}/res/v1/news/search", self.base_url());
         let count_str = count.to_string();
         let q = augment_query(query, opts);
+        let q = sanitize_brave_query(&q);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
         super::retry_request(|| async {
@@ -257,6 +287,7 @@ impl Brave {
         let api_key = self.api_key();
         let endpoint = format!("{}/res/v1/llm/context", self.base_url());
         let q = augment_query(query, opts);
+        let q = sanitize_brave_query(&q);
         let count_str = count.to_string();
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
