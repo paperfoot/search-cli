@@ -2,6 +2,18 @@ use crate::types::Mode;
 use regex::Regex;
 use std::sync::OnceLock;
 
+// --- Semantic layer: URL / operation detection (before regex) ---
+
+/// If the query is a URL, it's an extract/scrape operation, not a search.
+fn looks_like_url(query: &str) -> bool {
+    let trimmed = query.trim();
+    trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("ftp://")
+}
+
+// --- Regex-based vertical intent classifiers ---
+
 fn social_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)(\btweet\b|\btweets\b|\bon twitter\b|\bon x\b|x\.com|twitter\.com|\btrending on\b|what.*\bsaying\b|@\w{1,15}\b)").unwrap())
@@ -52,7 +64,21 @@ fn places_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)\b(near me|restaurant|hotel|directions|address|location|map|places)\b").unwrap())
 }
 
+#[allow(dead_code)]
+fn security_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\b(cve|cve-\d{4}-\d{4,}|vulnerability|advisory|exploit|security patch|mitigation|zero.?day|rce\b|remote code execution|privilege escalation|dos\b|denial of service)").unwrap())
+}
+
 pub fn classify_intent(query: &str) -> Mode {
+    // 1. URL? → Extract/Scrape (operation modes, not search)
+    if looks_like_url(query) {
+        return Mode::Extract;
+    }
+
+    // 2. Regex vertical classifiers (most-specific first)
+    // Security/CVE queries map to General (broadest provider set) since there's no Security mode.
+    // The security_re check is here for future use; currently it logs as General.
     let checks: &[(Mode, &dyn Fn() -> &'static Regex)] = &[
         (Mode::Social, &social_re),
         (Mode::News, &news_re),
@@ -123,6 +149,23 @@ mod tests {
         assert_eq!(classify_intent("extract content from url"), Mode::Extract);
         assert_eq!(classify_intent("scrape this page"), Mode::Extract);
         assert_eq!(classify_intent("read page full text"), Mode::Extract);
+    }
+
+    #[test]
+    fn test_classify_url_detection() {
+        assert_eq!(classify_intent("https://docs.rs/tokio/latest/tokio"), Mode::Extract);
+        assert_eq!(classify_intent("http://example.com/page"), Mode::Extract);
+        assert_eq!(classify_intent("ftp://files.example.com"), Mode::Extract);
+        // Not a URL: plain text despite containing dots
+        assert_eq!(classify_intent("tokio runtime configuration"), Mode::General);
+    }
+
+    #[test]
+    fn test_classify_security() {
+        // Security queries go to General (no Security mode), but regex exists for future use
+        assert_eq!(classify_intent("CVE-2024-1234 log4j vulnerability"), Mode::General);
+        assert_eq!(classify_intent("security advisory for openssl"), Mode::General);
+        assert_eq!(classify_intent("rce exploit in node.js"), Mode::General);
     }
 
     #[test]

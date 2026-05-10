@@ -337,19 +337,22 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             // Check query cache (5min TTL)
             let mode_str = args.mode.to_string();
-            if args.providers.is_none()
-                && opts.include_domains.is_empty()
-                && opts.exclude_domains.is_empty()
-                && opts.freshness.is_none()
-            {
-                if let Some(cached) = cache::load_query(&args.query, &mode_str) {
-                    if ctx.is_json() {
-                        output::json::render(&cached);
-                    } else if !ctx.suppress_human() {
-                        output::table::render(&cached);
-                    }
-                    return Ok(0);
+            let providers: Vec<String> = args.providers.clone().unwrap_or_default();
+            // Always try cache — extended key includes providers/domains/excludes/freshness for safety
+            if let Some(cached) = cache::load_query(
+                &args.query,
+                &mode_str,
+                &providers,
+                &opts.include_domains,
+                &opts.exclude_domains,
+                opts.freshness.as_deref(),
+            ) {
+                if ctx.is_json() {
+                    output::json::render(&cached);
+                } else if !ctx.suppress_human() {
+                    output::table::render(&cached);
                 }
+                return Ok(0);
             }
 
             // Show spinner for human output (suppressed by --quiet)
@@ -400,7 +403,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // Only cache responses that are useful to replay (skip failed/degraded)
             if cache::should_cache_query_response(&response) {
                 cache::save_last(&response);
-                cache::save_query(&args.query, &mode_str, &response);
+                cache::save_query(
+                    &args.query,
+                    &mode_str,
+                    &providers,
+                    &opts.include_domains,
+                    &opts.exclude_domains,
+                    opts.freshness.as_deref(),
+                    &response,
+                );
             }
             logging::log_search(&response);
 

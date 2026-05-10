@@ -21,10 +21,21 @@ fn last_path() -> PathBuf {
     cache_dir().join("last.json")
 }
 
-fn query_cache_path(query: &str, mode: &str) -> PathBuf {
+fn query_cache_path(query: &str, mode: &str, providers: &[String], domains: &[String], excludes: &[String], freshness: Option<&str>) -> PathBuf {
     let mut h = DefaultHasher::new();
     query.to_lowercase().hash(&mut h);
     mode.hash(&mut h);
+    // Sort to produce stable keys regardless of argument order
+    let mut p = providers.to_vec();
+    p.sort();
+    for prov in &p { prov.hash(&mut h); }
+    let mut d = domains.to_vec();
+    d.sort();
+    for dom in &d { dom.hash(&mut h); }
+    let mut e = excludes.to_vec();
+    e.sort();
+    for excl in &e { excl.hash(&mut h); }
+    freshness.hash(&mut h);
     cache_dir().join(format!("q_{:x}.json", h.finish()))
 }
 
@@ -79,7 +90,7 @@ pub fn should_cache_query_response(response: &SearchResponse) -> bool {
 }
 
 /// Save a query result to the TTL cache
-pub fn save_query(query: &str, mode: &str, response: &SearchResponse) {
+pub fn save_query(query: &str, mode: &str, providers: &[String], domains: &[String], excludes: &[String], freshness: Option<&str>, response: &SearchResponse) {
     if !should_cache_query_response(response) {
         return;
     }
@@ -93,7 +104,7 @@ pub fn save_query(query: &str, mode: &str, response: &SearchResponse) {
         response: response.clone(),
     };
     if let Ok(json) = serde_json::to_string(&entry) {
-        let path = query_cache_path(query, mode);
+        let path = query_cache_path(query, mode, providers, domains, excludes, freshness);
         if let Err(e) = std::fs::write(&path, json) {
             tracing::warn!(event = "cache_write_failed", error = %e, path = %path.display());
         }
@@ -101,8 +112,8 @@ pub fn save_query(query: &str, mode: &str, response: &SearchResponse) {
 }
 
 /// Load a cached query result if not expired
-pub fn load_query(query: &str, mode: &str) -> Option<SearchResponse> {
-    let path = query_cache_path(query, mode);
+pub fn load_query(query: &str, mode: &str, providers: &[String], domains: &[String], excludes: &[String], freshness: Option<&str>) -> Option<SearchResponse> {
+    let path = query_cache_path(query, mode, providers, domains, excludes, freshness);
     let content = std::fs::read_to_string(path).ok()?;
     let entry: CachedEntry = serde_json::from_str(&content).ok()?;
     if now_secs() - entry.timestamp < CACHE_TTL_SECS {
@@ -209,30 +220,39 @@ mod tests {
         assert!(should_cache_query_response(&resp));
     }
 
+    fn empty_strs() -> Vec<String> { vec![] }
+
     #[test]
     fn test_query_cache_path_deterministic() {
-        let p1 = query_cache_path("hello world", "general");
-        let p2 = query_cache_path("hello world", "general");
+        let p1 = query_cache_path("hello world", "general", &empty_strs(), &empty_strs(), &empty_strs(), None);
+        let p2 = query_cache_path("hello world", "general", &empty_strs(), &empty_strs(), &empty_strs(), None);
         assert_eq!(p1, p2);
     }
 
     #[test]
     fn test_query_cache_path_mode_sensitive() {
-        let p1 = query_cache_path("hello", "general");
-        let p2 = query_cache_path("hello", "news");
+        let p1 = query_cache_path("hello", "general", &empty_strs(), &empty_strs(), &empty_strs(), None);
+        let p2 = query_cache_path("hello", "news", &empty_strs(), &empty_strs(), &empty_strs(), None);
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn test_query_cache_path_provider_sensitive() {
+        let p1 = query_cache_path("hello", "general", &["brave".to_string()], &empty_strs(), &empty_strs(), None);
+        let p2 = query_cache_path("hello", "general", &empty_strs(), &empty_strs(), &empty_strs(), None);
         assert_ne!(p1, p2);
     }
 
     #[test]
     fn test_query_cache_path_case_insensitive_query() {
-        let p1 = query_cache_path("Rust Language", "general");
-        let p2 = query_cache_path("rust language", "general");
+        let p1 = query_cache_path("Rust Language", "general", &empty_strs(), &empty_strs(), &empty_strs(), None);
+        let p2 = query_cache_path("rust language", "general", &empty_strs(), &empty_strs(), &empty_strs(), None);
         assert_eq!(p1, p2);
     }
 
     #[test]
     fn test_query_cache_path_starts_with_q_prefix() {
-        let p = query_cache_path("test", "general");
+        let p = query_cache_path("test", "general", &empty_strs(), &empty_strs(), &empty_strs(), None);
         let name = p.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("q_"));
         assert!(name.ends_with(".json"));
