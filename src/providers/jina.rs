@@ -1,5 +1,6 @@
 use crate::context::AppContext;
 use crate::errors::SearchError;
+use crate::providers::sanitize_inline_site_operator;
 use crate::types::{SearchOpts, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -82,6 +83,8 @@ impl super::Provider for Jina {
             }
             q
         };
+
+        let q = sanitize_inline_site_operator(&q);
 
         super::retry_request(|| async {
             let resp = client

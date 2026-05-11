@@ -17,6 +17,8 @@ use crate::errors::SearchError;
 use crate::types::{SearchOpts, SearchResult};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
+use regex::Regex;
+use std::sync::OnceLock;
 use tl::ParserOptions;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +51,40 @@ fn sanitize_domain(domain: &str) -> String {
         return "invalid".to_string();
     }
     domain.trim().to_string()
+}
+
+/// Sanitize a query by stripping file-path suffixes from inline `site:` operators.
+///
+/// Some search APIs (Brave, Jina) validate the value after `site:` as a plain domain
+/// and reject forward slashes with HTTP 422. This function strips the `/path` portion
+/// and prepends it as regular query terms so search intent is preserved.
+///
+/// Examples:
+/// - `site:github.com/repo term` → `repo site:github.com term`
+/// - `-site:github.com/repo term` → `repo -site:github.com term`
+/// - `site:github.com term` (no path) → unchanged
+pub fn sanitize_inline_site_operator(query: &str) -> String {
+    // Note: regex crate doesn't support lookbehind, so we capture leading whitespace
+    // as group 1 and re-add it in the replacement.
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)(^|\s)(-?site:)([^\s/]+)/([^\s]+)").unwrap()
+    });
+
+    let mut extra_terms: Vec<String> = Vec::new();
+    let sanitized = re.replace_all(query, |caps: &regex::Captures| {
+        extra_terms.push(caps[4].to_string());
+        format!("{}{}{}", &caps[1], &caps[2], &caps[3])
+    });
+
+    if extra_terms.is_empty() {
+        query.to_string()
+    } else {
+        let mut result = extra_terms.join(" ");
+        result.push(' ');
+        result.push_str(&sanitized);
+        result.trim().to_string()
+    }
 }
 
 /// Extract the `<title>` text from an HTML document.

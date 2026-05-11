@@ -1,46 +1,11 @@
 use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::providers::augment_query;
+use crate::providers::sanitize_inline_site_operator;
 use crate::types::{map_freshness, SearchOpts, SearchResult};
 use async_trait::async_trait;
-use regex::Regex;
 use serde::Deserialize;
 use std::sync::Arc;
-use std::sync::OnceLock;
-
-/// Sanitize a query for Brave's API by stripping file paths from `site:` operators.
-///
-/// Brave's API validates `site:` values as domain names; forward slashes cause HTTP 422.
-/// This function extracts the path portion and prepends it as regular query terms
-/// so search intent is preserved.
-///
-/// Examples:
-/// - `site:github.com/repo term` → `repo site:github.com term`
-/// - `-site:github.com/repo term` → `repo -site:github.com term`
-/// - `site:github.com term` (no path) → unchanged
-fn sanitize_brave_query(query: &str) -> String {
-    // Note: regex crate doesn't support lookbehind, so we capture leading whitespace
-    // as group 1 and re-add it in the replacement.
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)(^|\s)(-?site:)([^\s/]+)/([^\s]+)").unwrap()
-    });
-
-    let mut extra_terms: Vec<String> = Vec::new();
-    let sanitized = re.replace_all(query, |caps: &regex::Captures| {
-        extra_terms.push(caps[4].to_string());
-        format!("{}{}{}", &caps[1], &caps[2], &caps[3])
-    });
-
-    if extra_terms.is_empty() {
-        query.to_string()
-    } else {
-        let mut result = extra_terms.join(" ");
-        result.push(' ');
-        result.push_str(&sanitized);
-        result.trim().to_string()
-    }
-}
 
 pub struct Brave {
     ctx: Arc<AppContext>,
@@ -124,7 +89,7 @@ impl super::Provider for Brave {
         let endpoint = format!("{}/res/v1/web/search", self.base_url());
         let count_str = count.to_string();
         let q = augment_query(query, opts);
-        let q = sanitize_brave_query(&q);
+        let q = sanitize_inline_site_operator(&q);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
         super::retry_request(|| async {
@@ -213,7 +178,7 @@ impl super::Provider for Brave {
         let endpoint = format!("{}/res/v1/news/search", self.base_url());
         let count_str = count.to_string();
         let q = augment_query(query, opts);
-        let q = sanitize_brave_query(&q);
+        let q = sanitize_inline_site_operator(&q);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
         super::retry_request(|| async {
@@ -295,7 +260,7 @@ impl Brave {
         let api_key = self.api_key();
         let endpoint = format!("{}/res/v1/llm/context", self.base_url());
         let q = augment_query(query, opts);
-        let q = sanitize_brave_query(&q);
+        let q = sanitize_inline_site_operator(&q);
         let count_str = count.to_string();
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
