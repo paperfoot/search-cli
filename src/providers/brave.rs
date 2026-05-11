@@ -19,18 +19,26 @@ use std::sync::OnceLock;
 /// - `-site:github.com/repo term` → `repo -site:github.com term`
 /// - `site:github.com term` (no path) → unchanged
 fn sanitize_brave_query(query: &str) -> String {
+    // Note: regex crate doesn't support lookbehind, so we capture leading whitespace
+    // as group 1 and re-add it in the replacement.
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)(?<!\S)(-?site:)([^\s/]+)/([^\s]+)").unwrap()
+        Regex::new(r"(?i)(^|\s)(-?site:)([^\s/]+)/([^\s]+)").unwrap()
     });
 
-    if let Some(caps) = re.captures(query) {
-        let domain_only = format!("{}{}", &caps[1], &caps[2]);
-        let path = &caps[3];
-        let sanitized = re.replace(query, domain_only.as_str());
-        format!("{} {}", path, sanitized).trim().to_string()
-    } else {
+    let mut extra_terms: Vec<String> = Vec::new();
+    let sanitized = re.replace_all(query, |caps: &regex::Captures| {
+        extra_terms.push(caps[4].to_string());
+        format!("{}{}{}", &caps[1], &caps[2], &caps[3])
+    });
+
+    if extra_terms.is_empty() {
         query.to_string()
+    } else {
+        let mut result = extra_terms.join(" ");
+        result.push(' ');
+        result.push_str(&sanitized);
+        result.trim().to_string()
     }
 }
 
