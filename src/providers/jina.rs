@@ -30,48 +30,11 @@ impl Jina {
         }
         None
     }
-}
 
-#[derive(Deserialize)]
-struct JinaSearchResponse {
-    data: Option<Vec<JinaResult>>,
-}
-
-#[derive(Deserialize)]
-struct JinaResult {
-    title: Option<String>,
-    url: Option<String>,
-    description: Option<String>,
-    content: Option<String>,
-}
-
-#[async_trait]
-impl super::Provider for Jina {
-    fn name(&self) -> &'static str {
-        "jina"
-    }
-
-    fn env_keys(&self) -> &[&'static str] { &["JINA_API_KEY", "SEARCH_KEYS_JINA"] }
-    fn capabilities(&self) -> &[&'static str] {
-        &["general", "extract"]
-    }
-
-    fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
-    }
-
-
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
-        if !self.is_configured() {
-            return Err(SearchError::AuthMissing { provider: "jina" });
-        }
-
-        let client = &self.ctx.client;
-        let auth = format!("Bearer {}", self.api_key());
-        let count_str = count.to_string();
-
-        // Apply domain filtering via query augmentation (Jina API doesn't have native domain filters)
-        let q = if opts.include_domains.is_empty() && opts.exclude_domains.is_empty() {
+    /// Build the query for Jina, optionally appending site: domain filters.
+    /// Jina API doesn't have native domain filters, so we inline them.
+    fn build_jina_query(query: &str, opts: &SearchOpts) -> String {
+        if opts.include_domains.is_empty() && opts.exclude_domains.is_empty() {
             query.to_string()
         } else {
             let mut q = query.to_string();
@@ -82,9 +45,19 @@ impl super::Provider for Jina {
                 q = format!("{q} -site:{d}");
             }
             q
-        };
+        }
+    }
 
-        let q = sanitize_inline_site_operator(&q);
+    /// Execute the Jina search API call with retry.
+    async fn do_jina_search(
+        client: &reqwest::Client,
+        auth: &str,
+        q: &str,
+        count_str: &str,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let auth = auth.to_string();
+        let q = q.to_string();
+        let count_str = count_str.to_string();
 
         super::retry_request(|| async {
             let resp = client
@@ -133,6 +106,74 @@ impl super::Provider for Jina {
             Ok(results)
         })
         .await
+    }
+}
+
+#[derive(Deserialize)]
+struct JinaSearchResponse {
+    data: Option<Vec<JinaResult>>,
+}
+
+#[derive(Deserialize)]
+struct JinaResult {
+    title: Option<String>,
+    url: Option<String>,
+    description: Option<String>,
+    content: Option<String>,
+}
+
+#[async_trait]
+impl super::Provider for Jina {
+    fn name(&self) -> &'static str {
+        "jina"
+    }
+
+    fn env_keys(&self) -> &[&'static str] { &["JINA_API_KEY", "SEARCH_KEYS_JINA"] }
+    fn capabilities(&self) -> &[&'static str] {
+        &["general", "extract"]
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.api_key().is_empty()
+    }
+
+
+    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+        if !self.is_configured() {
+            return Err(SearchError::AuthMissing { provider: "jina" });
+        }
+
+        let client = &self.ctx.client;
+        let auth = format!("Bearer {}", self.api_key());
+        let count_str = count.to_string();
+
+        // Build query with domain restrictions, sanitize, and strip quotes
+        let q = Jina::build_jina_query(query, opts);
+        let q = sanitize_inline_site_operator(&q);
+        let q = q.replace('"', "");
+
+        match Jina::do_jina_search(client, &auth, &q, &count_str).await {
+            Ok(results) => return Ok(results),
+            Err(SearchError::Api { provider: _, code, message }) if code == "api_error" && message.contains("422") => {
+                tracing::info!(
+                    event = "jina_422_fallback",
+                    original_query = %q,
+                    "Jina returned 422; retrying without site: operators"
+                );
+                // Jina's API rejects certain query patterns when combined with site:.
+                // Retry without site: operators entirely.
+                let unrestricted = Jina::build_jina_query(query, &SearchOpts::default());
+                // Strip any inline site: and -site: operators, and quotes
+                let unrestricted = unrestricted
+                    .split_whitespace()
+                    .filter(|t| !t.starts_with("site:") && !t.starts_with("-site:"))
+                    .map(|t| t.trim_matches('"'))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Jina::do_jina_search(client, &auth, &unrestricted, &count_str).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn search_news(
