@@ -1,10 +1,11 @@
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::providers::augment_query;
+use crate::providers::sanitize_inline_site_operator;
+use crate::types::{map_freshness, SearchOpts, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub struct Brave {
     ctx: Arc<AppContext>,
@@ -17,6 +18,173 @@ impl Brave {
 
     fn api_key(&self) -> String {
         super::resolve_key(&self.ctx.config.keys.brave, "BRAVE_API_KEY")
+    }
+
+    fn base_url(&self) -> String {
+        std::env::var("BRAVE_BASE_URL")
+            .unwrap_or_else(|_| "https://api.search.brave.com".to_string())
+            .trim_end_matches('/')
+            .to_string()
+    }
+
+    /// Execute a single Brave web search request with retry support.
+    async fn do_brave_search(
+        client: &reqwest::Client,
+        endpoint: &str,
+        api_key: &str,
+        q: &str,
+        count_str: &str,
+        freshness: Option<&str>,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        super::retry_request(|| async {
+            let mut req = client
+                .get(endpoint)
+                .header("X-Subscription-Token", api_key)
+                .header("Accept", "application/json")
+                .header("Accept-Encoding", "gzip")
+                .query(&[("q", q), ("count", count_str), ("extra_snippets", "true")]);
+
+            if let Some(f) = freshness {
+                req = req.query(&[("freshness", f)]);
+            }
+
+            let resp = req.send().await?;
+
+            if resp.status() == 429 {
+                return Err(SearchError::RateLimited { provider: "brave" });
+            }
+            if resp.status() == 422 {
+                return Err(SearchError::Api {
+                    provider: "brave",
+                    code: "invalid_request",
+                    message: format!("HTTP 422: Invalid request parameters (possible malformed query or unsupported options)"),
+                });
+            }
+            if !resp.status().is_success() {
+                let code = match resp.status().as_u16() {
+                    400 => "bad_request",
+                    403 => "forbidden",
+                    500..=599 => "server_error",
+                    _ => "api_error",
+                };
+                return Err(SearchError::Api {
+                    provider: "brave",
+                    code,
+                    message: format!("HTTP {}", resp.status()),
+                });
+            }
+
+            let body_bytes = resp.bytes().await?;
+            let mut body_vec = body_bytes.to_vec();
+            let body: BraveResponse = simd_json::from_slice(&mut body_vec)
+                .map_err(|e| SearchError::Api {
+                    provider: "brave",
+                    code: "json_error",
+                    message: e.to_string(),
+                })?;
+            let results = body
+                .web
+                .map(|w| w.results)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| {
+                    let mut snippet = r.description.unwrap_or_default();
+                    if let Some(extras) = r.extra_snippets {
+                        for extra in extras {
+                            snippet = format!("{snippet}\n{extra}");
+                        }
+                    }
+                    SearchResult {
+                        title: r.title.unwrap_or_default(),
+                        url: r.url.unwrap_or_default(),
+                        snippet,
+                        source: "brave".to_string(),
+                        published: None,
+                        image_url: None,
+                        extra: None,
+                    }
+                })
+                .collect();
+
+            Ok(results)
+        })
+        .await
+    }
+
+    /// Execute a single Brave news search request with retry support.
+    async fn do_brave_news_search(
+        client: &reqwest::Client,
+        endpoint: &str,
+        api_key: &str,
+        q: &str,
+        count_str: &str,
+        freshness: Option<&str>,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        super::retry_request(|| async {
+            let mut req = client
+                .get(endpoint)
+                .header("X-Subscription-Token", api_key)
+                .header("Accept", "application/json")
+                .header("Accept-Encoding", "gzip")
+                .query(&[("q", q), ("count", count_str)]);
+
+            if let Some(f) = freshness {
+                req = req.query(&[("freshness", f)]);
+            }
+
+            let resp = req.send().await?;
+
+            if resp.status() == 429 {
+                return Err(SearchError::RateLimited { provider: "brave" });
+            }
+            if resp.status() == 422 {
+                return Err(SearchError::Api {
+                    provider: "brave",
+                    code: "invalid_request",
+                    message: format!("HTTP 422: Invalid request parameters (possible malformed query or unsupported options)"),
+                });
+            }
+            if !resp.status().is_success() {
+                let code = match resp.status().as_u16() {
+                    400 => "bad_request",
+                    403 => "forbidden",
+                    500..=599 => "server_error",
+                    _ => "api_error",
+                };
+                return Err(SearchError::Api {
+                    provider: "brave",
+                    code,
+                    message: format!("HTTP {}", resp.status()),
+                });
+            }
+
+            let body_bytes = resp.bytes().await?;
+            let mut body_vec = body_bytes.to_vec();
+            let body: BraveResponse = simd_json::from_slice(&mut body_vec)
+                .map_err(|e| SearchError::Api {
+                    provider: "brave",
+                    code: "json_error",
+                    message: e.to_string(),
+                })?;
+            let results = body
+                .news
+                .map(|n| n.results)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| SearchResult {
+                    title: r.title.unwrap_or_default(),
+                    url: r.url.unwrap_or_default(),
+                    snippet: r.description.unwrap_or_default(),
+                    source: "brave_news".to_string(),
+                    published: r.age,
+                    image_url: None,
+                    extra: None,
+                })
+                .collect();
+
+            Ok(results)
+        })
+        .await
     }
 }
 
@@ -52,29 +220,6 @@ struct BraveNewsResult {
     age: Option<String>,
 }
 
-/// Brave freshness: pd (day), pw (week), pm (month), py (year)
-fn map_freshness(f: &str) -> &str {
-    match f {
-        "day" => "pd",
-        "week" => "pw",
-        "month" => "pm",
-        "year" => "py",
-        other => other, // pass through if already in Brave format
-    }
-}
-
-/// Append site: operators for domain filtering
-fn augment_query(query: &str, opts: &SearchOpts) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
-    q
-}
-
 #[async_trait]
 impl super::Provider for Brave {
     fn name(&self) -> &'static str {
@@ -93,9 +238,6 @@ impl super::Provider for Brave {
         !self.api_key().is_empty()
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(10)
-    }
 
     async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
         if !self.is_configured() {
@@ -104,70 +246,36 @@ impl super::Provider for Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
+        let endpoint = format!("{}/res/v1/web/search", self.base_url());
         let count_str = count.to_string();
         let q = augment_query(query, opts);
+        let q = sanitize_inline_site_operator(&q);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
-        super::retry_request(|| async {
-            let mut req = client
-                .get("https://api.search.brave.com/res/v1/web/search")
-                .header("X-Subscription-Token", api_key.as_str())
-                .header("Accept", "application/json")
-                .query(&[("q", q.as_str()), ("count", &count_str), ("extra_snippets", "true")]);
-
-            if let Some(f) = freshness {
-                req = req.query(&[("freshness", f)]);
+        let first_result = Self::do_brave_search(client, &endpoint, &api_key, &q, &count_str, freshness).await;
+        // Borrow-match to avoid partial move of first_result into the error destructure.
+        if let Err(SearchError::Api { code, .. }) = &first_result {
+            if *code == "invalid_request" {
+                tracing::info!(
+                    event = "brave_422_fallback",
+                    original_query = %q,
+                    "Brave returned 422; retrying without site: operators",
+                );
+                // Brave may reject queries with site: operators (path segments, too many, etc.).
+                // Retry with only the original query terms, stripping any site:/-site: operators.
+                let unrestricted = query
+                    .split_whitespace()
+                    .filter(|t| !t.starts_with("site:") && !t.starts_with("-site:"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if unrestricted == q {
+                    // No site: operators were present — return original error
+                    return first_result;
+                }
+                return Self::do_brave_search(client, &endpoint, &api_key, &unrestricted, &count_str, freshness).await;
             }
-
-            let resp = req.send().await?;
-
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "brave" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "brave",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
-
-            let body_bytes = resp.bytes().await?;
-            let mut body_vec = body_bytes.to_vec();
-            let body: BraveResponse = simd_json::from_slice(&mut body_vec)
-                .map_err(|e| SearchError::Api {
-                    provider: "brave",
-                    code: "json_error",
-                    message: e.to_string(),
-                })?;
-            let results = body
-                .web
-                .map(|w| w.results)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| {
-                    // Combine description with extra snippets for richer context
-                    let mut snippet = r.description.unwrap_or_default();
-                    if let Some(extras) = r.extra_snippets {
-                        for extra in extras {
-                            snippet = format!("{snippet}\n{extra}");
-                        }
-                    }
-                    SearchResult {
-                        title: r.title.unwrap_or_default(),
-                        url: r.url.unwrap_or_default(),
-                        snippet,
-                        source: "brave".to_string(),
-                        published: None,
-                        image_url: None,
-                        extra: None,
-                    }
-                })
-                .collect();
-
-            Ok(results)
-        })
-        .await
+        }
+        first_result
     }
 
     async fn search_news(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
@@ -177,58 +285,32 @@ impl super::Provider for Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
+        let endpoint = format!("{}/res/v1/news/search", self.base_url());
         let count_str = count.to_string();
         let q = augment_query(query, opts);
+        let q = sanitize_inline_site_operator(&q);
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
-        super::retry_request(|| async {
-            let mut req = client
-                .get("https://api.search.brave.com/res/v1/news/search")
-                .header("X-Subscription-Token", api_key.as_str())
-                .header("Accept", "application/json")
-                .query(&[("q", q.as_str()), ("count", &count_str)]);
-
-            if let Some(f) = freshness {
-                req = req.query(&[("freshness", f)]);
+        let first_result = Self::do_brave_news_search(client, &endpoint, &api_key, &q, &count_str, freshness).await;
+        if let Err(SearchError::Api { code, .. }) = &first_result {
+            if *code == "invalid_request" {
+                tracing::info!(
+                    event = "brave_422_fallback_news",
+                    original_query = %q,
+                    "Brave news returned 422; retrying without site: operators",
+                );
+                let unrestricted = query
+                    .split_whitespace()
+                    .filter(|t| !t.starts_with("site:") && !t.starts_with("-site:"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if unrestricted == q {
+                    return first_result;
+                }
+                return Self::do_brave_news_search(client, &endpoint, &api_key, &unrestricted, &count_str, freshness).await;
             }
-
-            let resp = req.send().await?;
-
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "brave",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
-
-            let body_bytes = resp.bytes().await?;
-            let mut body_vec = body_bytes.to_vec();
-            let body: BraveResponse = simd_json::from_slice(&mut body_vec)
-                .map_err(|e| SearchError::Api {
-                    provider: "brave",
-                    code: "json_error",
-                    message: e.to_string(),
-                })?;
-            let results = body
-                .news
-                .map(|n| n.results)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| SearchResult {
-                    title: r.title.unwrap_or_default(),
-                    url: r.url.unwrap_or_default(),
-                    snippet: r.description.unwrap_or_default(),
-                    source: "brave_news".to_string(),
-                    published: r.age,
-                    image_url: None,
-                    extra: None,
-                })
-                .collect();
-
-            Ok(results)
-        })
-        .await
+        }
+        first_result
     }
 }
 
@@ -241,18 +323,51 @@ impl Brave {
 
         let client = &self.ctx.client;
         let api_key = self.api_key();
+        let endpoint = format!("{}/res/v1/llm/context", self.base_url());
         let q = augment_query(query, opts);
+        let q = sanitize_inline_site_operator(&q);
         let count_str = count.to_string();
         let freshness = opts.freshness.as_deref().map(map_freshness);
 
+        let first_result = Self::do_brave_llm_search(client, &endpoint, &api_key, &q, &count_str, freshness).await;
+        if let Err(SearchError::Api { code, .. }) = &first_result {
+            if *code == "invalid_request" {
+                tracing::info!(
+                    event = "brave_422_fallback_llm",
+                    original_query = %q,
+                    "Brave LLM context returned 422; retrying without site: operators",
+                );
+                let unrestricted = query
+                    .split_whitespace()
+                    .filter(|t| !t.starts_with("site:") && !t.starts_with("-site:"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if unrestricted == q {
+                    return first_result;
+                }
+                return Self::do_brave_llm_search(client, &endpoint, &api_key, &unrestricted, &count_str, freshness).await;
+            }
+        }
+        first_result
+    }
+
+    async fn do_brave_llm_search(
+        client: &reqwest::Client,
+        endpoint: &str,
+        api_key: &str,
+        q: &str,
+        count_str: &str,
+        freshness: Option<&str>,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         super::retry_request(|| async {
             let mut req = client
-                .get("https://api.search.brave.com/res/v1/llm/context")
-                .header("X-Subscription-Token", api_key.as_str())
+                .get(endpoint)
+                .header("X-Subscription-Token", api_key)
                 .header("Accept", "application/json")
+                .header("Accept-Encoding", "gzip")
                 .query(&[
-                    ("q", q.as_str()),
-                    ("count", &count_str),
+                    ("q", q),
+                    ("count", count_str),
                     ("maximum_number_of_tokens", "16384"),
                     ("context_threshold_mode", "balanced"),
                 ]);
@@ -265,6 +380,13 @@ impl Brave {
 
             if resp.status() == 429 {
                 return Err(SearchError::RateLimited { provider: "brave" });
+            }
+            if resp.status() == 422 {
+                return Err(SearchError::Api {
+                    provider: "brave",
+                    code: "invalid_request",
+                    message: format!("HTTP 422: Invalid request parameters (possible malformed query or unsupported options)"),
+                });
             }
             if !resp.status().is_success() {
                 return Err(SearchError::Api {

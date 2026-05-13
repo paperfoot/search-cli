@@ -9,6 +9,7 @@ mod logging;
 mod output;
 mod providers;
 mod types;
+mod utils;
 mod verify;
 
 use clap::Parser;
@@ -18,6 +19,7 @@ use context::AppContext;
 use output::{Ctx, OutputFormat};
 use std::sync::Arc;
 use tokio::net::lookup_host;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -37,8 +39,74 @@ fn has_json_flag() -> bool {
     false
 }
 
+/// Strip/replace invalid arguments coming from JS tool wrappers.
+/// JS `null` becomes string "null", JS `undefined` becomes string "undefined".
+/// Clap can't parse these, so we normalize them before clap sees them.
+fn sanitize_argv() -> Vec<String> {
+    let mut cleaned: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    let args: Vec<String> = std::env::args().collect();
+    for (i, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        // Skip standalone "null" or "undefined" args
+        if arg == "null" || arg == "undefined" {
+            continue;
+        }
+        // Handle -m null / -m undefined / --mode null / --mode undefined
+        if arg == "-m" || arg == "--mode" {
+            if let Some(next_val) = args.get(i + 1) {
+                if next_val == "null" || next_val == "undefined" {
+                    // Skip both the flag and its invalid value; clap will use default
+                    skip_next = true;
+                    continue;
+                }
+            }
+        }
+        // Handle -c null / -c undefined / --count null / --count undefined
+        if arg == "-c" || arg == "--count" {
+            if let Some(next_val) = args.get(i + 1) {
+                if next_val == "null" || next_val == "undefined" {
+                    // Skip both the flag and its invalid value
+                    skip_next = true;
+                    continue;
+                }
+            }
+        }
+        cleaned.push(arg.clone());
+    }
+    cleaned
+}
+
+fn init_tracing() {
+    // Quiet by default unless caller explicitly opts in.
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+    if rust_log.trim().is_empty() {
+        return;
+    }
+
+    let filter = EnvFilter::try_new(rust_log).unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer = fmt::layer()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::io::stderr);
+
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() {
+    init_tracing();
+    crate::cache::evict_expired();
+
     // 1. Pre-emptive DNS resolution (starts immediately in background)
     tokio::spawn(async {
         let domains = [
@@ -62,7 +130,7 @@ async fn main() {
     let json_flag = has_json_flag();
 
     // 4. CLI Parsing — use try_parse so we own error handling
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(sanitize_argv()) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(
@@ -125,7 +193,14 @@ async fn main() {
         }
     };
 
-    let app = Arc::new(AppContext::new(config));
+    let app = match AppContext::new(config) {
+        Ok(ctx) => Arc::new(ctx),
+        Err(e) => {
+            eprintln!("Failed to initialize app: {e}");
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(event = "app_initialized", timeout_s = app.config.settings.timeout, default_count = app.config.settings.count);
 
     // 6. Pre-emptive TLS Handshake
     let is_search = cli.command.is_none() || matches!(cli.command, Some(Commands::Search(_)));
@@ -146,6 +221,7 @@ async fn main() {
     let exit_code = match run(cli, &ctx, app).await {
         Ok(code) => code,
         Err(e) => {
+            tracing::warn!(event = "search_failed", code = e.error_code(), message = %e);
             if ctx.is_json() {
                 output::json::render_error(&e);
             } else {
@@ -219,6 +295,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     return Ok(0);
                 } else {
                     let err = errors::SearchError::Config("No cached results found. Run a search first.".into());
+                    tracing::warn!(event = "search_failed", code = err.error_code(), message = %err);
                     if ctx.is_json() {
                         output::json::render_error(&err);
                     } else {
@@ -232,13 +309,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             if let Some(ref providers) = args.providers {
                 const KNOWN: &[&str] = &[
                     "parallel", "brave", "serper", "exa", "jina", "firecrawl", "tavily",
-                    "serpapi", "perplexity", "browserless", "stealth", "xai",
+                    "serpapi", "perplexity", "browserless", "stealth", "xai", "you",
                 ];
                 for p in providers {
                     if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
                         let err = errors::SearchError::Config(format!(
                             "Unknown provider '{}'. Valid: {}", p, KNOWN.join(", ")
                         ));
+                        tracing::warn!(event = "search_failed", code = err.error_code(), message = %err);
                         if ctx.is_json() {
                             output::json::render_error(&err);
                         } else {
@@ -254,23 +332,27 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 include_domains: args.domain.unwrap_or_default(),
                 exclude_domains: args.exclude_domain.unwrap_or_default(),
                 freshness: args.freshness,
+                extra: None,
             };
 
             // Check query cache (5min TTL)
             let mode_str = args.mode.to_string();
-            if args.providers.is_none()
-                && opts.include_domains.is_empty()
-                && opts.exclude_domains.is_empty()
-                && opts.freshness.is_none()
-            {
-                if let Some(cached) = cache::load_query(&args.query, &mode_str) {
-                    if ctx.is_json() {
-                        output::json::render(&cached);
-                    } else if !ctx.suppress_human() {
-                        output::table::render(&cached);
-                    }
-                    return Ok(0);
+            let providers: Vec<String> = args.providers.clone().unwrap_or_default();
+            // Always try cache — extended key includes providers/domains/excludes/freshness for safety
+            if let Some(cached) = cache::load_query(
+                &args.query,
+                &mode_str,
+                &providers,
+                &opts.include_domains,
+                &opts.exclude_domains,
+                opts.freshness.as_deref(),
+            ) {
+                if ctx.is_json() {
+                    output::json::render(&cached);
+                } else if !ctx.suppress_human() {
+                    output::table::render(&cached);
                 }
+                return Ok(0);
             }
 
             // Show spinner for human output (suppressed by --quiet)
@@ -308,8 +390,29 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             let response = response?;
 
-            cache::save_last(&response);
-            cache::save_query(&args.query, &mode_str, &response);
+            tracing::info!(
+                event = "search_completed",
+                mode = %response.mode,
+                status = %response.status,
+                elapsed_ms = response.metadata.elapsed_ms,
+                result_count = response.metadata.result_count,
+                providers_queried = ?response.metadata.providers_queried,
+                providers_failed = ?response.metadata.providers_failed
+            );
+
+            // Only cache responses that are useful to replay (skip failed/degraded)
+            if cache::should_cache_query_response(&response) {
+                cache::save_last(&response);
+                cache::save_query(
+                    &args.query,
+                    &mode_str,
+                    &providers,
+                    &opts.include_domains,
+                    &opts.exclude_domains,
+                    opts.freshness.as_deref(),
+                    &response,
+                );
+            }
             logging::log_search(&response);
 
             if ctx.is_json() {
@@ -329,17 +432,19 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             match action {
                 ConfigAction::Show => {
                     if ctx.is_json() {
-                        let configured: Vec<&str> = [
-                            ("brave", !app.config.keys.brave.is_empty()),
-                            ("serper", !app.config.keys.serper.is_empty()),
-                            ("exa", !app.config.keys.exa.is_empty()),
-                            ("jina", !app.config.keys.jina.is_empty()),
-                            ("firecrawl", !app.config.keys.firecrawl.is_empty()),
-                            ("tavily", !app.config.keys.tavily.is_empty()),
-                            ("serpapi", !app.config.keys.serpapi.is_empty()),
-                            ("perplexity", !app.config.keys.perplexity.is_empty()),
-                            ("browserless", !app.config.keys.browserless.is_empty()),
-                            ("xai", !app.config.keys.xai.is_empty()),
+                    let configured: Vec<&str> = [
+                        ("parallel", !app.config.keys.parallel.is_empty()),
+                        ("brave", !app.config.keys.brave.is_empty()),
+                        ("serper", !app.config.keys.serper.is_empty()),
+                        ("exa", !app.config.keys.exa.is_empty()),
+                        ("jina", !app.config.keys.jina.is_empty()),
+                        ("firecrawl", !app.config.keys.firecrawl.is_empty()),
+                        ("tavily", !app.config.keys.tavily.is_empty()),
+                        ("serpapi", !app.config.keys.serpapi.is_empty()),
+                        ("perplexity", !app.config.keys.perplexity.is_empty()),
+                        ("browserless", !app.config.keys.browserless.is_empty()),
+                        ("xai", !app.config.keys.xai.is_empty()),
+                        ("you", !app.config.keys.you.is_empty()),
                         ].iter().filter(|(_, v)| *v).map(|(k, _)| *k).collect();
                         let info = serde_json::json!({
                             "version": "1",
@@ -436,16 +541,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 "command_schemas": {
                     "search": {
                         "description": "Search across providers",
-                        "args": [
-                            {"name": "-q/--query", "type": "string", "required": true, "description": "Search query"},
-                        ],
+                        "args": [],
                         "options": [
+                            {"name": "-q/--query", "type": "string", "required": true, "description": "Search query"},
                             {"name": "-m/--mode", "type": "string", "required": false, "default": "auto",
                              "values": ["auto","general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social"],
                              "description": "Search mode"},
                             {"name": "-c/--count", "type": "integer", "required": false, "description": "Number of results"},
                             {"name": "-p/--providers", "type": "string[]", "required": false,
-                             "values": ["parallel","brave","serper","exa","jina","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai"],
+                             "values": ["parallel","brave","serper","exa","jina","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai","you"],
                              "description": "Comma-separated provider list"},
                             {"name": "-d/--domain", "type": "string[]", "required": false, "description": "Include only these domains"},
                             {"name": "--exclude-domain", "type": "string[]", "required": false, "description": "Exclude these domains"},
@@ -610,7 +714,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             }
 
             let start = std::time::Instant::now();
-            let results = verify::verify_emails(&emails).await;
+            let results = match verify::verify_emails(&emails).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    return Ok(2);
+                }
+            };
             let elapsed = start.elapsed().as_millis();
 
             let valid_count = results.iter().filter(|r| r.verdict == "valid").count();

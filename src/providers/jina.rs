@@ -1,10 +1,10 @@
 use crate::context::AppContext;
 use crate::errors::SearchError;
+use crate::providers::sanitize_inline_site_operator;
 use crate::types::{SearchOpts, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub struct Jina {
     ctx: Arc<AppContext>,
@@ -17,6 +17,95 @@ impl Jina {
 
     fn api_key(&self) -> String {
         super::resolve_key(&self.ctx.config.keys.jina, "JINA_API_KEY")
+    }
+
+    fn classify_rejection(body_text: &str) -> Option<SearchError> {
+        let lower = body_text.to_lowercase();
+        if body_text.contains("1010") || lower.contains("cloudflare") {
+            return Some(SearchError::Api {
+                provider: "jina",
+                code: "cloudflare_1010",
+                message: "Jina request blocked by Cloudflare (1010)".to_string(),
+            });
+        }
+        None
+    }
+
+    /// Build the query for Jina, optionally appending site: domain filters.
+    /// Jina API doesn't have native domain filters, so we inline them.
+    fn build_jina_query(query: &str, opts: &SearchOpts) -> String {
+        if opts.include_domains.is_empty() && opts.exclude_domains.is_empty() {
+            query.to_string()
+        } else {
+            let mut q = query.to_string();
+            for d in &opts.include_domains {
+                q = format!("{q} site:{d}");
+            }
+            for d in &opts.exclude_domains {
+                q = format!("{q} -site:{d}");
+            }
+            q
+        }
+    }
+
+    /// Execute the Jina search API call with retry.
+    async fn do_jina_search(
+        client: &reqwest::Client,
+        auth: &str,
+        q: &str,
+        count_str: &str,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let auth = auth.to_string();
+        let q = q.to_string();
+        let count_str = count_str.to_string();
+
+        super::retry_request(|| async {
+            let resp = client
+                .get("https://s.jina.ai/")
+                .header("Authorization", &auth)
+                .header("Accept", "application/json")
+                .header("X-Retain-Images", "none")
+                .query(&[("q", q.as_str()), ("count", &count_str)])
+                .send()
+                .await?;
+
+            if resp.status() == 429 {
+                return Err(SearchError::RateLimited { provider: "jina" });
+            }
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+
+                if let Some(classified) = Self::classify_rejection(&body_text) {
+                    return Err(classified);
+                }
+
+                return Err(SearchError::Api {
+                    provider: "jina",
+                    code: "api_error",
+                    message: format!("HTTP {}", status),
+                });
+            }
+
+            let body: JinaSearchResponse = resp.json().await?;
+            let results = body
+                .data
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| SearchResult {
+                    title: r.title.unwrap_or_default(),
+                    url: r.url.unwrap_or_default(),
+                    snippet: r.description.or(r.content).unwrap_or_default(),
+                    source: "jina".to_string(),
+                    published: None,
+                    image_url: None,
+                    extra: None,
+                })
+                .collect();
+
+            Ok(results)
+        })
+        .await
     }
 }
 
@@ -48,9 +137,6 @@ impl super::Provider for Jina {
         !self.api_key().is_empty()
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(15)
-    }
 
     async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
         if !self.is_configured() {
@@ -61,60 +147,33 @@ impl super::Provider for Jina {
         let auth = format!("Bearer {}", self.api_key());
         let count_str = count.to_string();
 
-        // Apply domain filtering via query augmentation (Jina API doesn't have native domain filters)
-        let q = if opts.include_domains.is_empty() && opts.exclude_domains.is_empty() {
-            query.to_string()
-        } else {
-            let mut q = query.to_string();
-            for d in &opts.include_domains {
-                q = format!("{q} site:{d}");
-            }
-            for d in &opts.exclude_domains {
-                q = format!("{q} -site:{d}");
-            }
-            q
-        };
+        // Build query with domain restrictions, sanitize, and strip quotes
+        let q = Jina::build_jina_query(query, opts);
+        let q = sanitize_inline_site_operator(&q);
+        let q = q.replace('"', "");
 
-        super::retry_request(|| async {
-            let resp = client
-                .get("https://s.jina.ai/")
-                .header("Authorization", &auth)
-                .header("Accept", "application/json")
-                .header("X-Retain-Images", "none")
-                .query(&[("q", q.as_str()), ("count", &count_str)])
-                .send()
-                .await?;
-
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "jina" });
+        match Jina::do_jina_search(client, &auth, &q, &count_str).await {
+            Ok(results) => return Ok(results),
+            Err(SearchError::Api { provider: _, code, message }) if code == "api_error" && message.contains("422") => {
+                tracing::info!(
+                    event = "jina_422_fallback",
+                    original_query = %q,
+                    "Jina returned 422; retrying without site: operators"
+                );
+                // Jina's API rejects certain query patterns when combined with site:.
+                // Retry without site: operators entirely.
+                let unrestricted = Jina::build_jina_query(query, &SearchOpts::default());
+                // Strip any inline site: and -site: operators, and quotes
+                let unrestricted = unrestricted
+                    .split_whitespace()
+                    .filter(|t| !t.starts_with("site:") && !t.starts_with("-site:"))
+                    .map(|t| t.trim_matches('"'))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Jina::do_jina_search(client, &auth, &unrestricted, &count_str).await
             }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "jina",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
-
-            let body: JinaSearchResponse = resp.json().await?;
-            let results = body
-                .data
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| SearchResult {
-                    title: r.title.unwrap_or_default(),
-                    url: r.url.unwrap_or_default(),
-                    snippet: r.description.or(r.content).unwrap_or_default(),
-                    source: "jina".to_string(),
-                    published: None,
-                    image_url: None,
-                    extra: None,
-                })
-                .collect();
-
-            Ok(results)
-        })
-        .await
+            Err(e) => Err(e),
+        }
     }
 
     async fn search_news(
@@ -147,10 +206,17 @@ impl Jina {
                 .await?;
 
             if !resp.status().is_success() {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+
+                if let Some(classified) = Self::classify_rejection(&body_text) {
+                    return Err(classified);
+                }
+
                 return Err(SearchError::Api {
                     provider: "jina",
                     code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
+                    message: format!("HTTP {}", status),
                 });
             }
 
@@ -176,5 +242,25 @@ impl Jina {
             }])
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_rejection_cloudflare_1010() {
+        let err = Jina::classify_rejection("Error 1010: Cloudflare access denied")
+            .expect("expected classified rejection");
+        match err {
+            SearchError::Api { code, .. } => assert_eq!(code, "cloudflare_1010"),
+            _ => panic!("expected SearchError::Api"),
+        }
+    }
+
+    #[test]
+    fn test_classify_rejection_none_for_unrelated_text() {
+        assert!(Jina::classify_rejection("plain api error").is_none());
     }
 }
