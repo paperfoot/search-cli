@@ -26,7 +26,7 @@ pub enum SearchError {
     Http(#[from] reqwest::Error),
 
     #[error(transparent)]
-    Rquest(#[from] rquest::Error),
+    Rquest(#[from] wreq::Error),
 
     #[error(transparent)]
     Json(#[from] serde_json::Error),
