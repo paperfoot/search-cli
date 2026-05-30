@@ -2,8 +2,8 @@ use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::types::{SearchOpts, SearchResult};
 use async_trait::async_trait;
-use rquest::header::{HeaderMap, HeaderValue};
-use rquest_util::Emulation;
+use wreq::header::{HeaderMap, HeaderValue};
+use wreq_util::Emulation;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
@@ -17,8 +17,8 @@ impl Stealth {
         Self { _ctx: ctx }
     }
 
-    /// Build an rquest client that impersonates Chrome with full TLS fingerprint
-    fn build_client() -> Result<rquest::Client, SearchError> {
+    /// Build an wreq client that impersonates Chrome with full TLS fingerprint
+    fn build_client() -> Result<wreq::Client, SearchError> {
         let mut headers = HeaderMap::new();
 
         // Chrome 136 stealth headers (matches Scrapling's browserforge output)
@@ -61,7 +61,7 @@ impl Stealth {
             HeaderValue::from_static("gzip, deflate, br"),
         );
 
-        rquest::Client::builder()
+        wreq::Client::builder()
             .emulation(Emulation::Chrome136)
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
@@ -100,7 +100,7 @@ impl Stealth {
             });
         }
 
-        let final_url = url_str.to_string(); // use original URL (rquest may not expose final URL)
+        let final_url = url_str.to_string(); // use original URL (wreq may not expose final URL)
         let html_bytes = resp.bytes().await.map_err(|e| {
             SearchError::Config(format!("Failed to read body: {e}"))
         })?;
