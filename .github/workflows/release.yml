@@ -31,7 +31,10 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        # --locked is REQUIRED: every rquest crates.io version is yanked
+        # (renamed upstream to `wreq`), so a fresh resolve fails. The committed
+        # Cargo.lock pins the still-downloadable 5.1.0.
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         run: |
