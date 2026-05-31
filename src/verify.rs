@@ -35,16 +35,20 @@ pub struct VerifyResult {
     pub suggestion: String,
 }
 
-pub async fn verify_emails(emails: &[String]) -> Vec<VerifyResult> {
+pub async fn verify_emails(
+    emails: &[String],
+) -> Result<Vec<VerifyResult>, crate::errors::SearchError> {
+    // Don't panic if /etc/resolv.conf is unreadable (sandbox/container) — that
+    // would abort with a backtrace and break the --json envelope contract.
     let resolver = Resolver::builder_tokio()
-        .expect("failed to create DNS resolver")
+        .map_err(|e| crate::errors::SearchError::Resolver(e.to_string()))?
         .build();
 
     let mut results = Vec::with_capacity(emails.len());
     for email in emails {
         results.push(verify_one(&resolver, email).await);
     }
-    results
+    Ok(results)
 }
 
 async fn verify_one(resolver: &hickory_resolver::TokioResolver, email: &str) -> VerifyResult {

@@ -110,29 +110,17 @@ async fn main() {
                 }
             }
 
-            // Parse errors — we own the exit code, always 3.
-            let format = OutputFormat::detect(json_flag);
-            match format {
-                OutputFormat::Json => {
-                    let envelope = serde_json::json!({
-                        "version": "1",
-                        "status": "error",
-                        "error": {
-                            "code": "invalid_input",
-                            "message": e.to_string(),
-                            "suggestion": "Check arguments with: search --help",
-                        },
-                    });
-                    eprintln!(
-                        "{}",
-                        serde_json::to_string_pretty(&envelope).unwrap()
-                    );
-                }
-                OutputFormat::Table => {
-                    eprint!("{e}");
-                }
+            // Parse errors — route through the typed error model (exit 3) so the
+            // code/exit namespace lives in one place (errors.rs), not inline here.
+            let err = errors::SearchError::InvalidInput {
+                message: e.to_string(),
+            };
+            match OutputFormat::detect(json_flag) {
+                OutputFormat::Json => output::json::render_error(&err),
+                // Keep clap's rich, colored usage message for humans.
+                OutputFormat::Table => eprint!("{e}"),
             }
-            std::process::exit(3);
+            std::process::exit(err.exit_code());
         }
     };
 
@@ -174,6 +162,15 @@ async fn main() {
                 output::json::render_error(&e);
             } else {
                 eprintln!("Error: {e}");
+                if let Some(s) = e.suggestion() {
+                    eprintln!("  {s}");
+                }
+                // Give humans the same per-provider detail the JSON envelope carries.
+                if let errors::SearchError::AllProvidersFailed { failed } = &e {
+                    for f in failed {
+                        eprintln!("  - {} [{}]: {}", f.provider, f.category.as_str(), f.reason);
+                    }
+                }
             }
             e.exit_code()
         }
@@ -342,11 +339,10 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 output::table::render(&response);
             }
 
-            if response.status == "all_providers_failed" {
-                Ok(1)
-            } else {
-                Ok(0)
-            }
+            // Total failure is surfaced as Err(AllProvidersFailed) by the engine
+            // (propagated via `response?` above), so any Ok response here is a
+            // success/partial_success/no_results — all exit 0.
+            Ok(0)
         }
 
         Commands::Config { action } => {
@@ -634,7 +630,17 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             }
 
             let start = std::time::Instant::now();
-            let results = verify::verify_emails(&emails).await;
+            let results = match verify::verify_emails(&emails).await {
+                Ok(r) => r,
+                Err(e) => {
+                    if ctx.is_json() {
+                        output::json::render_error(&e);
+                    } else {
+                        eprintln!("Error: {e}");
+                    }
+                    return Ok(e.exit_code());
+                }
+            };
             let elapsed = start.elapsed().as_millis();
 
             let valid_count = results.iter().filter(|r| r.verdict == "valid").count();
@@ -700,6 +706,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                     provider: "github",
                                     code: "update_check_failed",
                                     message: e.to_string(),
+                                    status: None,
                                 };
                                 output::json::render_error(&err);
                             } else {

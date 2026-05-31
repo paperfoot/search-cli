@@ -58,22 +58,14 @@ impl Serper {
                 .send()
                 .await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "serper" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "serper",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "serper").await?;
 
             let body_bytes = resp.bytes().await?;
             let mut body_vec = body_bytes.to_vec();
             simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
                 provider: "serper",
                 code: "json_error",
+                status: None,
                 message: e.to_string(),
             })
         })

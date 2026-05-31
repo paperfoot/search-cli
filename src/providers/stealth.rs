@@ -93,10 +93,12 @@ impl Stealth {
         })?;
 
         if !resp.status().is_success() {
+            let status = resp.status().as_u16();
             return Err(SearchError::Api {
                 provider: "stealth",
-                code: "http_error",
-                message: format!("HTTP {}", resp.status()),
+                code: "api_error",
+                message: format!("HTTP {status}"),
+                status: Some(status),
             });
         }
 
@@ -130,6 +132,7 @@ impl Stealth {
                 provider: "stealth",
                 code: "extraction_error",
                 message: "Page returned no extractable text content".to_string(),
+                status: None,
             });
         }
 

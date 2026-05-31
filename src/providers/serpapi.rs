@@ -62,16 +62,7 @@ impl SerpApi {
                 .send()
                 .await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "serpapi" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "serpapi",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "serpapi").await?;
 
             Ok(resp.json().await?)
         })

@@ -79,16 +79,7 @@ impl super::Provider for Firecrawl {
                 .send()
                 .await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "firecrawl" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "firecrawl",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "firecrawl").await?;
 
             let val: serde_json::Value = resp.json().await?;
             let results = val.get("data")
@@ -155,13 +146,7 @@ impl Firecrawl {
                     provider: "firecrawl",
                 });
             }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "firecrawl",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "firecrawl").await?;
 
             let body: FirecrawlScrapeResponse = resp.json().await?;
             if let Some(data) = body.data {

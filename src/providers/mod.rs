@@ -42,6 +42,53 @@ pub fn resolve_key(config_value: &str, env_var: &str) -> String {
     std::env::var(env_var).unwrap_or_default()
 }
 
+/// Turn a non-2xx reqwest response into a categorized [`SearchError`], preserving
+/// a short, sanitized body excerpt so "HTTP 422" becomes
+/// "HTTP 422: The provided subscription token is invalid." Returns the response
+/// unchanged on 2xx. Centralizing this here keeps status/body/429 handling
+/// identical across every provider (previously copy-pasted and drift-prone).
+pub async fn ok_or_api_error(
+    resp: reqwest::Response,
+    provider: &'static str,
+) -> Result<reqwest::Response, SearchError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let code = status.as_u16();
+    if code == 429 {
+        return Err(SearchError::RateLimited { provider });
+    }
+    // Body is only read on the error path; the success path stays zero-copy.
+    let body = resp.text().await.unwrap_or_default();
+    Err(SearchError::Api {
+        provider,
+        code: "api_error",
+        message: http_error_message(code, &body),
+        status: Some(code),
+    })
+}
+
+/// Format `HTTP <status>` with a sanitized one-line body excerpt when present.
+pub fn http_error_message(status: u16, body: &str) -> String {
+    let excerpt = sanitize_excerpt(body, 200);
+    if excerpt.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        format!("HTTP {status}: {excerpt}")
+    }
+}
+
+/// Collapse whitespace and clip to `max` chars (char-safe, never panics on UTF-8).
+fn sanitize_excerpt(body: &str, max: usize) -> String {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = collapsed.chars().take(max).collect();
+    if collapsed.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
