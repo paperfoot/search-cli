@@ -1,5 +1,4 @@
 mod cache;
-mod classify;
 mod cli;
 mod config;
 mod context;
@@ -225,7 +224,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
     } else if cli.last {
         Commands::Search(cli::SearchArgs {
             query: String::new(),
-            mode: types::Mode::Auto,
+            mode: types::Mode::General,
             count: None,
             providers: None,
             domain: None,
@@ -244,7 +243,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             .join(" ");
         Commands::Search(cli::SearchArgs {
             query,
-            mode: types::Mode::Auto,
+            mode: types::Mode::General,
             count: None,
             providers: None,
             domain: None,
@@ -345,7 +344,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 && opts.exclude_domains.is_empty()
                 && opts.freshness.is_none()
             {
-                if let Some(cached) = cache::load_query(&args.query, &mode_str) {
+                if let Some(cached) = cache::load_query(&args.query, &mode_str, count) {
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -388,8 +387,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             let response = response?;
 
-            cache::save_last(&response);
-            cache::save_query(&args.query, &mode_str, &response);
+            // Don't cache empty results — a transient no_results shouldn't be
+            // replayed for 5 minutes after the cause clears. (Total failure is
+            // already an Err and never reaches here.)
+            if !response.results.is_empty() {
+                cache::save_last(&response);
+                cache::save_query(&args.query, &mode_str, count, &response);
+            }
             logging::log_search(&response);
 
             if ctx.is_json() {
@@ -519,9 +523,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             {"name": "-q/--query", "type": "string", "required": true, "description": "Search query"},
                         ],
                         "options": [
-                            {"name": "-m/--mode", "type": "string", "required": false, "default": "auto",
-                             "values": ["auto","general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social"],
-                             "description": "Search mode"},
+                            {"name": "-m/--mode", "type": "string", "required": false, "default": "general",
+                             "values": ["general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social"],
+                             "description": "Search mode — chosen explicitly by the caller; the CLI does NOT infer intent from the query"},
                             {"name": "-c/--count", "type": "integer", "required": false, "description": "Number of results"},
                             {"name": "-p/--providers", "type": "string[]", "required": false,
                              "values": ["parallel","brave","serper","exa","jina","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai"],
@@ -555,7 +559,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     },
                     "config check": {"description": "Health-check which providers are configured", "args": [], "options": []},
                     "config path": {"description": "Show configuration file path", "args": [], "options": []},
-                    "agent-info": {"description": "This manifest", "aliases": ["info"], "args": [], "options": []},
+                    "agent-info": {"description": "This manifest", "args": [], "options": []},
                     "providers": {"description": "List all providers with status and capabilities", "args": [], "options": []},
                     "skill install": {"description": "Install skill file to agent platforms", "args": [], "options": []},
                     "skill status": {"description": "Check skill installation status", "args": [], "options": []},
@@ -572,6 +576,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     "--quiet": {"type": "bool", "default": false, "description": "Suppress informational output"},
                     "--last": {"type": "bool", "default": false, "description": "Replay last search from cache"},
                     "--x": {"type": "bool", "default": false, "description": "Search X (Twitter) only"},
+                    "--debug": {"type": "bool", "default": false, "description": "Verbose diagnostics to stderr (also honors RUST_LOG)"},
                 },
                 "exit_codes": {
                     "0": "Success",
@@ -582,14 +587,19 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 },
                 "envelope": {
                     "version": "1",
-                    "success": "{ version, status, data|results }",
-                    "error": "{ version, status, error: { code, message, suggestion } }",
+                    "success": "{ version, status, query, mode, results, metadata: { elapsed_ms, result_count, providers_queried, providers_failed, provider_failures } }",
+                    "error": "{ version, status, error: { code, message, suggestion, provider_failures } }",
+                    "statuses": ["success", "partial_success", "no_results"],
+                    "provider_failure": "{ provider, category, http_status, code, reason, retryable }",
+                    "failure_categories": ["auth", "billing_quota", "rate_limit", "timeout", "network", "bad_request", "server", "parse", "config", "other"],
                 },
                 "providers": providers_info,
-                "modes": ["auto","general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social"],
+                "modes": ["general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social"],
+                "routing": "explicit — the caller picks -m/--mode and/or -p/--providers. There is no automatic intent detection; an unspecified mode is a plain general multi-provider web search.",
                 "config": {
                     "path": config::config_path().to_string_lossy(),
                     "env_prefix": "SEARCH_",
+                    "key_precedence": "<PROVIDER>_API_KEY env > SEARCH_KEYS_* env > config file",
                 },
                 "auto_json_when_piped": true,
                 "not_suited_for": {
@@ -706,17 +716,44 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let valid_count = results.iter().filter(|r| r.verdict == "valid").count();
             let invalid_count = results.iter().filter(|r| r.verdict == "invalid").count();
             let catch_all_count = results.iter().filter(|r| r.verdict == "catch_all").count();
+            // "Couldn't probe" verdicts — e.g. SMTP port 25 blocked on the
+            // network (common on cloud/CI egress).
+            let unprobed = results
+                .iter()
+                .filter(|r| r.verdict == "unreachable" || r.verdict == "timeout")
+                .count();
+            let syntax_count = results
+                .iter()
+                .filter(|r| r.verdict == "syntax_error")
+                .count();
+            let total = results.len();
+
+            // Derive status/exit from verdicts instead of always success/0 —
+            // "every probe was blocked" must not read as a clean pass. (`invalid`
+            // is a successful *negative* answer, so it stays exit 0.)
+            let (status, exit) = if total == 0 {
+                ("no_results", 0)
+            } else if unprobed == total {
+                ("all_probes_unreachable", 1)
+            } else if syntax_count == total {
+                ("invalid_input", 3)
+            } else if unprobed > 0 {
+                ("partial_success", 0)
+            } else {
+                ("success", 0)
+            };
 
             let response = serde_json::json!({
-                "version": "1",
-                "status": "success",
+                "version": types::ENVELOPE_VERSION,
+                "status": status,
                 "results": results,
                 "metadata": {
                     "elapsed_ms": elapsed,
-                    "verified_count": results.len(),
+                    "verified_count": total,
                     "valid_count": valid_count,
                     "invalid_count": invalid_count,
                     "catch_all_count": catch_all_count,
+                    "unreachable_count": unprobed,
                 }
             });
 
@@ -726,7 +763,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 verify::render_table(&results);
             }
 
-            Ok(0)
+            Ok(exit)
         }
 
         Commands::Update { check } => {
