@@ -213,3 +213,70 @@ fn suggestion_for_failures(failed: &[ProviderFailure]) -> String {
         "All providers failed. Run `search config check` to verify configuration.".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::FailureCategory;
+
+    fn api(status: u16) -> SearchError {
+        SearchError::Api {
+            provider: "x",
+            code: "api_error",
+            message: "m".into(),
+            status: Some(status),
+        }
+    }
+
+    #[test]
+    fn category_derived_from_http_status() {
+        assert_eq!(api(401).category(), FailureCategory::Auth);
+        assert_eq!(api(403).category(), FailureCategory::Auth);
+        assert_eq!(api(402).category(), FailureCategory::BillingQuota);
+        assert_eq!(api(429).category(), FailureCategory::RateLimit);
+        assert_eq!(api(500).category(), FailureCategory::Server);
+        assert_eq!(api(404).category(), FailureCategory::BadRequest);
+    }
+
+    #[test]
+    fn only_transient_categories_retry() {
+        assert!(api(503).is_retryable());
+        assert!(api(429).is_retryable());
+        assert!(!api(401).is_retryable());
+        assert!(!api(402).is_retryable());
+        assert!(!api(400).is_retryable());
+    }
+
+    #[test]
+    fn all_providers_failed_exit_code_reflects_cause() {
+        let auth = vec![api(401).to_provider_failure("a")];
+        assert_eq!(
+            SearchError::AllProvidersFailed { failed: auth }.exit_code(),
+            2
+        );
+        let rate = vec![SearchError::RateLimited { provider: "a" }.to_provider_failure("a")];
+        assert_eq!(
+            SearchError::AllProvidersFailed { failed: rate }.exit_code(),
+            4
+        );
+        let mixed = vec![
+            api(503).to_provider_failure("a"),
+            api(401).to_provider_failure("b"),
+        ];
+        assert_eq!(
+            SearchError::AllProvidersFailed { failed: mixed }.exit_code(),
+            1
+        );
+    }
+
+    #[test]
+    fn invalid_input_is_exit_3() {
+        assert_eq!(
+            SearchError::InvalidInput {
+                message: "x".into()
+            }
+            .exit_code(),
+            3
+        );
+    }
+}

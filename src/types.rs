@@ -208,3 +208,34 @@ pub struct ErrorDetail {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_failures: Vec<ProviderFailure>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FailureCategory, ResponseStatus};
+
+    #[test]
+    fn status_ladder() {
+        assert_eq!(
+            ResponseStatus::classify(false, false),
+            ResponseStatus::Success
+        );
+        assert_eq!(
+            ResponseStatus::classify(false, true),
+            ResponseStatus::PartialSuccess
+        );
+        assert_eq!(
+            ResponseStatus::classify(true, true),
+            ResponseStatus::NoResults
+        );
+        assert_eq!(
+            ResponseStatus::classify(true, false),
+            ResponseStatus::NoResults
+        );
+    }
+
+    #[test]
+    fn category_serializes_snake_case() {
+        let j = serde_json::to_string(&FailureCategory::BillingQuota).unwrap();
+        assert_eq!(j, "\"billing_quota\"");
+    }
+}
