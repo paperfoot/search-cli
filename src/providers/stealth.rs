@@ -39,23 +39,14 @@ impl Stealth {
             ),
         );
         headers.insert("Sec-Ch-Ua-Mobile", HeaderValue::from_static("?0"));
-        headers.insert(
-            "Sec-Ch-Ua-Platform",
-            HeaderValue::from_static(r#""macOS""#),
-        );
+        headers.insert("Sec-Ch-Ua-Platform", HeaderValue::from_static(r#""macOS""#));
         headers.insert("Sec-Fetch-Dest", HeaderValue::from_static("document"));
         headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("navigate"));
         headers.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
         headers.insert("Sec-Fetch-User", HeaderValue::from_static("?1"));
-        headers.insert(
-            "Upgrade-Insecure-Requests",
-            HeaderValue::from_static("1"),
-        );
+        headers.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
         headers.insert("DNT", HeaderValue::from_static("1"));
-        headers.insert(
-            "Cache-Control",
-            HeaderValue::from_static("max-age=0"),
-        );
+        headers.insert("Cache-Control", HeaderValue::from_static("max-age=0"));
         headers.insert(
             "Accept-Encoding",
             HeaderValue::from_static("gzip, deflate, br"),
@@ -88,9 +79,10 @@ impl Stealth {
             req = req.header("Referer", referer);
         }
 
-        let resp = req.send().await.map_err(|e| {
-            SearchError::Config(format!("Stealth request failed: {e}"))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SearchError::Config(format!("Stealth request failed: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -103,9 +95,10 @@ impl Stealth {
         }
 
         let final_url = url_str.to_string(); // use original URL (rquest may not expose final URL)
-        let html_bytes = resp.bytes().await.map_err(|e| {
-            SearchError::Config(format!("Failed to read body: {e}"))
-        })?;
+        let html_bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| SearchError::Config(format!("Failed to read body: {e}")))?;
         let html = String::from_utf8_lossy(&html_bytes).into_owned();
 
         // Try readability first, fallback to raw text extraction

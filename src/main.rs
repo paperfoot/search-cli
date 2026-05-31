@@ -49,8 +49,7 @@ fn init_tracing(debug: bool) {
     } else {
         "warn"
     };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -89,8 +88,7 @@ async fn main() {
         Err(e) => {
             if matches!(
                 e.kind(),
-                clap::error::ErrorKind::DisplayHelp
-                    | clap::error::ErrorKind::DisplayVersion
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
                 let format = OutputFormat::detect(json_flag);
                 match format {
@@ -100,10 +98,7 @@ async fn main() {
                             "status": "success",
                             "data": { "usage": e.to_string().trim_end() },
                         });
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&envelope).unwrap()
-                        );
+                        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
                         std::process::exit(0);
                     }
                     OutputFormat::Table => e.exit(),
@@ -239,7 +234,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     }
                     return Ok(0);
                 } else {
-                    let err = errors::SearchError::Config("No cached results found. Run a search first.".into());
+                    let err = errors::SearchError::Config(
+                        "No cached results found. Run a search first.".into(),
+                    );
                     if ctx.is_json() {
                         output::json::render_error(&err);
                     } else {
@@ -252,13 +249,25 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // Validate provider names early
             if let Some(ref providers) = args.providers {
                 const KNOWN: &[&str] = &[
-                    "parallel", "brave", "serper", "exa", "jina", "firecrawl", "tavily",
-                    "serpapi", "perplexity", "browserless", "stealth", "xai",
+                    "parallel",
+                    "brave",
+                    "serper",
+                    "exa",
+                    "jina",
+                    "firecrawl",
+                    "tavily",
+                    "serpapi",
+                    "perplexity",
+                    "browserless",
+                    "stealth",
+                    "xai",
                 ];
                 for p in providers {
                     if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
                         let err = errors::SearchError::Config(format!(
-                            "Unknown provider '{}'. Valid: {}", p, KNOWN.join(", ")
+                            "Unknown provider '{}'. Valid: {}",
+                            p,
+                            KNOWN.join(", ")
                         ));
                         if ctx.is_json() {
                             output::json::render_error(&err);
@@ -310,9 +319,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     .unwrap_or_default();
                 sp.set_message(format!(
                     "\"{}\" [{}{}]",
-                    args.query,
-                    args.mode,
-                    provider_hint
+                    args.query, args.mode, provider_hint
                 ));
                 sp.enable_steady_tick(std::time::Duration::from_millis(100));
                 Some(sp)
@@ -360,7 +367,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             ("perplexity", !app.config.keys.perplexity.is_empty()),
                             ("browserless", !app.config.keys.browserless.is_empty()),
                             ("xai", !app.config.keys.xai.is_empty()),
-                        ].iter().filter(|(_, v)| *v).map(|(k, _)| *k).collect();
+                        ]
+                        .iter()
+                        .filter(|(_, v)| *v)
+                        .map(|(k, _)| *k)
+                        .collect();
                         let info = serde_json::json!({
                             "version": "1",
                             "status": "success",
@@ -396,8 +407,10 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             .iter()
                             .map(|p| (p.name(), p.is_configured()))
                             .collect();
-                        let configured: Vec<&str> = all.iter().filter(|(_, v)| *v).map(|(k, _)| *k).collect();
-                        let unconfigured: Vec<&str> = all.iter().filter(|(_, v)| !v).map(|(k, _)| *k).collect();
+                        let configured: Vec<&str> =
+                            all.iter().filter(|(_, v)| *v).map(|(k, _)| *k).collect();
+                        let unconfigured: Vec<&str> =
+                            all.iter().filter(|(_, v)| !v).map(|(k, _)| *k).collect();
                         let total = all.len();
                         output::json::render_value(&serde_json::json!({
                             "version": "1",
@@ -611,9 +624,10 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     std::fs::read_to_string(path)?
                 };
                 emails.extend(
-                    content.lines()
+                    content
+                        .lines()
                         .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty() && l.contains('@'))
+                        .filter(|l| !l.is_empty() && l.contains('@')),
                 );
             }
 
@@ -717,7 +731,8 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     },
                     Err(e) => {
                         if ctx.is_json() {
-                            let err = errors::SearchError::Config(format!("Update check failed: {e}"));
+                            let err =
+                                errors::SearchError::Config(format!("Update check failed: {e}"));
                             output::json::render_error(&err);
                         } else {
                             eprintln!("Update check failed: {e}");

@@ -108,9 +108,18 @@ pub trait Provider: Send + Sync {
         Duration::from_secs(10)
     }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError>;
-    async fn search_news(&self, query: &str, count: usize, opts: &SearchOpts)
-        -> Result<Vec<SearchResult>, SearchError>;
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError>;
+    async fn search_news(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError>;
 }
 
 pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {

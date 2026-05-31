@@ -15,10 +15,26 @@ use tokio::time::timeout;
 /// Which providers to query for each mode
 fn providers_for_mode(mode: Mode) -> &'static [&'static str] {
     match mode {
-        Mode::Auto | Mode::General => &["parallel", "brave", "serper", "exa", "jina", "tavily", "perplexity"],
+        Mode::Auto | Mode::General => &[
+            "parallel",
+            "brave",
+            "serper",
+            "exa",
+            "jina",
+            "tavily",
+            "perplexity",
+        ],
         Mode::News => &["parallel", "brave", "serper", "tavily", "perplexity"],
         Mode::Academic => &["exa", "serper", "tavily", "perplexity"],
-        Mode::Deep => &["parallel", "brave", "exa", "serper", "tavily", "perplexity", "xai"],
+        Mode::Deep => &[
+            "parallel",
+            "brave",
+            "exa",
+            "serper",
+            "tavily",
+            "perplexity",
+            "xai",
+        ],
         Mode::Scholar => &["serper", "serpapi"],
         Mode::Patents => &["serper"],
         Mode::People => &["exa"],
@@ -41,11 +57,11 @@ pub async fn execute_search(
     let start = Instant::now();
     let query_arc: Arc<str> = Arc::from(query);
 
-    // Speculative Execution: If in Auto mode, we don't wait for classification 
+    // Speculative Execution: If in Auto mode, we don't wait for classification
     // to start the most likely providers (Brave, Serper).
     let mut speculative_set = JoinSet::new();
     let is_auto = mode == Mode::Auto;
-    
+
     if is_auto && only_providers.is_none() {
         // Only speculate if we have keys and it's not a filtered provider list
         if !ctx.config.keys.brave.is_empty() {
@@ -73,10 +89,7 @@ pub async fn execute_search(
     // If auto resolved to a mode where Brave/Serper aren't wanted,
     // abort speculative tasks to avoid mixing generic web results into
     // intent-specific searches (e.g. news, social, academic).
-    let spec_compatible = matches!(
-        resolved_mode,
-        Mode::Auto | Mode::General | Mode::Deep
-    );
+    let spec_compatible = matches!(resolved_mode, Mode::Auto | Mode::General | Mode::Deep);
     if !spec_compatible {
         speculative_set.abort_all();
         // Drain aborted tasks so they don't merge later
@@ -91,8 +104,10 @@ pub async fn execute_search(
         .filter(|p| {
             let name = p.name();
             // Don't restart speculative ones (they already launched above)
-            if is_auto && only_providers.is_none() && (name == "brave" || name == "serper") { return false; }
-            
+            if is_auto && only_providers.is_none() && (name == "brave" || name == "serper") {
+                return false;
+            }
+
             let in_mode_set = wanted.contains(&name);
             let in_filter = only_providers
                 .as_ref()
@@ -111,8 +126,12 @@ pub async fn execute_search(
 
     // Re-add speculative ones to the tracking list (only if they weren't aborted)
     if is_auto && only_providers.is_none() && spec_compatible {
-        if !ctx.config.keys.brave.is_empty() { providers_queried.push("brave".to_string()); }
-        if !ctx.config.keys.serper.is_empty() { providers_queried.push("serper".to_string()); }
+        if !ctx.config.keys.brave.is_empty() {
+            providers_queried.push("brave".to_string());
+        }
+        if !ctx.config.keys.serper.is_empty() {
+            providers_queried.push("serper".to_string());
+        }
     }
 
     // For Deep mode, also launch Brave LLM Context API in parallel
@@ -122,7 +141,8 @@ pub async fn execute_search(
         let o = opts.clone();
         let brave = providers::brave::Brave::new(ctx.clone());
         set.spawn(async move {
-            let result = timeout(Duration::from_secs(15), brave.search_llm_context(&q, c, &o)).await;
+            let result =
+                timeout(Duration::from_secs(15), brave.search_llm_context(&q, c, &o)).await;
             ("brave_llm_context", result)
         });
         providers_queried.push("brave_llm_context".to_string());
@@ -429,7 +449,6 @@ fn timeout_failure(provider: &str) -> ProviderFailure {
     }
 }
 
-
 /// Main dispatch: routes to execute_search or execute_special based on mode
 pub async fn run(
     ctx: Arc<AppContext>,
@@ -445,8 +464,15 @@ pub async fn run(
     let mut response = if mode == Mode::Auto {
         let resolved = classify_intent(query);
         match resolved {
-            Mode::Scholar | Mode::Patents | Mode::Images | Mode::Places | Mode::People
-            | Mode::Similar | Mode::Scrape | Mode::Extract | Mode::Social => {
+            Mode::Scholar
+            | Mode::Patents
+            | Mode::Images
+            | Mode::Places
+            | Mode::People
+            | Mode::Similar
+            | Mode::Scrape
+            | Mode::Extract
+            | Mode::Social => {
                 execute_special(ctx, query, resolved, count, only_providers, opts).await?
             }
             // Pass Auto to execute_search — it handles speculation + classification internally
@@ -454,8 +480,15 @@ pub async fn run(
         }
     } else {
         match mode {
-            Mode::Scholar | Mode::Patents | Mode::Images | Mode::Places | Mode::People
-            | Mode::Similar | Mode::Scrape | Mode::Extract | Mode::Social => {
+            Mode::Scholar
+            | Mode::Patents
+            | Mode::Images
+            | Mode::Places
+            | Mode::People
+            | Mode::Similar
+            | Mode::Scrape
+            | Mode::Extract
+            | Mode::Social => {
                 execute_special(ctx, query, mode, count, only_providers, opts).await?
             }
             _ => execute_search(ctx, query, mode, count, only_providers, opts).await?,

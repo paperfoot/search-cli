@@ -119,7 +119,9 @@ impl super::Provider for Browserless {
         "browserless"
     }
 
-    fn env_keys(&self) -> &[&'static str] { &["BROWSERLESS_API_KEY", "SEARCH_KEYS_BROWSERLESS"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["BROWSERLESS_API_KEY", "SEARCH_KEYS_BROWSERLESS"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["scrape", "extract"]
     }

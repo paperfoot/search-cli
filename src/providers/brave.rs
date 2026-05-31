@@ -97,7 +97,12 @@ impl super::Provider for Brave {
         Duration::from_secs(10)
     }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "brave" });
         }
@@ -113,7 +118,11 @@ impl super::Provider for Brave {
                 .get("https://api.search.brave.com/res/v1/web/search")
                 .header("X-Subscription-Token", api_key.as_str())
                 .header("Accept", "application/json")
-                .query(&[("q", q.as_str()), ("count", &count_str), ("extra_snippets", "true")]);
+                .query(&[
+                    ("q", q.as_str()),
+                    ("count", &count_str),
+                    ("extra_snippets", "true"),
+                ]);
 
             if let Some(f) = freshness {
                 req = req.query(&[("freshness", f)]);
@@ -125,11 +134,11 @@ impl super::Provider for Brave {
 
             let body_bytes = resp.bytes().await?;
             let mut body_vec = body_bytes.to_vec();
-            let body: BraveResponse = simd_json::from_slice(&mut body_vec)
-                .map_err(|e| SearchError::Api {
+            let body: BraveResponse =
+                simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
                     provider: "brave",
                     code: "json_error",
-                status: None,
+                    status: None,
                     message: e.to_string(),
                 })?;
             let results = body
@@ -162,7 +171,12 @@ impl super::Provider for Brave {
         .await
     }
 
-    async fn search_news(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_news(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "brave" });
         }
@@ -190,11 +204,11 @@ impl super::Provider for Brave {
 
             let body_bytes = resp.bytes().await?;
             let mut body_vec = body_bytes.to_vec();
-            let body: BraveResponse = simd_json::from_slice(&mut body_vec)
-                .map_err(|e| SearchError::Api {
+            let body: BraveResponse =
+                simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
                     provider: "brave",
                     code: "json_error",
-                status: None,
+                    status: None,
                     message: e.to_string(),
                 })?;
             let results = body
@@ -221,7 +235,12 @@ impl super::Provider for Brave {
 
 impl Brave {
     /// LLM Context API — returns pre-extracted, relevance-scored content for RAG/grounding
-    pub async fn search_llm_context(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    pub async fn search_llm_context(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         if self.api_key().is_empty() {
             return Err(SearchError::AuthMissing { provider: "brave" });
         }
@@ -256,16 +275,25 @@ impl Brave {
             let mut results = Vec::new();
 
             // Parse grounding.generic array
-            if let Some(generic) = body.pointer("/grounding/generic").and_then(|v| v.as_array()) {
+            if let Some(generic) = body
+                .pointer("/grounding/generic")
+                .and_then(|v| v.as_array())
+            {
                 for item in generic {
                     let url = item.get("url").and_then(|v| v.as_str()).unwrap_or_default();
-                    let title = item.get("title").and_then(|v| v.as_str()).unwrap_or_default();
-                    let snippets = item.get("snippets")
+                    let title = item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let snippets = item
+                        .get("snippets")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter()
-                            .filter_map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n"))
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
                         .unwrap_or_default();
 
                     results.push(SearchResult {

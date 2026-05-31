@@ -39,7 +39,9 @@ impl super::Provider for Jina {
         "jina"
     }
 
-    fn env_keys(&self) -> &[&'static str] { &["JINA_API_KEY", "SEARCH_KEYS_JINA"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["JINA_API_KEY", "SEARCH_KEYS_JINA"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["general", "extract"]
     }
@@ -52,7 +54,12 @@ impl super::Provider for Jina {
         Duration::from_secs(15)
     }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "jina" });
         }

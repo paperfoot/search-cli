@@ -1,4 +1,6 @@
-use crate::types::{ErrorDetail, ErrorResponse, FailureCategory, ProviderFailure, ENVELOPE_VERSION};
+use crate::types::{
+    ErrorDetail, ErrorResponse, FailureCategory, ProviderFailure, ENVELOPE_VERSION,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]

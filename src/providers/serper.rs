@@ -98,12 +98,35 @@ fn parse_organic(body: &serde_json::Value, source: &str) -> Vec<SearchResult> {
         .map(|arr| {
             arr.iter()
                 .map(|item| {
-                    let title = item.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                    let url = item.get("link").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                    let snippet = item.get("snippet").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let title = item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let url = item
+                        .get("link")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let snippet = item
+                        .get("snippet")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     let published = item.get("date").and_then(|v| v.as_str()).map(String::from);
-                    let image_url = item.get("imageUrl").and_then(|v| v.as_str()).map(String::from);
-                    SearchResult { title, url, snippet, source: source.to_string(), published, image_url, extra: None }
+                    let image_url = item
+                        .get("imageUrl")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    SearchResult {
+                        title,
+                        url,
+                        snippet,
+                        source: source.to_string(),
+                        published,
+                        image_url,
+                        extra: None,
+                    }
                 })
                 .collect()
         })
@@ -112,39 +135,82 @@ fn parse_organic(body: &serde_json::Value, source: &str) -> Vec<SearchResult> {
 
 #[async_trait]
 impl super::Provider for Serper {
-    fn name(&self) -> &'static str { "serper" }
-    fn capabilities(&self) -> &[&'static str] { &["general", "news", "scholar", "patents", "images", "places"] }
-    fn env_keys(&self) -> &[&'static str] { &["SERPER_API_KEY", "SEARCH_KEYS_SERPER"] }
-    fn is_configured(&self) -> bool { !self.api_key().is_empty() }
-    fn timeout(&self) -> Duration { Duration::from_secs(10) }
+    fn name(&self) -> &'static str {
+        "serper"
+    }
+    fn capabilities(&self) -> &[&'static str] {
+        &["general", "news", "scholar", "patents", "images", "places"]
+    }
+    fn env_keys(&self) -> &[&'static str] {
+        &["SERPER_API_KEY", "SEARCH_KEYS_SERPER"]
+    }
+    fn is_configured(&self) -> bool {
+        !self.api_key().is_empty()
+    }
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(10)
+    }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let body = self.query_endpoint("search", query, count, opts).await?;
         Ok(parse_organic(&body, "serper"))
     }
 
-    async fn search_news(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_news(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let body = self.query_endpoint("news", query, count, opts).await?;
         Ok(parse_organic(&body, "serper_news"))
     }
 }
 
 impl Serper {
-    pub async fn search_scholar(&self, query: &str, count: usize) -> Result<Vec<SearchResult>, SearchError> {
+    pub async fn search_scholar(
+        &self,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         self.search_special("scholar", query, count).await
     }
-    pub async fn search_patents(&self, query: &str, count: usize) -> Result<Vec<SearchResult>, SearchError> {
+    pub async fn search_patents(
+        &self,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         self.search_special("patents", query, count).await
     }
-    pub async fn search_images(&self, query: &str, count: usize) -> Result<Vec<SearchResult>, SearchError> {
+    pub async fn search_images(
+        &self,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         self.search_special("images", query, count).await
     }
-    pub async fn search_places(&self, query: &str, count: usize) -> Result<Vec<SearchResult>, SearchError> {
+    pub async fn search_places(
+        &self,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         self.search_special("places", query, count).await
     }
 
-    async fn search_special(&self, endpoint: &str, query: &str, count: usize) -> Result<Vec<SearchResult>, SearchError> {
-        let body = self.query_endpoint(endpoint, query, count, &SearchOpts::default()).await?;
+    async fn search_special(
+        &self,
+        endpoint: &str,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let body = self
+            .query_endpoint(endpoint, query, count, &SearchOpts::default())
+            .await?;
         Ok(parse_organic(&body, &format!("serper_{endpoint}")))
     }
 }
