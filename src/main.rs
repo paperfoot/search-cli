@@ -22,19 +22,61 @@ use tokio::net::lookup_host;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Pre-scan argv for --json before clap parses. Ensures --json works on
-/// help, version, and parse-error paths where Cli hasn't been populated.
-fn has_json_flag() -> bool {
-    let mut past_dashdash = false;
+/// Global flags read straight from argv. Needed because `query_words` uses
+/// `trailing_var_arg`, which otherwise swallows flags placed AFTER a bare query
+/// (`search foo --json` — clap never sees the `--json`), and because the
+/// help/version/parse-error paths run before clap has populated `Cli`.
+#[derive(Default, Clone, Copy)]
+struct GlobalFlags {
+    json: bool,
+    quiet: bool,
+    last: bool,
+    x_only: bool,
+    debug: bool,
+}
+
+fn scan_global_flags() -> GlobalFlags {
+    let mut f = GlobalFlags::default();
     for arg in std::env::args_os().skip(1) {
+        // Everything after `--` is a literal query token, not a flag.
         if arg == "--" {
-            past_dashdash = true;
+            break;
         }
-        if !past_dashdash && arg == "--json" {
-            return true;
+        match arg.to_str() {
+            Some("--json") => f.json = true,
+            Some("--quiet") => f.quiet = true,
+            Some("--last") => f.last = true,
+            Some("--x") => f.x_only = true,
+            Some("--debug") | Some("--verbose") => f.debug = true,
+            _ => {}
         }
     }
-    false
+    f
+}
+
+/// Global-flag tokens to strip from a bare query that `trailing_var_arg`
+/// captured, so `search foo --json` searches "foo", not "foo --json".
+const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--debug", "--verbose"];
+
+/// Initialize tracing to stderr so provider/engine diagnostics are never silently
+/// dropped. Honors `RUST_LOG`; `--debug` raises the default level to `debug`.
+/// Writes to stderr only, keeping JSON envelopes on stdout machine-parseable.
+fn init_tracing(debug: bool) {
+    use tracing_subscriber::{fmt, EnvFilter};
+    // `--debug` shows app-level debug but mutes noisy transport crates so the
+    // signal (provider/engine diagnostics) isn't buried in connection spam.
+    let default = if debug {
+        "debug,hyper=warn,hyper_util=warn,reqwest=warn,h2=warn,rustls=warn,tower=warn"
+    } else {
+        "warn"
+    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .without_time()
+        .try_init();
 }
 
 #[tokio::main]
@@ -58,17 +100,19 @@ async fn main() {
     // 2. Start loading config in parallel with CLI parsing
     let config_handle = tokio::task::spawn_blocking(load_config);
 
-    // 3. Pre-scan --json before clap parses
-    let json_flag = has_json_flag();
+    // 3. Pre-scan global flags before clap parses (covers flags trailing a bare
+    //    query, plus the help/version/error paths). Init tracing immediately.
+    let flags = scan_global_flags();
+    init_tracing(flags.debug);
+    let json_flag = flags.json;
 
     // 4. CLI Parsing — use try_parse so we own error handling
-    let cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(
                 e.kind(),
-                clap::error::ErrorKind::DisplayHelp
-                    | clap::error::ErrorKind::DisplayVersion
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
                 let format = OutputFormat::detect(json_flag);
                 match format {
@@ -78,50 +122,57 @@ async fn main() {
                             "status": "success",
                             "data": { "usage": e.to_string().trim_end() },
                         });
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&envelope).unwrap()
-                        );
+                        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
                         std::process::exit(0);
                     }
                     OutputFormat::Table => e.exit(),
                 }
             }
 
-            // Parse errors — we own the exit code, always 3.
-            let format = OutputFormat::detect(json_flag);
-            match format {
-                OutputFormat::Json => {
-                    let envelope = serde_json::json!({
-                        "version": "1",
-                        "status": "error",
-                        "error": {
-                            "code": "invalid_input",
-                            "message": e.to_string(),
-                            "suggestion": "Check arguments with: search --help",
-                        },
-                    });
-                    eprintln!(
-                        "{}",
-                        serde_json::to_string_pretty(&envelope).unwrap()
-                    );
-                }
-                OutputFormat::Table => {
-                    eprint!("{e}");
-                }
+            // Parse errors — route through the typed error model (exit 3) so the
+            // code/exit namespace lives in one place (errors.rs), not inline here.
+            let err = errors::SearchError::InvalidInput {
+                message: e.to_string(),
+            };
+            match OutputFormat::detect(json_flag) {
+                OutputFormat::Json => output::json::render_error(&err),
+                // Keep clap's rich, colored usage message for humans.
+                OutputFormat::Table => eprint!("{e}"),
             }
-            std::process::exit(3);
+            std::process::exit(err.exit_code());
         }
     };
+
+    // Merge pre-scanned flags so flags trailing a bare query still take effect.
+    cli.json |= flags.json;
+    cli.quiet |= flags.quiet;
+    cli.last |= flags.last;
+    cli.x_only |= flags.x_only;
+    cli.debug |= flags.debug;
 
     let ctx = Ctx::new(cli.json, cli.quiet);
 
     // 5. Wait for config
-    let config = match config_handle.await.unwrap() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Config error: {e}");
-            std::process::exit(1);
+    let config = match config_handle.await {
+        Ok(Ok(c)) => c,
+        // A malformed config is a config error (exit 2 + JSON envelope when
+        // piped), not a transient exit-1 plaintext message — otherwise an agent
+        // loops forever on an unfixable parse error and can't read the reason.
+        Ok(Err(e)) => {
+            let err = errors::SearchError::Config(e.to_string());
+            match OutputFormat::detect(json_flag) {
+                OutputFormat::Json => output::json::render_error(&err),
+                OutputFormat::Table => eprintln!("Error: {err}"),
+            }
+            std::process::exit(err.exit_code());
+        }
+        Err(join_err) => {
+            let err = errors::SearchError::Config(format!("config load task failed: {join_err}"));
+            match OutputFormat::detect(json_flag) {
+                OutputFormat::Json => output::json::render_error(&err),
+                OutputFormat::Table => eprintln!("Error: {err}"),
+            }
+            std::process::exit(err.exit_code());
         }
     };
 
@@ -150,6 +201,15 @@ async fn main() {
                 output::json::render_error(&e);
             } else {
                 eprintln!("Error: {e}");
+                if let Some(s) = e.suggestion() {
+                    eprintln!("  {s}");
+                }
+                // Give humans the same per-provider detail the JSON envelope carries.
+                if let errors::SearchError::AllProvidersFailed { failed } = &e {
+                    for f in failed {
+                        eprintln!("  - {} [{}]: {}", f.provider, f.category.as_str(), f.reason);
+                    }
+                }
             }
             e.exit_code()
         }
@@ -173,7 +233,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             freshness: None,
         })
     } else if !cli.query_words.is_empty() {
-        let query = cli.query_words.join(" ");
+        // Drop any global-flag tokens trailing_var_arg swallowed into the query
+        // (their effect was already applied via the pre-scan merge in main).
+        let query = cli
+            .query_words
+            .iter()
+            .filter(|w| !GLOBAL_FLAG_TOKENS.contains(&w.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
         Commands::Search(cli::SearchArgs {
             query,
             mode: types::Mode::Auto,
@@ -218,7 +286,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     }
                     return Ok(0);
                 } else {
-                    let err = errors::SearchError::Config("No cached results found. Run a search first.".into());
+                    let err = errors::SearchError::Config(
+                        "No cached results found. Run a search first.".into(),
+                    );
                     if ctx.is_json() {
                         output::json::render_error(&err);
                     } else {
@@ -231,13 +301,25 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // Validate provider names early
             if let Some(ref providers) = args.providers {
                 const KNOWN: &[&str] = &[
-                    "parallel", "brave", "serper", "exa", "jina", "firecrawl", "tavily",
-                    "serpapi", "perplexity", "browserless", "stealth", "xai",
+                    "parallel",
+                    "brave",
+                    "serper",
+                    "exa",
+                    "jina",
+                    "firecrawl",
+                    "tavily",
+                    "serpapi",
+                    "perplexity",
+                    "browserless",
+                    "stealth",
+                    "xai",
                 ];
                 for p in providers {
                     if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
                         let err = errors::SearchError::Config(format!(
-                            "Unknown provider '{}'. Valid: {}", p, KNOWN.join(", ")
+                            "Unknown provider '{}'. Valid: {}",
+                            p,
+                            KNOWN.join(", ")
                         ));
                         if ctx.is_json() {
                             output::json::render_error(&err);
@@ -289,9 +371,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     .unwrap_or_default();
                 sp.set_message(format!(
                     "\"{}\" [{}{}]",
-                    args.query,
-                    args.mode,
-                    provider_hint
+                    args.query, args.mode, provider_hint
                 ));
                 sp.enable_steady_tick(std::time::Duration::from_millis(100));
                 Some(sp)
@@ -318,31 +398,28 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 output::table::render(&response);
             }
 
-            if response.status == "all_providers_failed" {
-                Ok(1)
-            } else {
-                Ok(0)
-            }
+            // Total failure is surfaced as Err(AllProvidersFailed) by the engine
+            // (propagated via `response?` above), so any Ok response here is a
+            // success/partial_success/no_results — all exit 0.
+            Ok(0)
         }
 
         Commands::Config { action } => {
             match action {
                 ConfigAction::Show => {
                     if ctx.is_json() {
-                        let configured: Vec<&str> = [
-                            ("brave", !app.config.keys.brave.is_empty()),
-                            ("serper", !app.config.keys.serper.is_empty()),
-                            ("exa", !app.config.keys.exa.is_empty()),
-                            ("jina", !app.config.keys.jina.is_empty()),
-                            ("firecrawl", !app.config.keys.firecrawl.is_empty()),
-                            ("tavily", !app.config.keys.tavily.is_empty()),
-                            ("serpapi", !app.config.keys.serpapi.is_empty()),
-                            ("perplexity", !app.config.keys.perplexity.is_empty()),
-                            ("browserless", !app.config.keys.browserless.is_empty()),
-                            ("xai", !app.config.keys.xai.is_empty()),
-                        ].iter().filter(|(_, v)| *v).map(|(k, _)| *k).collect();
+                        // Use the same resolver as `config check` (is_configured ->
+                        // resolve_key) so env-only keys count and all 12 providers
+                        // are covered — the old hardcoded list missed parallel +
+                        // stealth and ignored env vars.
+                        let all = providers::build_providers(&app);
+                        let configured: Vec<&str> = all
+                            .iter()
+                            .filter(|p| p.is_configured())
+                            .map(|p| p.name())
+                            .collect();
                         let info = serde_json::json!({
-                            "version": "1",
+                            "version": types::ENVELOPE_VERSION,
                             "status": "success",
                             "config_path": config::config_path().to_string_lossy(),
                             "settings": {
@@ -376,8 +453,10 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             .iter()
                             .map(|p| (p.name(), p.is_configured()))
                             .collect();
-                        let configured: Vec<&str> = all.iter().filter(|(_, v)| *v).map(|(k, _)| *k).collect();
-                        let unconfigured: Vec<&str> = all.iter().filter(|(_, v)| !v).map(|(k, _)| *k).collect();
+                        let configured: Vec<&str> =
+                            all.iter().filter(|(_, v)| *v).map(|(k, _)| *k).collect();
+                        let unconfigured: Vec<&str> =
+                            all.iter().filter(|(_, v)| !v).map(|(k, _)| *k).collect();
                         let total = all.len();
                         output::json::render_value(&serde_json::json!({
                             "version": "1",
@@ -591,9 +670,10 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     std::fs::read_to_string(path)?
                 };
                 emails.extend(
-                    content.lines()
+                    content
+                        .lines()
                         .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty() && l.contains('@'))
+                        .filter(|l| !l.is_empty() && l.contains('@')),
                 );
             }
 
@@ -610,7 +690,17 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             }
 
             let start = std::time::Instant::now();
-            let results = verify::verify_emails(&emails).await;
+            let results = match verify::verify_emails(&emails).await {
+                Ok(r) => r,
+                Err(e) => {
+                    if ctx.is_json() {
+                        output::json::render_error(&e);
+                    } else {
+                        eprintln!("Error: {e}");
+                    }
+                    return Ok(e.exit_code());
+                }
+            };
             let elapsed = start.elapsed().as_millis();
 
             let valid_count = results.iter().filter(|r| r.verdict == "valid").count();
@@ -643,7 +733,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let current = env!("CARGO_PKG_VERSION");
             if check {
                 match self_update::backends::github::Update::configure()
-                    .repo_owner("199-biotechnologies")
+                    .repo_owner("paperfoot")
                     .repo_name("search-cli")
                     .bin_name("search")
                     .current_version(current)
@@ -676,6 +766,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                     provider: "github",
                                     code: "update_check_failed",
                                     message: e.to_string(),
+                                    status: None,
                                 };
                                 output::json::render_error(&err);
                             } else {
@@ -686,7 +777,8 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     },
                     Err(e) => {
                         if ctx.is_json() {
-                            let err = errors::SearchError::Config(format!("Update check failed: {e}"));
+                            let err =
+                                errors::SearchError::Config(format!("Update check failed: {e}"));
                             output::json::render_error(&err);
                         } else {
                             eprintln!("Update check failed: {e}");
@@ -699,7 +791,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     eprintln!("Updating search from v{current}...");
                 }
                 match self_update::backends::github::Update::configure()
-                    .repo_owner("199-biotechnologies")
+                    .repo_owner("paperfoot")
                     .repo_name("search-cli")
                     .bin_name("search")
                     .current_version(current)

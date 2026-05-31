@@ -82,13 +82,7 @@ impl Perplexity {
                         provider: "perplexity",
                     });
                 }
-                if !r.status().is_success() {
-                    return Err(SearchError::Api {
-                        provider: "perplexity",
-                        code: "api_error",
-                        message: format!("HTTP {}", r.status()),
-                    });
-                }
+                let r = super::ok_or_api_error(r, "perplexity").await?;
                 Ok(r.json::<PerplexityResponse>().await?)
             }
         })
@@ -181,7 +175,9 @@ impl super::Provider for Perplexity {
     fn name(&self) -> &'static str {
         "perplexity"
     }
-    fn env_keys(&self) -> &[&'static str] { &["PERPLEXITY_API_KEY", "SEARCH_KEYS_PERPLEXITY"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["PERPLEXITY_API_KEY", "SEARCH_KEYS_PERPLEXITY"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["general", "news", "academic", "deep"]
     }
@@ -214,4 +210,3 @@ impl super::Provider for Perplexity {
             .await
     }
 }
-

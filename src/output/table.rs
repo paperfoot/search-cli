@@ -35,11 +35,7 @@ pub fn render(response: &SearchResponse) {
         let source = &result.source;
 
         if use_color {
-            println!(
-                "{} {}",
-                num.on_cyan().black().bold(),
-                title.bold(),
-            );
+            println!("{} {}", num.on_cyan().black().bold(), title.bold(),);
             println!("  {} {}", "->".dimmed(), url.blue().underline());
             if !snippet.is_empty() {
                 println!("  {}", snippet.dimmed());
@@ -88,18 +84,37 @@ pub fn render(response: &SearchResponse) {
         );
     }
 
-    if !response.metadata.providers_failed.is_empty() {
+    if !response.metadata.provider_failures.is_empty() {
+        // Structured detail: which provider, why, and the underlying reason.
+        for f in &response.metadata.provider_failures {
+            let line = match f.http_status {
+                Some(s) => format!(
+                    "  failed: {} [{} · {}] {}",
+                    f.provider,
+                    f.category.as_str(),
+                    s,
+                    f.reason
+                ),
+                None => format!(
+                    "  failed: {} [{}] {}",
+                    f.provider,
+                    f.category.as_str(),
+                    f.reason
+                ),
+            };
+            if use_color {
+                eprintln!("{}", line.red());
+            } else {
+                eprintln!("{line}");
+            }
+        }
+    } else if !response.metadata.providers_failed.is_empty() {
+        // Fallback for envelopes without structured detail (e.g. replayed cache).
+        let names = response.metadata.providers_failed.join(", ");
         if use_color {
-            eprintln!(
-                "  {} {}",
-                "failed:".red(),
-                response.metadata.providers_failed.join(", ").red()
-            );
+            eprintln!("  {} {}", "failed:".red(), names.red());
         } else {
-            eprintln!(
-                "  failed: {}",
-                response.metadata.providers_failed.join(", ")
-            );
+            eprintln!("  failed: {names}");
         }
     }
     eprintln!();
@@ -109,16 +124,24 @@ fn truncate(s: &str, max: usize) -> String {
     // Clean up: collapse whitespace, remove newlines
     let cleaned: String = s
         .chars()
-        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
 
-    if cleaned.len() <= max {
+    // Char-based (never slices across a UTF-8 boundary, which would panic).
+    if cleaned.chars().count() <= max {
         cleaned
     } else {
-        format!("{}...", &cleaned[..max - 3])
+        let kept: String = cleaned.chars().take(max.saturating_sub(1)).collect();
+        format!("{kept}…")
     }
 }
 

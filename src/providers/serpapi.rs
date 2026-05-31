@@ -30,7 +30,9 @@ impl SerpApi {
         opts: &SearchOpts,
     ) -> Result<serde_json::Value, SearchError> {
         if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing { provider: "serpapi" });
+            return Err(SearchError::AuthMissing {
+                provider: "serpapi",
+            });
         }
 
         let q = augment_query(query, opts);
@@ -62,16 +64,7 @@ impl SerpApi {
                 .send()
                 .await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "serpapi" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "serpapi",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "serpapi").await?;
 
             Ok(resp.json().await?)
         })
@@ -152,7 +145,9 @@ impl super::Provider for SerpApi {
     fn name(&self) -> &'static str {
         "serpapi"
     }
-    fn env_keys(&self) -> &[&'static str] { &["SERPAPI_API_KEY", "SEARCH_KEYS_SERPAPI"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["SERPAPI_API_KEY", "SEARCH_KEYS_SERPAPI"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["general", "news", "scholar", "images"]
     }
@@ -179,7 +174,9 @@ impl super::Provider for SerpApi {
         count: usize,
         opts: &SearchOpts,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let body = self.query_endpoint("google_news", query, count, opts).await?;
+        let body = self
+            .query_endpoint("google_news", query, count, opts)
+            .await?;
         Ok(parse_results(&body, "news_results", "serpapi_news"))
     }
 }

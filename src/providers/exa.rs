@@ -20,7 +20,11 @@ impl Exa {
         super::resolve_key(&self.ctx.config.keys.exa, "EXA_API_KEY")
     }
 
-    async fn post_api(&self, path: &str, body: serde_json::Value) -> Result<ExaResponse, SearchError> {
+    async fn post_api(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<ExaResponse, SearchError> {
         if self.api_key().is_empty() {
             return Err(SearchError::AuthMissing { provider: "exa" });
         }
@@ -38,22 +42,14 @@ impl Exa {
                 .send()
                 .await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "exa" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "exa",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "exa").await?;
 
             let body_bytes = resp.bytes().await?;
             let mut body_vec = body_bytes.to_vec();
             simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
                 provider: "exa",
                 code: "json_error",
+                status: None,
                 message: e.to_string(),
             })
         })
@@ -155,19 +151,39 @@ fn build_search_body(query: &str, count: usize, opts: &SearchOpts) -> serde_json
 
 #[async_trait]
 impl super::Provider for Exa {
-    fn name(&self) -> &'static str { "exa" }
-    fn capabilities(&self) -> &[&'static str] { &["general", "academic", "people", "similar", "deep"] }
-    fn env_keys(&self) -> &[&'static str] { &["EXA_API_KEY", "SEARCH_KEYS_EXA"] }
-    fn is_configured(&self) -> bool { !self.api_key().is_empty() }
-    fn timeout(&self) -> Duration { Duration::from_secs(15) }
+    fn name(&self) -> &'static str {
+        "exa"
+    }
+    fn capabilities(&self) -> &[&'static str] {
+        &["general", "academic", "people", "similar", "deep"]
+    }
+    fn env_keys(&self) -> &[&'static str] {
+        &["EXA_API_KEY", "SEARCH_KEYS_EXA"]
+    }
+    fn is_configured(&self) -> bool {
+        !self.api_key().is_empty()
+    }
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(15)
+    }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let body = build_search_body(query, count, opts);
         let resp = self.post_api("search", body).await?;
         Ok(to_results(resp, "exa"))
     }
 
-    async fn search_news(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_news(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let mut body = build_search_body(query, count, opts);
         body["category"] = json!("news");
         let resp = self.post_api("search", body).await?;
@@ -176,7 +192,11 @@ impl super::Provider for Exa {
 }
 
 impl Exa {
-    pub async fn search_people(&self, query: &str, count: usize) -> Result<Vec<SearchResult>, SearchError> {
+    pub async fn search_people(
+        &self,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let body = json!({
             "query": query, "numResults": count, "type": "auto",
             "category": "people", "contents": { "text": true }
@@ -185,7 +205,11 @@ impl Exa {
         Ok(to_results(resp, "exa_people"))
     }
 
-    pub async fn find_similar(&self, url: &str, count: usize) -> Result<Vec<SearchResult>, SearchError> {
+    pub async fn find_similar(
+        &self,
+        url: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let body = json!({ "url": url, "numResults": count, "contents": { "text": true } });
         let resp = self.post_api("findSimilar", body).await?;
         Ok(to_results(resp, "exa_similar"))

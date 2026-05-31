@@ -82,19 +82,7 @@ impl super::Provider for Parallel {
                 .send()
                 .await?;
 
-            let status = resp.status();
-            if status == 429 {
-                return Err(SearchError::RateLimited {
-                    provider: "parallel",
-                });
-            }
-            if !status.is_success() {
-                return Err(SearchError::Api {
-                    provider: "parallel",
-                    code: "api_error",
-                    message: format!("Parallel API error ({})", status),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "parallel").await?;
 
             let data: ParallelResponse = resp.json().await?;
             let results = data

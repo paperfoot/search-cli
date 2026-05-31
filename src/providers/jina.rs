@@ -39,7 +39,9 @@ impl super::Provider for Jina {
         "jina"
     }
 
-    fn env_keys(&self) -> &[&'static str] { &["JINA_API_KEY", "SEARCH_KEYS_JINA"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["JINA_API_KEY", "SEARCH_KEYS_JINA"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["general", "extract"]
     }
@@ -52,7 +54,12 @@ impl super::Provider for Jina {
         Duration::from_secs(15)
     }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "jina" });
         }
@@ -85,16 +92,7 @@ impl super::Provider for Jina {
                 .send()
                 .await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "jina" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "jina",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "jina").await?;
 
             let body: JinaSearchResponse = resp.json().await?;
             let results = body
@@ -146,13 +144,7 @@ impl Jina {
                 .send()
                 .await?;
 
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "jina",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "jina").await?;
 
             let body: serde_json::Value = resp.json().await?;
             let data = body.get("data");
