@@ -6,10 +6,11 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 11 search providers with 14 search modes.\n\
+    long_about = "Aggregates 12 search providers with 14 search modes.\n\
         Auto-detects intent from your query and routes to the best providers.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
         PROVIDERS:\n  \
+          parallel   Independent web index (Parallel AI), news, deep\n  \
           brave      Independent web index (35B pages), news search\n  \
           serper     Google SERP: web, news, scholar, patents, images, places\n  \
           exa        Neural/semantic search, LinkedIn people, find-similar\n  \
@@ -55,6 +56,10 @@ pub struct Cli {
     /// Search X (Twitter) only — shorthand for -m social -p xai
     #[arg(long = "x", global = true)]
     pub x_only: bool,
+
+    /// Verbose debug logging to stderr (sets log level to debug unless RUST_LOG is set)
+    #[arg(long, global = true, visible_alias = "verbose")]
+    pub debug: bool,
 }
 
 #[derive(Subcommand)]
@@ -178,9 +183,18 @@ pub mod skill {
     fn targets() -> Vec<Target> {
         let h = home();
         vec![
-            Target { name: "Claude Code", path: h.join(".claude/skills/search") },
-            Target { name: "Codex CLI", path: h.join(".codex/skills/search") },
-            Target { name: "Gemini CLI", path: h.join(".gemini/skills/search") },
+            Target {
+                name: "Claude Code",
+                path: h.join(".claude/skills/search"),
+            },
+            Target {
+                name: "Codex CLI",
+                path: h.join(".codex/skills/search"),
+            },
+            Target {
+                name: "Gemini CLI",
+                path: h.join(".gemini/skills/search"),
+            },
         ]
     }
 

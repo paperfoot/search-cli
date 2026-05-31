@@ -227,20 +227,22 @@ search config check      # Health check all providers
 search config set K V    # Set a value
 ```
 
-Environment variables override the config file. Prefix with `SEARCH_KEYS_`:
+Environment variables override the config file, so a freshly-exported or
+CI-injected key always wins over stale local config. Two accepted forms:
 
 ```bash
+# Standard per-provider variables (recommended):
+export BRAVE_API_KEY=your-key
+export SERPER_API_KEY=your-key
+export EXA_API_KEY=your-key
+# ...also PERPLEXITY_API_KEY, JINA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY,
+#        SERPAPI_API_KEY, BROWSERLESS_API_KEY, XAI_API_KEY, PARALLEL_API_KEY
+
+# Or the SEARCH_KEYS_ prefixed form:
 export SEARCH_KEYS_BRAVE=your-key
-export SEARCH_KEYS_SERPER=your-key
-export SEARCH_KEYS_EXA=your-key
-export SEARCH_KEYS_JINA=your-key
-export SEARCH_KEYS_FIRECRAWL=your-key
-export SEARCH_KEYS_TAVILY=your-key
-export SEARCH_KEYS_SERPAPI=your-key
-export SEARCH_KEYS_PERPLEXITY=your-key
-export SEARCH_KEYS_BROWSERLESS=your-key
-export SEARCH_KEYS_XAI=your-key
 ```
+
+Precedence (highest first): `<PROVIDER>_API_KEY` env → `SEARCH_KEYS_*` env → config file.
 
 ## Updating
 
