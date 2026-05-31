@@ -768,77 +768,95 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
         Commands::Update { check } => {
             let current = env!("CARGO_PKG_VERSION");
+
+            // self_update is blocking and builds its own (reqwest blocking)
+            // runtime. Calling it directly from #[tokio::main] panics with
+            // "Cannot drop a runtime in a context where blocking is not
+            // allowed", so run it on a blocking thread, off the async runtime.
             if check {
-                match self_update::backends::github::Update::configure()
-                    .repo_owner("paperfoot")
-                    .repo_name("search-cli")
-                    .bin_name("search")
-                    .current_version(current)
-                    .build()
-                {
-                    Ok(updater) => match updater.get_latest_release() {
-                        Ok(release) => {
-                            let up_to_date = release.version == current;
-                            if ctx.is_json() {
-                                output::json::render_value(&serde_json::json!({
-                                    "version": "1",
-                                    "status": "success",
-                                    "current_version": current,
-                                    "latest_version": release.version,
-                                    "update_available": !up_to_date,
-                                }));
-                            } else if !ctx.suppress_human() {
-                                if !up_to_date {
-                                    eprintln!("Current version: {current}");
-                                    eprintln!("New version available: {}", release.version);
-                                    eprintln!("Run `search update` to install");
-                                } else {
-                                    eprintln!("Already up to date (v{current})");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if ctx.is_json() {
-                                let err = errors::SearchError::Api {
-                                    provider: "github",
-                                    code: "update_check_failed",
-                                    message: e.to_string(),
-                                    status: None,
-                                };
-                                output::json::render_error(&err);
-                            } else {
-                                eprintln!("Could not check for updates: {e}");
-                            }
-                            return Ok(1);
-                        }
-                    },
-                    Err(e) => {
+                let res = tokio::task::spawn_blocking(move || {
+                    self_update::backends::github::Update::configure()
+                        .repo_owner("paperfoot")
+                        .repo_name("search-cli")
+                        .bin_name("search")
+                        .current_version(current)
+                        .build()
+                        .and_then(|u| u.get_latest_release())
+                })
+                .await
+                .map_err(|e| errors::SearchError::Config(format!("update task failed: {e}")))?;
+
+                match res {
+                    Ok(release) => {
+                        let up_to_date = release.version == current;
                         if ctx.is_json() {
-                            let err =
-                                errors::SearchError::Config(format!("Update check failed: {e}"));
+                            output::json::render_value(&serde_json::json!({
+                                "version": types::ENVELOPE_VERSION,
+                                "status": "success",
+                                "current_version": current,
+                                "latest_version": release.version,
+                                "update_available": !up_to_date,
+                            }));
+                        } else if !ctx.suppress_human() {
+                            if !up_to_date {
+                                eprintln!("Current version: {current}");
+                                eprintln!("New version available: {}", release.version);
+                                eprintln!("Run `search update` to install");
+                            } else {
+                                eprintln!("Already up to date (v{current})");
+                            }
+                        }
+                        Ok(0)
+                    }
+                    Err(e) => {
+                        let err = errors::SearchError::Api {
+                            provider: "github",
+                            code: "update_check_failed",
+                            message: e.to_string(),
+                            status: None,
+                        };
+                        if ctx.is_json() {
                             output::json::render_error(&err);
                         } else {
-                            eprintln!("Update check failed: {e}");
+                            eprintln!("Could not check for updates: {e}");
                         }
-                        return Ok(1);
+                        Ok(err.exit_code())
                     }
                 }
             } else {
                 if !ctx.suppress_human() {
                     eprintln!("Updating search from v{current}...");
                 }
-                match self_update::backends::github::Update::configure()
-                    .repo_owner("paperfoot")
-                    .repo_name("search-cli")
-                    .bin_name("search")
-                    .current_version(current)
-                    .build()
-                    .and_then(|u| u.update())
-                {
+                let res = tokio::task::spawn_blocking(
+                    move || -> Result<_, self_update::errors::Error> {
+                        // self_update's default .update() can resolve to the wrong
+                        // (older) release when several are newer than current. Pin
+                        // it to the actual latest tag (get_latest_release is correct).
+                        let latest = self_update::backends::github::Update::configure()
+                            .repo_owner("paperfoot")
+                            .repo_name("search-cli")
+                            .bin_name("search")
+                            .current_version(current)
+                            .build()?
+                            .get_latest_release()?;
+                        self_update::backends::github::Update::configure()
+                            .repo_owner("paperfoot")
+                            .repo_name("search-cli")
+                            .bin_name("search")
+                            .current_version(current)
+                            .target_version_tag(&format!("v{}", latest.version))
+                            .build()?
+                            .update()
+                    },
+                )
+                .await
+                .map_err(|e| errors::SearchError::Config(format!("update task failed: {e}")))?;
+
+                match res {
                     Ok(status) => {
                         if ctx.is_json() {
                             output::json::render_value(&serde_json::json!({
-                                "version": "1",
+                                "version": types::ENVELOPE_VERSION,
                                 "status": "success",
                                 "updated": status.updated(),
                                 "version_installed": status.version(),
@@ -850,20 +868,22 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                 eprintln!("Already up to date (v{current})");
                             }
                         }
+                        Ok(0)
                     }
                     Err(e) => {
+                        let err = errors::SearchError::Config(format!("Update failed: {e}"));
                         if ctx.is_json() {
-                            let err = errors::SearchError::Config(format!("Update failed: {e}"));
                             output::json::render_error(&err);
                         } else {
                             eprintln!("Update failed: {e}");
-                            eprintln!("You can update manually: cargo install agent-search");
+                            eprintln!(
+                                "You can update manually: cargo install agent-search --locked"
+                            );
                         }
-                        return Ok(1);
+                        Ok(err.exit_code())
                     }
                 }
             }
-            Ok(0)
         }
     }
 }

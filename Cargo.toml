@@ -1,6 +1,6 @@
 [package]
 name = "agent-search"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "Unified multi-provider search CLI for AI agents — 12 providers, 14 modes, email verification, one binary"
 license = "MIT"
@@ -31,7 +31,7 @@ directories = "5"
 async-trait = "0.1"
 owo-colors = "4"
 indicatif = "0.17"
-self_update = { version = "0.43", features = ["rustls"] }
+self_update = { version = "0.43", features = ["rustls", "archive-tar", "compression-flate2"] }
 backon = "1"
 url = "2.5.8"
 mimalloc = "0.1.48"
