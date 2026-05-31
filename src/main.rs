@@ -22,20 +22,41 @@ use tokio::net::lookup_host;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Pre-scan argv for --json before clap parses. Ensures --json works on
-/// help, version, and parse-error paths where Cli hasn't been populated.
-fn has_json_flag() -> bool {
-    let mut past_dashdash = false;
+/// Global flags read straight from argv. Needed because `query_words` uses
+/// `trailing_var_arg`, which otherwise swallows flags placed AFTER a bare query
+/// (`search foo --json` — clap never sees the `--json`), and because the
+/// help/version/parse-error paths run before clap has populated `Cli`.
+#[derive(Default, Clone, Copy)]
+struct GlobalFlags {
+    json: bool,
+    quiet: bool,
+    last: bool,
+    x_only: bool,
+    debug: bool,
+}
+
+fn scan_global_flags() -> GlobalFlags {
+    let mut f = GlobalFlags::default();
     for arg in std::env::args_os().skip(1) {
+        // Everything after `--` is a literal query token, not a flag.
         if arg == "--" {
-            past_dashdash = true;
+            break;
         }
-        if !past_dashdash && arg == "--json" {
-            return true;
+        match arg.to_str() {
+            Some("--json") => f.json = true,
+            Some("--quiet") => f.quiet = true,
+            Some("--last") => f.last = true,
+            Some("--x") => f.x_only = true,
+            Some("--debug") | Some("--verbose") => f.debug = true,
+            _ => {}
         }
     }
-    false
+    f
 }
+
+/// Global-flag tokens to strip from a bare query that `trailing_var_arg`
+/// captured, so `search foo --json` searches "foo", not "foo --json".
+const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--debug", "--verbose"];
 
 /// Initialize tracing to stderr so provider/engine diagnostics are never silently
 /// dropped. Honors `RUST_LOG`; `--debug` raises the default level to `debug`.
@@ -79,11 +100,14 @@ async fn main() {
     // 2. Start loading config in parallel with CLI parsing
     let config_handle = tokio::task::spawn_blocking(load_config);
 
-    // 3. Pre-scan --json before clap parses
-    let json_flag = has_json_flag();
+    // 3. Pre-scan global flags before clap parses (covers flags trailing a bare
+    //    query, plus the help/version/error paths). Init tracing immediately.
+    let flags = scan_global_flags();
+    init_tracing(flags.debug);
+    let json_flag = flags.json;
 
     // 4. CLI Parsing — use try_parse so we own error handling
-    let cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(
@@ -119,7 +143,12 @@ async fn main() {
         }
     };
 
-    init_tracing(cli.debug);
+    // Merge pre-scanned flags so flags trailing a bare query still take effect.
+    cli.json |= flags.json;
+    cli.quiet |= flags.quiet;
+    cli.last |= flags.last;
+    cli.x_only |= flags.x_only;
+    cli.debug |= flags.debug;
 
     let ctx = Ctx::new(cli.json, cli.quiet);
 
@@ -204,7 +233,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             freshness: None,
         })
     } else if !cli.query_words.is_empty() {
-        let query = cli.query_words.join(" ");
+        // Drop any global-flag tokens trailing_var_arg swallowed into the query
+        // (their effect was already applied via the pre-scan merge in main).
+        let query = cli
+            .query_words
+            .iter()
+            .filter(|w| !GLOBAL_FLAG_TOKENS.contains(&w.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
         Commands::Search(cli::SearchArgs {
             query,
             mode: types::Mode::Auto,
