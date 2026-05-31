@@ -6,10 +6,11 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 11 search providers with 14 search modes.\n\
+    long_about = "Aggregates 12 search providers with 14 search modes.\n\
         Auto-detects intent from your query and routes to the best providers.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
         PROVIDERS:\n  \
+          parallel   Independent web index (Parallel AI), news, deep\n  \
           brave      Independent web index (35B pages), news search\n  \
           serper     Google SERP: web, news, scholar, patents, images, places\n  \
           exa        Neural/semantic search, LinkedIn people, find-similar\n  \

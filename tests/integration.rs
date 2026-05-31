@@ -34,7 +34,7 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Aggregates 11 search providers"))
+        .stdout(predicate::str::contains("Aggregates 12 search providers"))
         .stdout(predicate::str::contains("brave"))
         .stdout(predicate::str::contains("serper"))
         .stdout(predicate::str::contains("exa"));
@@ -63,10 +63,7 @@ fn test_search_help_shows_modes() {
 
 #[test]
 fn test_agent_info_json() {
-    let output = search_cmd()
-        .arg("agent-info")
-        .output()
-        .unwrap();
+    let output = search_cmd().arg("agent-info").output().unwrap();
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -81,16 +78,16 @@ fn test_agent_info_json() {
 
 #[test]
 fn test_providers_json() {
-    let output = search_cmd()
-        .args(["providers", "--json"])
-        .output()
-        .unwrap();
+    let output = search_cmd().args(["providers", "--json"]).output().unwrap();
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["status"], "success");
     let providers = json["providers"].as_array().unwrap();
-    let names: Vec<&str> = providers.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = providers
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"brave"));
     assert!(names.contains(&"serper"));
     assert!(names.contains(&"exa"));
@@ -161,12 +158,23 @@ fn test_real_general_search() {
 
     let start = Instant::now();
     let output = search_cmd()
-        .args(["search", "-q", "Rust programming language", "--json", "-c", "5"])
+        .args([
+            "search",
+            "-q",
+            "Rust programming language",
+            "--json",
+            "-c",
+            "5",
+        ])
         .output()
         .unwrap();
     let elapsed = start.elapsed();
 
-    assert!(output.status.success(), "search failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["status"], "success");
@@ -183,7 +191,10 @@ fn test_real_general_search() {
 
     // Metadata
     assert!(json["metadata"]["elapsed_ms"].as_u64().unwrap() > 0);
-    assert!(!json["metadata"]["providers_queried"].as_array().unwrap().is_empty());
+    assert!(!json["metadata"]["providers_queried"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     eprintln!(
         "  PASS general search: {} results in {}ms (wall: {}ms)",
@@ -201,7 +212,16 @@ fn test_real_news_search() {
     }
 
     let output = search_cmd()
-        .args(["search", "-q", "technology news", "-m", "news", "--json", "-c", "5"])
+        .args([
+            "search",
+            "-q",
+            "technology news",
+            "-m",
+            "news",
+            "--json",
+            "-c",
+            "5",
+        ])
         .output()
         .unwrap();
 
@@ -222,7 +242,16 @@ fn test_real_academic_search() {
     }
 
     let output = search_cmd()
-        .args(["search", "-q", "CRISPR gene editing", "-m", "academic", "--json", "-c", "5"])
+        .args([
+            "search",
+            "-q",
+            "CRISPR gene editing",
+            "-m",
+            "academic",
+            "--json",
+            "-c",
+            "5",
+        ])
         .output()
         .unwrap();
 
@@ -243,7 +272,16 @@ fn test_real_provider_filter_single() {
     }
 
     let output = search_cmd()
-        .args(["search", "-q", "artificial intelligence", "-p", "exa", "--json", "-c", "3"])
+        .args([
+            "search",
+            "-q",
+            "artificial intelligence",
+            "-p",
+            "exa",
+            "--json",
+            "-c",
+            "3",
+        ])
         .output()
         .unwrap();
 
@@ -255,10 +293,17 @@ fn test_real_provider_filter_single() {
 
     // All results should be from exa
     for r in json["results"].as_array().unwrap() {
-        assert!(r["source"].as_str().unwrap().starts_with("exa"), "unexpected source: {}", r["source"]);
+        assert!(
+            r["source"].as_str().unwrap().starts_with("exa"),
+            "unexpected source: {}",
+            r["source"]
+        );
     }
 
-    eprintln!("  PASS provider filter (exa only): {} results", json["results"].as_array().unwrap().len());
+    eprintln!(
+        "  PASS provider filter (exa only): {} results",
+        json["results"].as_array().unwrap().len()
+    );
 }
 
 #[test]
@@ -269,7 +314,18 @@ fn test_real_domain_filter() {
     }
 
     let output = search_cmd()
-        .args(["search", "-q", "machine learning", "-d", "arxiv.org", "-p", "exa", "--json", "-c", "5"])
+        .args([
+            "search",
+            "-q",
+            "machine learning",
+            "-d",
+            "arxiv.org",
+            "-p",
+            "exa",
+            "--json",
+            "-c",
+            "5",
+        ])
         .output()
         .unwrap();
 
@@ -281,10 +337,17 @@ fn test_real_domain_filter() {
     // All results should be from arxiv.org
     for r in results {
         let url = r["url"].as_str().unwrap();
-        assert!(url.contains("arxiv.org"), "expected arxiv.org URL, got: {}", url);
+        assert!(
+            url.contains("arxiv.org"),
+            "expected arxiv.org URL, got: {}",
+            url
+        );
     }
 
-    eprintln!("  PASS domain filter (arxiv.org): {} results", results.len());
+    eprintln!(
+        "  PASS domain filter (arxiv.org): {} results",
+        results.len()
+    );
 }
 
 #[test]
@@ -295,7 +358,9 @@ fn test_real_freshness_filter() {
     }
 
     let output = search_cmd()
-        .args(["search", "-q", "AI news", "-f", "day", "-p", "serper", "--json", "-c", "5"])
+        .args([
+            "search", "-q", "AI news", "-f", "day", "-p", "serper", "--json", "-c", "5",
+        ])
         .output()
         .unwrap();
 
@@ -323,10 +388,7 @@ fn test_real_last_cache() {
 
     // Replay from cache
     let start = Instant::now();
-    let output2 = search_cmd()
-        .args(["--last", "--json"])
-        .output()
-        .unwrap();
+    let output2 = search_cmd().args(["--last", "--json"]).output().unwrap();
     let cache_elapsed = start.elapsed();
 
     assert!(output2.status.success());
@@ -335,7 +397,11 @@ fn test_real_last_cache() {
     assert!(!json["results"].as_array().unwrap().is_empty());
 
     // Cache replay should be near-instant (< 100ms)
-    assert!(cache_elapsed.as_millis() < 500, "cache replay took {}ms", cache_elapsed.as_millis());
+    assert!(
+        cache_elapsed.as_millis() < 500,
+        "cache replay took {}ms",
+        cache_elapsed.as_millis()
+    );
 
     eprintln!("  PASS cache replay: {}ms", cache_elapsed.as_millis());
 }
@@ -373,7 +439,10 @@ fn test_performance_benchmark() {
             let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             let api_ms = json["metadata"]["elapsed_ms"].as_u64().unwrap_or(0);
             let count = json["results"].as_array().map(|a| a.len()).unwrap_or(0);
-            eprintln!("  query={:<25} results={:<3} api={}ms  wall={}ms", q, count, api_ms, elapsed);
+            eprintln!(
+                "  query={:<25} results={:<3} api={}ms  wall={}ms",
+                q, count, api_ms, elapsed
+            );
             latencies.push(elapsed);
         } else {
             eprintln!("  query={:<25} FAILED", q);
