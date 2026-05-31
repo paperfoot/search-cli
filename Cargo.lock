@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-search"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -25,7 +25,6 @@ dependencies = [
  "owo-colors",
  "predicates",
  "readability",
- "regex",
  "reqwest 0.12.28",
  "rquest",
  "rquest-util",
