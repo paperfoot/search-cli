@@ -37,6 +37,28 @@ fn has_json_flag() -> bool {
     false
 }
 
+/// Initialize tracing to stderr so provider/engine diagnostics are never silently
+/// dropped. Honors `RUST_LOG`; `--debug` raises the default level to `debug`.
+/// Writes to stderr only, keeping JSON envelopes on stdout machine-parseable.
+fn init_tracing(debug: bool) {
+    use tracing_subscriber::{fmt, EnvFilter};
+    // `--debug` shows app-level debug but mutes noisy transport crates so the
+    // signal (provider/engine diagnostics) isn't buried in connection spam.
+    let default = if debug {
+        "debug,hyper=warn,hyper_util=warn,reqwest=warn,h2=warn,rustls=warn,tower=warn"
+    } else {
+        "warn"
+    };
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .without_time()
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() {
     // 1. Pre-emptive DNS resolution (starts immediately in background)
@@ -113,6 +135,8 @@ async fn main() {
             std::process::exit(3);
         }
     };
+
+    init_tracing(cli.debug);
 
     let ctx = Ctx::new(cli.json, cli.quiet);
 
