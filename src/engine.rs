@@ -402,3 +402,35 @@ pub async fn run(
     response.metadata.result_count = response.results.len();
     Ok(response)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_url;
+
+    #[test]
+    fn dedupes_scheme_and_leading_www() {
+        assert_eq!(
+            normalize_url("https://www.example.com/"),
+            normalize_url("http://example.com")
+        );
+    }
+
+    #[test]
+    fn preserves_query_string_so_paginated_urls_stay_distinct() {
+        assert_ne!(
+            normalize_url("https://x.com/r?page=1"),
+            normalize_url("https://x.com/r?page=2")
+        );
+    }
+
+    #[test]
+    fn does_not_strip_www_inside_path() {
+        assert!(normalize_url("https://site.com/files/www.report.pdf").contains("www.report.pdf"));
+    }
+
+    #[test]
+    fn does_not_rewrite_http_inside_query() {
+        assert!(normalize_url("https://a.com/x?redirect=http://b.com")
+            .contains("redirect=http://b.com"));
+    }
+}
