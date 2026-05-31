@@ -345,7 +345,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 && opts.exclude_domains.is_empty()
                 && opts.freshness.is_none()
             {
-                if let Some(cached) = cache::load_query(&args.query, &mode_str) {
+                if let Some(cached) = cache::load_query(&args.query, &mode_str, count) {
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -388,8 +388,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             let response = response?;
 
-            cache::save_last(&response);
-            cache::save_query(&args.query, &mode_str, &response);
+            // Don't cache empty results — a transient no_results shouldn't be
+            // replayed for 5 minutes after the cause clears. (Total failure is
+            // already an Err and never reaches here.)
+            if !response.results.is_empty() {
+                cache::save_last(&response);
+                cache::save_query(&args.query, &mode_str, count, &response);
+            }
             logging::log_search(&response);
 
             if ctx.is_json() {
