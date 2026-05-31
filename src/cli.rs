@@ -55,6 +55,10 @@ pub struct Cli {
     /// Search X (Twitter) only — shorthand for -m social -p xai
     #[arg(long = "x", global = true)]
     pub x_only: bool,
+
+    /// Verbose debug logging to stderr (sets log level to debug unless RUST_LOG is set)
+    #[arg(long, global = true, visible_alias = "verbose")]
+    pub debug: bool,
 }
 
 #[derive(Subcommand)]
