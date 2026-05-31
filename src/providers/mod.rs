@@ -34,12 +34,20 @@ where
     .await
 }
 
-/// Check config key first, then fall back to standard env var.
+/// Resolve a provider API key. **Environment variable wins over the config
+/// file** — CI/session credentials and a freshly-exported key must be able to
+/// override stale local config. (Previously config won, so an out-of-date
+/// `keys.brave` silently shadowed a working `BRAVE_API_KEY` and every brave
+/// request failed.) Because figment already merges `SEARCH_KEYS_*` env over
+/// TOML into `config_value`, the full precedence is:
+/// bare env var (e.g. `BRAVE_API_KEY`) > `SEARCH_KEYS_*` env > config file.
 pub fn resolve_key(config_value: &str, env_var: &str) -> String {
-    if !config_value.is_empty() {
-        return config_value.to_string();
+    if let Ok(v) = std::env::var(env_var) {
+        if !v.is_empty() {
+            return v;
+        }
     }
-    std::env::var(env_var).unwrap_or_default()
+    config_value.to_string()
 }
 
 /// Turn a non-2xx reqwest response into a categorized [`SearchError`], preserving
