@@ -7,9 +7,8 @@ pub const ENVELOPE_VERSION: &str = "1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// Auto-detect intent from query (default)
-    Auto,
-    /// General web search (Brave + Serper + Exa + Jina + Tavily + Perplexity)
+    /// General multi-provider web search (Brave + Serper + Exa + Jina + Tavily
+    /// + Perplexity). Default when no `-m` is given.
     General,
     /// Breaking news and current events (Brave + Serper + Tavily + Perplexity)
     News,
@@ -40,7 +39,6 @@ pub enum Mode {
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Mode::Auto => "auto",
             Mode::General => "general",
             Mode::News => "news",
             Mode::Academic => "academic",
