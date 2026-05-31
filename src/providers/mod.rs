@@ -24,13 +24,23 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, SearchError>>,
 {
+    // Retry only TRANSIENT failures — rate limits, timeouts, network errors,
+    // and 5xx (SearchError::is_retryable). The old predicate matched only
+    // Http(_) transport errors, so 429/503 (mapped to RateLimited/Api before
+    // the predicate saw them) were never retried — backoff was effectively
+    // dead for the cases it exists for. Permanent 4xx (401/402/400) are NOT
+    // retried; that would just burn the budget.
+    //
+    // Budget invariant: worst-case backoff (~0.2s + ~0.4s, jittered) plus one
+    // full attempt must fit inside the smallest provider timeout (10s).
     f.retry(
         ExponentialBuilder::default()
-            .with_min_delay(Duration::from_secs(1))
-            .with_max_delay(Duration::from_secs(4))
-            .with_max_times(3),
+            .with_jitter()
+            .with_min_delay(Duration::from_millis(200))
+            .with_max_delay(Duration::from_millis(800))
+            .with_max_times(2),
     )
-    .when(|e| matches!(e, SearchError::Http(_)))
+    .when(|e| e.is_retryable())
     .await
 }
 
