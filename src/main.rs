@@ -716,17 +716,44 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let valid_count = results.iter().filter(|r| r.verdict == "valid").count();
             let invalid_count = results.iter().filter(|r| r.verdict == "invalid").count();
             let catch_all_count = results.iter().filter(|r| r.verdict == "catch_all").count();
+            // "Couldn't probe" verdicts — e.g. SMTP port 25 blocked on the
+            // network (common on cloud/CI egress).
+            let unprobed = results
+                .iter()
+                .filter(|r| r.verdict == "unreachable" || r.verdict == "timeout")
+                .count();
+            let syntax_count = results
+                .iter()
+                .filter(|r| r.verdict == "syntax_error")
+                .count();
+            let total = results.len();
+
+            // Derive status/exit from verdicts instead of always success/0 —
+            // "every probe was blocked" must not read as a clean pass. (`invalid`
+            // is a successful *negative* answer, so it stays exit 0.)
+            let (status, exit) = if total == 0 {
+                ("no_results", 0)
+            } else if unprobed == total {
+                ("all_probes_unreachable", 1)
+            } else if syntax_count == total {
+                ("invalid_input", 3)
+            } else if unprobed > 0 {
+                ("partial_success", 0)
+            } else {
+                ("success", 0)
+            };
 
             let response = serde_json::json!({
-                "version": "1",
-                "status": "success",
+                "version": types::ENVELOPE_VERSION,
+                "status": status,
                 "results": results,
                 "metadata": {
                     "elapsed_ms": elapsed,
-                    "verified_count": results.len(),
+                    "verified_count": total,
                     "valid_count": valid_count,
                     "invalid_count": invalid_count,
                     "catch_all_count": catch_all_count,
+                    "unreachable_count": unprobed,
                 }
             });
 
@@ -736,7 +763,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 verify::render_table(&results);
             }
 
-            Ok(0)
+            Ok(exit)
         }
 
         Commands::Update { check } => {
