@@ -733,7 +733,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let current = env!("CARGO_PKG_VERSION");
             if check {
                 match self_update::backends::github::Update::configure()
-                    .repo_owner("199-biotechnologies")
+                    .repo_owner("paperfoot")
                     .repo_name("search-cli")
                     .bin_name("search")
                     .current_version(current)
@@ -791,7 +791,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     eprintln!("Updating search from v{current}...");
                 }
                 match self_update::backends::github::Update::configure()
-                    .repo_owner("199-biotechnologies")
+                    .repo_owner("paperfoot")
                     .repo_name("search-cli")
                     .bin_name("search")
                     .current_version(current)
