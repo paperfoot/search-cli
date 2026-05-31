@@ -24,13 +24,23 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, SearchError>>,
 {
+    // Retry only TRANSIENT failures — rate limits, timeouts, network errors,
+    // and 5xx (SearchError::is_retryable). The old predicate matched only
+    // Http(_) transport errors, so 429/503 (mapped to RateLimited/Api before
+    // the predicate saw them) were never retried — backoff was effectively
+    // dead for the cases it exists for. Permanent 4xx (401/402/400) are NOT
+    // retried; that would just burn the budget.
+    //
+    // Budget invariant: worst-case backoff (~0.2s + ~0.4s, jittered) plus one
+    // full attempt must fit inside the smallest provider timeout (10s).
     f.retry(
         ExponentialBuilder::default()
-            .with_min_delay(Duration::from_secs(1))
-            .with_max_delay(Duration::from_secs(4))
-            .with_max_times(3),
+            .with_jitter()
+            .with_min_delay(Duration::from_millis(200))
+            .with_max_delay(Duration::from_millis(800))
+            .with_max_times(2),
     )
-    .when(|e| matches!(e, SearchError::Http(_)))
+    .when(|e| e.is_retryable())
     .await
 }
 
@@ -137,4 +147,40 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(serpapi::SerpApi::new(ctx.clone())),
         Box::new(xai::Xai::new(ctx.clone())),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_key;
+
+    // Uses uniquely-named env vars so parallel tests don't race on shared state.
+    #[test]
+    fn env_var_wins_over_config() {
+        let var = "SEARCH_TEST_KEY_ENV_WINS";
+        std::env::set_var(var, "from-env");
+        assert_eq!(resolve_key("from-config", var), "from-env");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn falls_back_to_config_when_env_unset() {
+        let var = "SEARCH_TEST_KEY_FALLBACK";
+        std::env::remove_var(var);
+        assert_eq!(resolve_key("from-config", var), "from-config");
+    }
+
+    #[test]
+    fn empty_env_does_not_shadow_config() {
+        let var = "SEARCH_TEST_KEY_EMPTY";
+        std::env::set_var(var, "");
+        assert_eq!(resolve_key("from-config", var), "from-config");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn empty_when_neither_set() {
+        let var = "SEARCH_TEST_KEY_NONE";
+        std::env::remove_var(var);
+        assert_eq!(resolve_key("", var), "");
+    }
 }

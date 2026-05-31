@@ -1,4 +1,3 @@
-use crate::classify::classify_intent;
 use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::providers::{self, Provider};
@@ -15,7 +14,7 @@ use tokio::time::timeout;
 /// Which providers to query for each mode
 fn providers_for_mode(mode: Mode) -> &'static [&'static str] {
     match mode {
-        Mode::Auto | Mode::General => &[
+        Mode::General => &[
             "parallel",
             "brave",
             "serper",
@@ -57,60 +56,14 @@ pub async fn execute_search(
     let start = Instant::now();
     let query_arc: Arc<str> = Arc::from(query);
 
-    // Speculative execution: in Auto mode, launch the most likely providers
-    // (Brave, Serper) before classification finishes, to cut latency. Gate on
-    // the RESOLVED key (is_configured uses resolve_key), NOT raw config — an
-    // env-only key must still speculate, otherwise the provider is neither
-    // speculated nor added to the active set below and silently never runs.
-    let mut speculative_set = JoinSet::new();
-    let is_auto = mode == Mode::Auto;
-    let mut speculated: HashSet<&'static str> = HashSet::new();
-
-    if is_auto && only_providers.is_none() {
-        let brave = providers::brave::Brave::new(ctx.clone());
-        if brave.is_configured() {
-            let (q, c, o, tout) = (query_arc.clone(), count, opts.clone(), brave.timeout());
-            speculative_set
-                .spawn(async move { ("brave", timeout(tout, brave.search(&q, c, &o)).await) });
-            speculated.insert("brave");
-        }
-        let serper = providers::serper::Serper::new(ctx.clone());
-        if serper.is_configured() {
-            let (q, c, o, tout) = (query_arc.clone(), count, opts.clone(), serper.timeout());
-            speculative_set
-                .spawn(async move { ("serper", timeout(tout, serper.search(&q, c, &o)).await) });
-            speculated.insert("serper");
-        }
-    }
-
-    let resolved_mode = if is_auto {
-        classify_intent(query)
-    } else {
-        mode
-    };
-
-    // If Auto resolved to an intent where generic web results aren't wanted,
-    // abort speculation so they don't pollute intent-specific results.
-    // (classify_intent never yields Deep — explicit -m deep sets is_auto=false —
-    // so Deep isn't listed here.)
-    let spec_compatible = matches!(resolved_mode, Mode::Auto | Mode::General);
-    if !spec_compatible {
-        speculative_set.abort_all();
-        while speculative_set.join_next().await.is_some() {}
-        speculated.clear();
-    }
-
-    let all_providers = providers::build_providers(&ctx);
-    let wanted = providers_for_mode(resolved_mode);
-
-    let active: Vec<Box<dyn Provider>> = all_providers
+    // Concrete mode in, concrete provider set out — no intent guessing, no
+    // speculative pre-launch. The set is the mode's providers (or whatever -p
+    // requested), intersected with what's actually configured.
+    let wanted = providers_for_mode(mode);
+    let active: Vec<Box<dyn Provider>> = providers::build_providers(&ctx)
         .into_iter()
         .filter(|p| {
             let name = p.name();
-            // Don't restart a provider already launched speculatively.
-            if speculated.contains(name) {
-                return false;
-            }
             let in_mode_set = wanted.contains(&name);
             (in_mode_set || only_providers.is_some())
                 && provider_allowed(name, only_providers)
@@ -118,26 +71,16 @@ pub async fn execute_search(
         })
         .collect();
 
-    if active.is_empty() && speculative_set.is_empty() {
-        return Err(SearchError::NoProviders(resolved_mode.to_string()));
+    if active.is_empty() {
+        return Err(SearchError::NoProviders(mode.to_string()));
     }
 
     let mut set = JoinSet::new();
     let mut providers_queried = Vec::new();
 
-    // Track speculative providers still in flight (deterministic order).
-    if speculated.contains("brave") {
-        providers_queried.push("brave".to_string());
-    }
-    if speculated.contains("serper") {
-        providers_queried.push("serper".to_string());
-    }
-
-    // For Deep mode, also launch Brave's LLM Context API alongside Brave web
-    // search — querying brave twice (web + grounding) is intentional, so
-    // `brave` + `brave_llm_context` both appearing in providers_queried is
-    // expected, not a bug.
-    if resolved_mode == Mode::Deep {
+    // Deep mode also pulls Brave's LLM Context (grounding) API alongside Brave
+    // web search — querying brave twice (web + grounding) is intentional.
+    if mode == Mode::Deep {
         let brave = providers::brave::Brave::new(ctx.clone());
         if brave.is_configured() {
             let (q, c, o) = (query_arc.clone(), count, opts.clone());
@@ -158,19 +101,16 @@ pub async fn execute_search(
         let sopts = opts.clone();
         providers_queried.push(name.to_string());
 
-        match resolved_mode {
-            Mode::News => {
-                set.spawn(async move {
-                    let result = timeout(tout, provider.search_news(&q, c, &sopts)).await;
-                    (name, result)
-                });
-            }
-            _ => {
-                set.spawn(async move {
-                    let result = timeout(tout, provider.search(&q, c, &sopts)).await;
-                    (name, result)
-                });
-            }
+        if mode == Mode::News {
+            set.spawn(async move {
+                let result = timeout(tout, provider.search_news(&q, c, &sopts)).await;
+                (name, result)
+            });
+        } else {
+            set.spawn(async move {
+                let result = timeout(tout, provider.search(&q, c, &sopts)).await;
+                (name, result)
+            });
         }
     }
 
@@ -179,49 +119,16 @@ pub async fn execute_search(
     let mut provider_failures: Vec<ProviderFailure> = Vec::new();
     let mut unique_urls = HashSet::new();
 
-    // Process speculative results first (they had a head start). Same 3-level
-    // shape as the main set, since speculative calls are now timeout-wrapped.
-    while let Some(res) = speculative_set.join_next().await {
-        match res {
+    while let Some(join_result) = set.join_next().await {
+        match join_result {
             Ok((_name, Ok(Ok(items)))) => {
                 for item in items {
                     if unique_urls.insert(normalize_url(&item.url)) {
                         all_results.push(item);
                     }
                 }
-            }
-            Ok((name, Ok(Err(e)))) => {
-                tracing::warn!("{name} speculative failed: {e}");
-                provider_failures.push(e.to_provider_failure(name));
-                providers_failed.push(name.to_string());
-            }
-            Ok((name, Err(_))) => {
-                tracing::warn!("{name} speculative timed out");
-                provider_failures.push(timeout_failure(name));
-                providers_failed.push(name.to_string());
-            }
-            Err(e) => {
-                if !e.is_cancelled() {
-                    tracing::error!("speculative join error: {e}");
-                }
-            }
-        }
-    }
-
-    // Process the rest
-    while let Some(join_result) = set.join_next().await {
-        match join_result {
-            Ok((_name, Ok(Ok(items)))) => {
-                for item in items {
-                    let normalized = normalize_url(&item.url);
-                    if unique_urls.insert(normalized) {
-                        all_results.push(item);
-                    }
-                }
-                // Enough results: cancel still-pending providers, but DON'T
-                // break — keep draining already-finished tasks so their
-                // paid-for, deduped results aren't thrown away. Aborted tasks
-                // come back as cancelled JoinErrors (handled by the Err arm).
+                // Enough results: cancel still-pending providers, but keep
+                // draining finished tasks so their paid-for results aren't lost.
                 if all_results.len() >= count {
                     set.abort_all();
                 }
@@ -237,7 +144,6 @@ pub async fn execute_search(
                 providers_failed.push(name.to_string());
             }
             Err(e) => {
-                // JoinError from abort — not a real failure
                 if !e.is_cancelled() {
                     tracing::error!("join error: {e}");
                 }
@@ -245,13 +151,11 @@ pub async fn execute_search(
         }
     }
 
-    // Trim to exact requested count
     all_results.truncate(count);
     let result_count = all_results.len();
     let elapsed = start.elapsed();
 
-    // Total failure is an error, not a success-shaped envelope — so agents can
-    // branch on the `error` block and read the per-provider reasons.
+    // Total failure is an error, not a success-shaped envelope.
     if all_results.is_empty() && !provider_failures.is_empty() {
         return Err(SearchError::AllProvidersFailed {
             failed: provider_failures,
@@ -264,7 +168,7 @@ pub async fn execute_search(
         version: ENVELOPE_VERSION.to_string(),
         status: status.as_str().to_string(),
         query: query.to_string(),
-        mode: resolved_mode.to_string(),
+        mode: mode.to_string(),
         results: all_results,
         metadata: ResponseMetadata {
             elapsed_ms: elapsed.as_millis(),
@@ -478,43 +382,55 @@ pub async fn run(
     only_providers: &Option<Vec<String>>,
     opts: &SearchOpts,
 ) -> Result<SearchResponse, SearchError> {
-    // For Auto mode, check if it would resolve to a special mode.
-    // If so, route to execute_special with the resolved mode.
-    // Otherwise, pass Mode::Auto to execute_search so speculative execution works.
-    let mut response = if mode == Mode::Auto {
-        let resolved = classify_intent(query);
-        match resolved {
-            Mode::Scholar
-            | Mode::Patents
-            | Mode::Images
-            | Mode::Places
-            | Mode::People
-            | Mode::Similar
-            | Mode::Scrape
-            | Mode::Extract
-            | Mode::Social => {
-                execute_special(ctx, query, resolved, count, only_providers, opts).await?
-            }
-            // Pass Auto to execute_search — it handles speculation + classification internally
-            _ => execute_search(ctx, query, Mode::Auto, count, only_providers, opts).await?,
-        }
-    } else {
-        match mode {
-            Mode::Scholar
-            | Mode::Patents
-            | Mode::Images
-            | Mode::Places
-            | Mode::People
-            | Mode::Similar
-            | Mode::Scrape
-            | Mode::Extract
-            | Mode::Social => {
-                execute_special(ctx, query, mode, count, only_providers, opts).await?
-            }
-            _ => execute_search(ctx, query, mode, count, only_providers, opts).await?,
-        }
+    // Routing is explicit: the caller chose `mode` (default General). No intent
+    // guessing — agents read `agent-info` and pick the mode/providers. Special
+    // modes use a provider's dedicated method; the rest aggregate the mode's
+    // provider set.
+    let mut response = match mode {
+        Mode::Scholar
+        | Mode::Patents
+        | Mode::Images
+        | Mode::Places
+        | Mode::People
+        | Mode::Similar
+        | Mode::Scrape
+        | Mode::Extract
+        | Mode::Social => execute_special(ctx, query, mode, count, only_providers, opts).await?,
+        _ => execute_search(ctx, query, mode, count, only_providers, opts).await?,
     };
 
     response.metadata.result_count = response.results.len();
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_url;
+
+    #[test]
+    fn dedupes_scheme_and_leading_www() {
+        assert_eq!(
+            normalize_url("https://www.example.com/"),
+            normalize_url("http://example.com")
+        );
+    }
+
+    #[test]
+    fn preserves_query_string_so_paginated_urls_stay_distinct() {
+        assert_ne!(
+            normalize_url("https://x.com/r?page=1"),
+            normalize_url("https://x.com/r?page=2")
+        );
+    }
+
+    #[test]
+    fn does_not_strip_www_inside_path() {
+        assert!(normalize_url("https://site.com/files/www.report.pdf").contains("www.report.pdf"));
+    }
+
+    #[test]
+    fn does_not_rewrite_http_inside_query() {
+        assert!(normalize_url("https://a.com/x?redirect=http://b.com")
+            .contains("redirect=http://b.com"));
+    }
 }

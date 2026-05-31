@@ -1,8 +1,8 @@
 ---
 name: search
 description: >
-  Multi-provider search CLI with 14 modes. Run `search agent-info` for full
-  capabilities, flags, and exit codes.
+  Multi-provider search CLI with 13 explicit modes (you pick the mode/providers;
+  no intent guessing). Run `search agent-info` for full capabilities and exit codes.
 ---
 
 ## search
@@ -11,7 +11,7 @@ Agent-friendly multi-provider search CLI. Run `search agent-info` for the
 machine-readable capability manifest.
 
 Quick examples:
-- `search "rust error handling"` — auto-detect mode
+- `search "rust error handling"` — general multi-provider web search (default)
 - `search search -q "CRISPR" -m academic` — academic papers
 - `search search -q "AI news" -m news --json` — JSON output
 - `search verify alice@stripe.com --json` — email verification

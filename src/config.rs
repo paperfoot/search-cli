@@ -434,3 +434,31 @@ pub fn config_check(config: &AppConfig) {
     }
     println!();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{mask_key, parse_setting};
+
+    #[test]
+    fn mask_key_never_panics_on_multibyte() {
+        // Byte-slicing would panic here; char-based must not.
+        let _ = mask_key("€€€€€€€€€€€€");
+        assert_eq!(mask_key(""), "(not set)");
+        assert!(mask_key("short").contains("***"));
+        assert!(mask_key("abcdefghijklmnop").contains("..."));
+    }
+
+    #[test]
+    fn parse_setting_coerces_integers_and_rejects_bad_input() {
+        assert!(matches!(
+            parse_setting("timeout", "30"),
+            Ok(toml::Value::Integer(30))
+        ));
+        assert!(matches!(
+            parse_setting("count", "5"),
+            Ok(toml::Value::Integer(5))
+        ));
+        assert!(parse_setting("timeout", "abc").is_err());
+        assert!(parse_setting("unknown_setting", "1").is_err());
+    }
+}

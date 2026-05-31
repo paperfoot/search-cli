@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 12 search providers with 14 search modes.\n\
-        Auto-detects intent from your query and routes to the best providers.\n\
+    long_about = "Aggregates 12 search providers across 13 explicit search modes.\n\
+        You choose the mode (-m) and/or providers (-p); the CLI does not guess\n\
+        intent. Run `search agent-info` for the machine-readable capability map.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
         PROVIDERS:\n  \
           parallel   Independent web index (Parallel AI), news, deep\n  \
@@ -23,7 +24,7 @@ use clap::{Parser, Subcommand};
           stealth    Anti-bot stealth scraper\n  \
           xai        X/Twitter social search via xAI Grok\n\n\
         EXAMPLES:\n  \
-          search \"rust error handling\"                    # auto-detect mode\n  \
+          search \"rust error handling\"                    # general web search\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \
           search search -q \"CEO of Stripe\" -m people      # LinkedIn profiles via Exa\n  \
           search search -q \"AI news\" -m news              # breaking news\n  \
@@ -112,8 +113,10 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub query: String,
 
-    /// Search mode [auto detects from query]
-    #[arg(short, long, value_enum, default_value = "auto")]
+    /// Search mode (default: general). Choose explicitly: general, news,
+    /// academic, deep, social, scholar, patents, people, places, images,
+    /// similar, scrape, extract. See `search agent-info` for the full map.
+    #[arg(short, long, value_enum, default_value = "general")]
     pub mode: Mode,
 
     /// Number of results to return

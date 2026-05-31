@@ -35,7 +35,7 @@ You shouldn't have to wire up each one separately, handle their different respon
 search "CRISPR gene therapy breakthroughs"
 ```
 
-That's it. Auto-detects your intent, picks the right providers, and returns results in under 2 seconds.
+That's it — a plain `search "query"` runs a general multi-provider web search and merges the results in under 2 seconds. You stay in control of routing: pick a mode with `-m` or specific providers with `-p` (run `search agent-info` for the full map). The CLI never guesses intent from your query.
 
 ## Install
 
@@ -122,10 +122,11 @@ search "your query here"
 
 ### 14 Search Modes
 
+Pick a mode explicitly with `-m` (default is `general`):
+
 | Mode | What it does | Providers used |
 |------|-------------|----------------|
-| `auto` | Detects intent from your query | *varies* |
-| `general` | Broad web search | Brave + Serper + Exa + Jina + Tavily + Perplexity |
+| `general` | Broad web search (default) | Brave + Serper + Exa + Jina + Tavily + Perplexity |
 | `news` | Breaking news, current events | Brave News + Serper News + Tavily + Perplexity |
 | `academic` | Research papers, studies | Exa + Serper + Tavily + Perplexity |
 | `people` | LinkedIn profiles, bios | Exa |
@@ -177,10 +178,10 @@ search "query" --json
 ### Usage Examples
 
 ```bash
-# Auto-detect mode (just type what you want)
+# Default general web search (no mode = general; no intent guessing)
 search "quantum computing advances"
-search "who is the CEO of Anthropic"
-search "CRISPR research papers"
+search search -q "who is the CEO of Anthropic" -m people
+search search -q "CRISPR research papers" -m academic
 
 # Force a specific mode
 search search -q "transformer architectures" -m academic
