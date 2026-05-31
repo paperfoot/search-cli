@@ -124,11 +124,26 @@ async fn main() {
     let ctx = Ctx::new(cli.json, cli.quiet);
 
     // 5. Wait for config
-    let config = match config_handle.await.unwrap() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Config error: {e}");
-            std::process::exit(1);
+    let config = match config_handle.await {
+        Ok(Ok(c)) => c,
+        // A malformed config is a config error (exit 2 + JSON envelope when
+        // piped), not a transient exit-1 plaintext message — otherwise an agent
+        // loops forever on an unfixable parse error and can't read the reason.
+        Ok(Err(e)) => {
+            let err = errors::SearchError::Config(e.to_string());
+            match OutputFormat::detect(json_flag) {
+                OutputFormat::Json => output::json::render_error(&err),
+                OutputFormat::Table => eprintln!("Error: {err}"),
+            }
+            std::process::exit(err.exit_code());
+        }
+        Err(join_err) => {
+            let err = errors::SearchError::Config(format!("config load task failed: {join_err}"));
+            match OutputFormat::detect(json_flag) {
+                OutputFormat::Json => output::json::render_error(&err),
+                OutputFormat::Table => eprintln!("Error: {err}"),
+            }
+            std::process::exit(err.exit_code());
         }
     };
 
@@ -356,24 +371,18 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             match action {
                 ConfigAction::Show => {
                     if ctx.is_json() {
-                        let configured: Vec<&str> = [
-                            ("brave", !app.config.keys.brave.is_empty()),
-                            ("serper", !app.config.keys.serper.is_empty()),
-                            ("exa", !app.config.keys.exa.is_empty()),
-                            ("jina", !app.config.keys.jina.is_empty()),
-                            ("firecrawl", !app.config.keys.firecrawl.is_empty()),
-                            ("tavily", !app.config.keys.tavily.is_empty()),
-                            ("serpapi", !app.config.keys.serpapi.is_empty()),
-                            ("perplexity", !app.config.keys.perplexity.is_empty()),
-                            ("browserless", !app.config.keys.browserless.is_empty()),
-                            ("xai", !app.config.keys.xai.is_empty()),
-                        ]
-                        .iter()
-                        .filter(|(_, v)| *v)
-                        .map(|(k, _)| *k)
-                        .collect();
+                        // Use the same resolver as `config check` (is_configured ->
+                        // resolve_key) so env-only keys count and all 12 providers
+                        // are covered — the old hardcoded list missed parallel +
+                        // stealth and ignored env vars.
+                        let all = providers::build_providers(&app);
+                        let configured: Vec<&str> = all
+                            .iter()
+                            .filter(|p| p.is_configured())
+                            .map(|p| p.name())
+                            .collect();
                         let info = serde_json::json!({
-                            "version": "1",
+                            "version": types::ENVELOPE_VERSION,
                             "status": "success",
                             "config_path": config::config_path().to_string_lossy(),
                             "settings": {
