@@ -1,3 +1,4 @@
+use crate::errors::SearchError;
 use directories::ProjectDirs;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -102,15 +103,37 @@ pub fn load_config() -> Result<AppConfig, Box<figment::Error>> {
         .extract()?)
 }
 
+/// Valid provider key names for `config set keys.<name>`.
+pub const PROVIDER_KEYS: &[&str] = &[
+    "parallel",
+    "brave",
+    "serper",
+    "exa",
+    "jina",
+    "firecrawl",
+    "tavily",
+    "serpapi",
+    "perplexity",
+    "browserless",
+    "xai",
+];
+
+/// Valid setting names for `config set settings.<name>`.
+pub const SETTING_KEYS: &[&str] = &["timeout", "count"];
+
 pub fn mask_key(key: &str) -> String {
-    if key.len() <= 8 {
-        if key.is_empty() {
-            "(not set)".to_string()
-        } else {
-            format!("{}***", &key[..2])
-        }
+    // Char-based: byte-slicing (`&key[..2]`) panics on multi-byte UTF-8 and
+    // would leak part of the secret in the panic message.
+    let n = key.chars().count();
+    if key.is_empty() {
+        "(not set)".to_string()
+    } else if n <= 8 {
+        let head: String = key.chars().take(2).collect();
+        format!("{head}***")
     } else {
-        format!("{}...{}", &key[..4], &key[key.len() - 4..])
+        let head: String = key.chars().take(4).collect();
+        let tail: String = key.chars().skip(n - 4).collect();
+        format!("{head}...{tail}")
     }
 }
 
@@ -205,23 +228,50 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
         toml::Table::new()
     };
 
-    // Support dotted keys: keys.brave, settings.timeout
+    // Only dotted keys are valid: keys.<provider> or settings.<name>.
     let parts: Vec<&str> = key.split('.').collect();
-    match parts.len() {
-        1 => {
-            doc.insert(parts[0].to_string(), toml::Value::String(value.to_string()));
-        }
-        2 => {
-            let section = doc
-                .entry(parts[0])
+    match parts.as_slice() {
+        [section, name] => {
+            // Validate against the known schema AND coerce to the right TOML
+            // type — writing settings.timeout as a quoted string made
+            // load_config fail to deserialize and bricked every later command.
+            let typed_value = match *section {
+                "keys" => {
+                    if !PROVIDER_KEYS.contains(name) {
+                        return Err(SearchError::Config(format!(
+                            "Unknown provider 'keys.{name}'. Valid: {}",
+                            PROVIDER_KEYS.join(", ")
+                        )));
+                    }
+                    toml::Value::String(value.to_string())
+                }
+                "settings" => parse_setting(name, value)?,
+                other => {
+                    return Err(SearchError::Config(format!(
+                        "Unknown section '{other}'. Use 'keys.<provider>' or 'settings.<name>'."
+                    )));
+                }
+            };
+
+            let entry = doc
+                .entry(*section)
                 .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            if let toml::Value::Table(t) = section {
-                t.insert(parts[1].to_string(), toml::Value::String(value.to_string()));
+            match entry {
+                toml::Value::Table(t) => {
+                    t.insert(name.to_string(), typed_value);
+                }
+                // Don't silently no-op (the old `if let Table` did) — that
+                // reported success while writing nothing.
+                _ => {
+                    return Err(SearchError::Config(format!(
+                        "Cannot set '{key}': '{section}' exists but is not a table."
+                    )));
+                }
             }
         }
         _ => {
-            return Err(crate::errors::SearchError::Config(format!(
-                "Invalid key: {key}"
+            return Err(SearchError::Config(format!(
+                "Invalid key '{key}'. Use a dotted form like 'keys.brave' or 'settings.timeout'."
             )));
         }
     }
@@ -231,6 +281,25 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
     }
     std::fs::write(&path, doc.to_string())?;
     Ok(())
+}
+
+/// Coerce a `settings.*` value to the TOML type figment expects. `timeout` and
+/// `count` are integers; writing them as strings breaks deserialization.
+fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
+    match name {
+        "timeout" | "count" => {
+            let n: u64 = value.parse().map_err(|_| {
+                SearchError::Config(format!(
+                    "settings.{name} must be a non-negative integer, got '{value}'"
+                ))
+            })?;
+            Ok(toml::Value::Integer(n as i64))
+        }
+        other => Err(SearchError::Config(format!(
+            "Unknown setting 'settings.{other}'. Valid: {}",
+            SETTING_KEYS.join(", ")
+        ))),
+    }
 }
 
 pub fn config_check(config: &AppConfig) {
