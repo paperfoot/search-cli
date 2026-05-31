@@ -39,7 +39,7 @@ pub enum SearchError {
     Http(#[from] reqwest::Error),
 
     #[error(transparent)]
-    Rquest(#[from] rquest::Error),
+    Wreq(#[from] wreq::Error),
 
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -55,7 +55,7 @@ impl SearchError {
             Self::InvalidInput { .. } => 3,
             Self::RateLimited { .. } => 4,
             Self::AllProvidersFailed { failed } => exit_code_for_failures(failed),
-            Self::Api { .. } | Self::Http(_) | Self::Rquest(_) | Self::Resolver(_) => 1,
+            Self::Api { .. } | Self::Http(_) | Self::Wreq(_) | Self::Resolver(_) => 1,
             Self::Json(_) | Self::Io(_) => 1,
         }
     }
@@ -70,7 +70,7 @@ impl SearchError {
             Self::InvalidInput { .. } => "invalid_input",
             Self::AllProvidersFailed { .. } => "all_providers_failed",
             Self::Resolver(_) => "resolver_error",
-            Self::Http(_) | Self::Rquest(_) => "http_error",
+            Self::Http(_) | Self::Wreq(_) => "http_error",
             Self::Json(_) => "json_error",
             Self::Io(_) => "io_error",
         }
@@ -103,7 +103,7 @@ impl SearchError {
                     C::Network
                 }
             }
-            Self::Rquest(_) | Self::Resolver(_) => C::Network,
+            Self::Wreq(_) | Self::Resolver(_) => C::Network,
             Self::Json(_) => C::Parse,
             Self::Config(_) | Self::NoProviders(_) => C::Config,
             Self::InvalidInput { .. } => C::BadRequest,
