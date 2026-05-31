@@ -121,16 +121,7 @@ impl super::Provider for Brave {
 
             let resp = req.send().await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "brave" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "brave",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "brave").await?;
 
             let body_bytes = resp.bytes().await?;
             let mut body_vec = body_bytes.to_vec();
@@ -138,6 +129,7 @@ impl super::Provider for Brave {
                 .map_err(|e| SearchError::Api {
                     provider: "brave",
                     code: "json_error",
+                status: None,
                     message: e.to_string(),
                 })?;
             let results = body
@@ -194,13 +186,7 @@ impl super::Provider for Brave {
 
             let resp = req.send().await?;
 
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "brave",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "brave").await?;
 
             let body_bytes = resp.bytes().await?;
             let mut body_vec = body_bytes.to_vec();
@@ -208,6 +194,7 @@ impl super::Provider for Brave {
                 .map_err(|e| SearchError::Api {
                     provider: "brave",
                     code: "json_error",
+                status: None,
                     message: e.to_string(),
                 })?;
             let results = body
@@ -263,16 +250,7 @@ impl Brave {
 
             let resp = req.send().await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "brave" });
-            }
-            if !resp.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "brave",
-                    code: "api_error",
-                    message: format!("HTTP {}", resp.status()),
-                });
-            }
+            let resp = super::ok_or_api_error(resp, "brave").await?;
 
             let body: serde_json::Value = resp.json().await?;
             let mut results = Vec::new();

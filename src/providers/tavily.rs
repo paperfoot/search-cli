@@ -58,16 +58,7 @@ impl Tavily {
                 .json(&body)
                 .send()
                 .await?;
-            if r.status() == 429 {
-                return Err(SearchError::RateLimited { provider: "tavily" });
-            }
-            if !r.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "tavily",
-                    code: "api_error",
-                    message: format!("HTTP {}", r.status()),
-                });
-            }
+            let r = super::ok_or_api_error(r, "tavily").await?;
             Ok(r.json::<TavilyResponse>().await?)
         })
         .await?;

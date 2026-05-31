@@ -2,7 +2,10 @@ use crate::classify::classify_intent;
 use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::providers::{self, Provider};
-use crate::types::{Mode, ResponseMetadata, SearchOpts, SearchResponse};
+use crate::types::{
+    FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus, SearchOpts,
+    SearchResponse, SearchResult, ENVELOPE_VERSION,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -151,19 +154,29 @@ pub async fn execute_search(
 
     let mut all_results = Vec::new();
     let mut providers_failed = Vec::new();
+    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
     let mut unique_urls = HashSet::new();
 
     // Process speculative results first (they had a head start)
     while let Some(res) = speculative_set.join_next().await {
-        if let Ok((_name, Ok(items))) = res {
-            for item in items {
-                if unique_urls.insert(normalize_url(&item.url)) {
-                    all_results.push(item);
+        match res {
+            Ok((_name, Ok(items))) => {
+                for item in items {
+                    if unique_urls.insert(normalize_url(&item.url)) {
+                        all_results.push(item);
+                    }
                 }
             }
-        } else if let Ok((name, Err(e))) = res {
-            tracing::warn!("{name} speculative failed: {e}");
-            providers_failed.push(name.to_string());
+            Ok((name, Err(e))) => {
+                tracing::warn!("{name} speculative failed: {e}");
+                provider_failures.push(e.to_provider_failure(name));
+                providers_failed.push(name.to_string());
+            }
+            Err(e) => {
+                if !e.is_cancelled() {
+                    tracing::error!("speculative join error: {e}");
+                }
+            }
         }
     }
 
@@ -185,10 +198,12 @@ pub async fn execute_search(
             }
             Ok((name, Ok(Err(e)))) => {
                 tracing::warn!("{name}: {e}");
+                provider_failures.push(e.to_provider_failure(name));
                 providers_failed.push(name.to_string());
             }
             Ok((name, Err(_))) => {
                 tracing::warn!("{name}: timed out");
+                provider_failures.push(timeout_failure(name));
                 providers_failed.push(name.to_string());
             }
             Err(e) => {
@@ -202,31 +217,31 @@ pub async fn execute_search(
 
     // Trim to exact requested count
     all_results.truncate(count);
-
+    let result_count = all_results.len();
     let elapsed = start.elapsed();
 
-    // Determine accurate status for agents
-    let status = if all_results.is_empty() && !providers_failed.is_empty() {
-        "all_providers_failed"
-    } else if !all_results.is_empty() && !providers_failed.is_empty() {
-        "partial_success"
-    } else if all_results.is_empty() {
-        "no_results"
-    } else {
-        "success"
-    };
+    // Total failure is an error, not a success-shaped envelope — so agents can
+    // branch on the `error` block and read the per-provider reasons.
+    if all_results.is_empty() && !provider_failures.is_empty() {
+        return Err(SearchError::AllProvidersFailed {
+            failed: provider_failures,
+        });
+    }
+
+    let status = ResponseStatus::classify(all_results.is_empty(), !providers_failed.is_empty());
 
     Ok(SearchResponse {
-        version: "1".into(),
-        status: status.into(),
+        version: ENVELOPE_VERSION.to_string(),
+        status: status.as_str().to_string(),
         query: query.to_string(),
         mode: resolved_mode.to_string(),
         results: all_results,
         metadata: ResponseMetadata {
             elapsed_ms: elapsed.as_millis(),
-            result_count: 0, // will be set below
+            result_count,
             providers_queried,
             providers_failed,
+            provider_failures,
         },
     })
 }
@@ -251,189 +266,98 @@ pub async fn execute_special(
     mode: Mode,
     count: usize,
     only_providers: &Option<Vec<String>>,
-    _opts: &SearchOpts,
+    opts: &SearchOpts,
 ) -> Result<SearchResponse, SearchError> {
     let start = Instant::now();
-    let all_providers = providers::build_providers(&ctx);
     let mut results = Vec::new();
     let mut providers_queried = Vec::new();
     let mut providers_failed = Vec::new();
+    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
+
+    // Run one timed provider call, recording success/failure uniformly.
+    macro_rules! query_provider {
+        ($name:literal, $fut:expr, $secs:expr) => {{
+            providers_queried.push($name.to_string());
+            record_result(
+                timeout(Duration::from_secs($secs), $fut).await,
+                $name,
+                &mut results,
+                &mut providers_failed,
+                &mut provider_failures,
+            );
+        }};
+    }
 
     match mode {
         Mode::Scholar => {
-            for p in &all_providers {
-                if p.name() == "serper" && p.is_configured() && provider_allowed("serper", only_providers) {
-                    providers_queried.push("serper".to_string());
-                    // Downcast to Serper for scholar-specific method
-                    let serper = providers::serper::Serper::new(ctx.clone());
-                    match timeout(p.timeout(), serper.search_scholar(query, count)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("serper".to_string());
-                            tracing::warn!("serper scholar: {e}");
-                        }
-                        Err(_) => {
-                            providers_failed.push("serper".to_string());
-                        }
-                    }
-                }
+            let serper = providers::serper::Serper::new(ctx.clone());
+            if serper.is_configured() && provider_allowed("serper", only_providers) {
+                query_provider!("serper", serper.search_scholar(query, count), 10);
             }
-            // Also try SerpApi for scholar
             let serpapi = providers::serpapi::SerpApi::new(ctx.clone());
             if serpapi.is_configured() && provider_allowed("serpapi", only_providers) {
-                providers_queried.push("serpapi".to_string());
-                match timeout(Duration::from_secs(10), serpapi.search_scholar(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serpapi".to_string());
-                        tracing::warn!("serpapi scholar: {e}");
-                    }
-                    Err(_) => {
-                        providers_failed.push("serpapi".to_string());
-                    }
-                }
+                query_provider!("serpapi", serpapi.search_scholar(query, count), 10);
             }
         }
         Mode::Patents => {
             let serper = providers::serper::Serper::new(ctx.clone());
             if serper.is_configured() && provider_allowed("serper", only_providers) {
-                providers_queried.push("serper".to_string());
-                match timeout(Duration::from_secs(10), serper.search_patents(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serper".to_string());
-                        tracing::warn!("serper patents: {e}");
-                    }
-                    Err(_) => providers_failed.push("serper".to_string()),
-                }
+                query_provider!("serper", serper.search_patents(query, count), 10);
             }
         }
         Mode::Images => {
             let serper = providers::serper::Serper::new(ctx.clone());
             if serper.is_configured() && provider_allowed("serper", only_providers) {
-                providers_queried.push("serper".to_string());
-                match timeout(Duration::from_secs(10), serper.search_images(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serper".to_string());
-                        tracing::warn!("serper images: {e}");
-                    }
-                    Err(_) => providers_failed.push("serper".to_string()),
-                }
+                query_provider!("serper", serper.search_images(query, count), 10);
             }
         }
         Mode::Places => {
             let serper = providers::serper::Serper::new(ctx.clone());
             if serper.is_configured() && provider_allowed("serper", only_providers) {
-                providers_queried.push("serper".to_string());
-                match timeout(Duration::from_secs(10), serper.search_places(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("serper".to_string());
-                        tracing::warn!("serper places: {e}");
-                    }
-                    Err(_) => providers_failed.push("serper".to_string()),
-                }
+                query_provider!("serper", serper.search_places(query, count), 10);
             }
         }
         Mode::People => {
             let exa = providers::exa::Exa::new(ctx.clone());
             if exa.is_configured() && provider_allowed("exa", only_providers) {
-                providers_queried.push("exa".to_string());
-                match timeout(Duration::from_secs(15), exa.search_people(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("exa".to_string());
-                        tracing::warn!("exa people: {e}");
-                    }
-                    Err(_) => providers_failed.push("exa".to_string()),
-                }
+                query_provider!("exa", exa.search_people(query, count), 15);
             }
         }
         Mode::Similar => {
             let exa = providers::exa::Exa::new(ctx.clone());
             if exa.is_configured() && provider_allowed("exa", only_providers) {
-                providers_queried.push("exa".to_string());
-                match timeout(Duration::from_secs(15), exa.find_similar(query, count)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("exa".to_string());
-                        tracing::warn!("exa similar: {e}");
-                    }
-                    Err(_) => providers_failed.push("exa".to_string()),
-                }
+                query_provider!("exa", exa.find_similar(query, count), 15);
             }
         }
         Mode::Social => {
             let xai = providers::xai::Xai::new(ctx.clone());
             if xai.is_configured() && provider_allowed("xai", only_providers) {
-                providers_queried.push("xai".to_string());
-                match timeout(Duration::from_secs(60), xai.search(query, count, _opts)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("xai".to_string());
-                        tracing::warn!("xai: {e}");
-                    }
-                    Err(_) => providers_failed.push("xai".to_string()),
-                }
+                query_provider!("xai", xai.search(query, count, opts), 60);
             }
         }
         Mode::Scrape | Mode::Extract => {
-            // Try Stealth (local) first, then Jina reader, then Firecrawl
+            // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
             let stealth = providers::stealth::Stealth::new(ctx.clone());
             if provider_allowed("stealth", only_providers) {
-                providers_queried.push("stealth".to_string());
-                match timeout(Duration::from_secs(30), stealth.scrape_url(query)).await {
-                    Ok(Ok(items)) => results.extend(items),
-                    Ok(Err(e)) => {
-                        providers_failed.push("stealth".to_string());
-                        tracing::warn!("stealth: {e}");
-                    }
-                    Err(_) => providers_failed.push("stealth".to_string()),
-                }
+                query_provider!("stealth", stealth.scrape_url(query), 30);
             }
-
             if results.is_empty() {
                 let jina = providers::jina::Jina::new(ctx.clone());
                 if jina.is_configured() && provider_allowed("jina", only_providers) {
-                    providers_queried.push("jina".to_string());
-                    match timeout(Duration::from_secs(30), jina.read_url(query)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("jina".to_string());
-                            tracing::warn!("jina reader: {e}");
-                        }
-                        Err(_) => providers_failed.push("jina".to_string()),
-                    }
+                    query_provider!("jina", jina.read_url(query), 30);
                 }
             }
             if results.is_empty() {
                 let fc = providers::firecrawl::Firecrawl::new(ctx.clone());
                 if fc.is_configured() && provider_allowed("firecrawl", only_providers) {
-                    providers_queried.push("firecrawl".to_string());
-                    match timeout(Duration::from_secs(30), fc.scrape_url(query)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("firecrawl".to_string());
-                            tracing::warn!("firecrawl: {e}");
-                        }
-                        Err(_) => providers_failed.push("firecrawl".to_string()),
-                    }
+                    query_provider!("firecrawl", fc.scrape_url(query), 30);
                 }
             }
-            // Last resort: Browserless cloud browser (handles Cloudflare, JS rendering)
+            // Last resort: Browserless cloud browser (handles Cloudflare, JS rendering).
             if results.is_empty() {
                 let bl = providers::browserless::Browserless::new(ctx.clone());
                 if bl.is_configured() && provider_allowed("browserless", only_providers) {
-                    providers_queried.push("browserless".to_string());
-                    match timeout(Duration::from_secs(30), bl.scrape_url(query)).await {
-                        Ok(Ok(items)) => results.extend(items),
-                        Ok(Err(e)) => {
-                            providers_failed.push("browserless".to_string());
-                            tracing::warn!("browserless: {e}");
-                        }
-                        Err(_) => providers_failed.push("browserless".to_string()),
-                    }
+                    query_provider!("browserless", bl.scrape_url(query), 30);
                 }
             }
         }
@@ -443,23 +367,19 @@ pub async fn execute_special(
     if results.is_empty() && providers_queried.is_empty() {
         return Err(SearchError::NoProviders(mode.to_string()));
     }
+    if results.is_empty() && !provider_failures.is_empty() {
+        return Err(SearchError::AllProvidersFailed {
+            failed: provider_failures,
+        });
+    }
 
     let elapsed = start.elapsed();
     let result_count = results.len();
-
-    let status = if results.is_empty() && !providers_failed.is_empty() {
-        "all_providers_failed"
-    } else if !results.is_empty() && !providers_failed.is_empty() {
-        "partial_success"
-    } else if results.is_empty() {
-        "no_results"
-    } else {
-        "success"
-    };
+    let status = ResponseStatus::classify(results.is_empty(), !providers_failed.is_empty());
 
     Ok(SearchResponse {
-        version: "1".into(),
-        status: status.into(),
+        version: ENVELOPE_VERSION.to_string(),
+        status: status.as_str().to_string(),
         query: query.to_string(),
         mode: mode.to_string(),
         results,
@@ -468,8 +388,45 @@ pub async fn execute_special(
             result_count,
             providers_queried,
             providers_failed,
+            provider_failures,
         },
     })
+}
+
+/// Extend `results` on success; capture a structured failure (reason + category)
+/// on error or timeout. Shared by every special-mode provider call.
+fn record_result(
+    outcome: Result<Result<Vec<SearchResult>, SearchError>, tokio::time::error::Elapsed>,
+    provider: &'static str,
+    results: &mut Vec<SearchResult>,
+    failed: &mut Vec<String>,
+    failures: &mut Vec<ProviderFailure>,
+) {
+    match outcome {
+        Ok(Ok(items)) => results.extend(items),
+        Ok(Err(e)) => {
+            tracing::warn!("{provider}: {e}");
+            failures.push(e.to_provider_failure(provider));
+            failed.push(provider.to_string());
+        }
+        Err(_) => {
+            tracing::warn!("{provider}: timed out");
+            failures.push(timeout_failure(provider));
+            failed.push(provider.to_string());
+        }
+    }
+}
+
+/// Failure record for a provider that exceeded its timeout.
+fn timeout_failure(provider: &str) -> ProviderFailure {
+    ProviderFailure {
+        provider: provider.to_string(),
+        category: FailureCategory::Timeout,
+        http_status: None,
+        code: "timeout".to_string(),
+        reason: format!("{provider} timed out"),
+        retryable: true,
+    }
 }
 
 

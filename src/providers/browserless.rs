@@ -50,13 +50,7 @@ impl Browserless {
                     provider: "browserless",
                 });
             }
-            if !r.status().is_success() {
-                return Err(SearchError::Api {
-                    provider: "browserless",
-                    code: "api_error",
-                    message: format!("HTTP {}", r.status()),
-                });
-            }
+            let r = super::ok_or_api_error(r, "browserless").await?;
 
             Ok(r.text().await?)
         })
@@ -67,6 +61,7 @@ impl Browserless {
             provider: "browserless",
             code: "invalid_url",
             message: format!("Invalid URL '{}': {}", url, e),
+            status: None,
         })?;
 
         let mut cursor = std::io::Cursor::new(resp.as_bytes());
@@ -87,6 +82,7 @@ impl Browserless {
                 provider: "browserless",
                 code: "extraction_error",
                 message: "Page returned no extractable content".to_string(),
+                status: None,
             });
         }
 
