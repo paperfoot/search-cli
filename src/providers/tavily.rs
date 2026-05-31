@@ -63,7 +63,11 @@ impl Tavily {
         })
         .await?;
 
-        let source = if topic == "news" { "tavily_news" } else { "tavily" };
+        let source = if topic == "news" {
+            "tavily_news"
+        } else {
+            "tavily"
+        };
         let mut results = Vec::new();
 
         // Prepend the AI-generated answer if available
@@ -111,17 +115,37 @@ struct TavilyResult {
 
 #[async_trait]
 impl super::Provider for Tavily {
-    fn name(&self) -> &'static str { "tavily" }
-    fn capabilities(&self) -> &[&'static str] { &["general", "news", "academic", "deep"] }
-    fn env_keys(&self) -> &[&'static str] { &["TAVILY_API_KEY", "SEARCH_KEYS_TAVILY"] }
-    fn is_configured(&self) -> bool { !self.api_key().is_empty() }
-    fn timeout(&self) -> Duration { Duration::from_secs(15) }
+    fn name(&self) -> &'static str {
+        "tavily"
+    }
+    fn capabilities(&self) -> &[&'static str] {
+        &["general", "news", "academic", "deep"]
+    }
+    fn env_keys(&self) -> &[&'static str] {
+        &["TAVILY_API_KEY", "SEARCH_KEYS_TAVILY"]
+    }
+    fn is_configured(&self) -> bool {
+        !self.api_key().is_empty()
+    }
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(15)
+    }
 
-    async fn search(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         self.do_search(query, count, "general", opts).await
     }
 
-    async fn search_news(&self, query: &str, count: usize, opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_news(
+        &self,
+        query: &str,
+        count: usize,
+        opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         self.do_search(query, count, "news", opts).await
     }
 }

@@ -121,7 +121,11 @@ pub fn config_show(config: &AppConfig) {
 
     if c {
         println!("\n{}  Configuration\n", "search".bold().cyan());
-        println!("  {} {}\n", "path:".dimmed(), config_path().display().to_string().dimmed());
+        println!(
+            "  {} {}\n",
+            "path:".dimmed(),
+            config_path().display().to_string().dimmed()
+        );
     } else {
         println!("Configuration ({})\n", config_path().display());
     }
@@ -129,20 +133,28 @@ pub fn config_show(config: &AppConfig) {
     use crate::providers;
 
     let keys: &[(&str, &str, &str)] = &[
-        ("parallel",   &config.keys.parallel,   "PARALLEL_API_KEY"),
-        ("brave",      &config.keys.brave,      "BRAVE_API_KEY"),
-        ("serper",     &config.keys.serper,      "SERPER_API_KEY"),
-        ("exa",        &config.keys.exa,         "EXA_API_KEY"),
-        ("jina",       &config.keys.jina,        "JINA_API_KEY"),
-        ("firecrawl",  &config.keys.firecrawl,   "FIRECRAWL_API_KEY"),
-        ("tavily",     &config.keys.tavily,      "TAVILY_API_KEY"),
-        ("serpapi",    &config.keys.serpapi,      "SERPAPI_API_KEY"),
-        ("perplexity", &config.keys.perplexity,  "PERPLEXITY_API_KEY"),
-        ("browserless",&config.keys.browserless,  "BROWSERLESS_API_KEY"),
-        ("xai",        &config.keys.xai,         "XAI_API_KEY"),
+        ("parallel", &config.keys.parallel, "PARALLEL_API_KEY"),
+        ("brave", &config.keys.brave, "BRAVE_API_KEY"),
+        ("serper", &config.keys.serper, "SERPER_API_KEY"),
+        ("exa", &config.keys.exa, "EXA_API_KEY"),
+        ("jina", &config.keys.jina, "JINA_API_KEY"),
+        ("firecrawl", &config.keys.firecrawl, "FIRECRAWL_API_KEY"),
+        ("tavily", &config.keys.tavily, "TAVILY_API_KEY"),
+        ("serpapi", &config.keys.serpapi, "SERPAPI_API_KEY"),
+        ("perplexity", &config.keys.perplexity, "PERPLEXITY_API_KEY"),
+        (
+            "browserless",
+            &config.keys.browserless,
+            "BROWSERLESS_API_KEY",
+        ),
+        ("xai", &config.keys.xai, "XAI_API_KEY"),
     ];
 
-    if c { println!("  {}", "[keys]".bold()); } else { println!("[keys]"); }
+    if c {
+        println!("  {}", "[keys]".bold());
+    } else {
+        println!("[keys]");
+    }
     for (name, config_val, env_var) in keys {
         let effective = providers::resolve_key(config_val, env_var);
         let masked = mask_key(&effective);
@@ -159,10 +171,22 @@ pub fn config_show(config: &AppConfig) {
     }
 
     println!();
-    if c { println!("  {}", "[settings]".bold()); } else { println!("[settings]"); }
     if c {
-        println!("    {:<10} {}", "timeout".white(), format!("{}s", config.settings.timeout).cyan());
-        println!("    {:<10} {}", "count".white(), config.settings.count.to_string().cyan());
+        println!("  {}", "[settings]".bold());
+    } else {
+        println!("[settings]");
+    }
+    if c {
+        println!(
+            "    {:<10} {}",
+            "timeout".white(),
+            format!("{}s", config.settings.timeout).cyan()
+        );
+        println!(
+            "    {:<10} {}",
+            "count".white(),
+            config.settings.count.to_string().cyan()
+        );
     } else {
         println!("  timeout  = {}s", config.settings.timeout);
         println!("  count    = {}", config.settings.count);
@@ -217,17 +241,72 @@ pub fn config_check(config: &AppConfig) {
     use crate::providers;
 
     let all: &[(&str, &str, &str, &str)] = &[
-        ("parallel",    &config.keys.parallel,    "PARALLEL_API_KEY",    "Independent web index (Parallel AI)"),
-        ("brave",       &config.keys.brave,       "BRAVE_API_KEY",       "Web + News search"),
-        ("serper",      &config.keys.serper,       "SERPER_API_KEY",      "Google SERP, Scholar, Patents, Images, Places"),
-        ("exa",         &config.keys.exa,          "EXA_API_KEY",         "Semantic search, People, Similar pages"),
-        ("jina",        &config.keys.jina,         "JINA_API_KEY",        "Web search + URL reader"),
-        ("firecrawl",   &config.keys.firecrawl,    "FIRECRAWL_API_KEY",   "Web scraping + extraction"),
-        ("tavily",      &config.keys.tavily,       "TAVILY_API_KEY",      "General, News, Academic, Deep search"),
-        ("serpapi",     &config.keys.serpapi,       "SERPAPI_API_KEY",     "80+ engines: Google, Bing, YouTube, Baidu, Scholar"),
-        ("perplexity",  &config.keys.perplexity,   "PERPLEXITY_API_KEY",  "AI-powered answers with citations (Perplexity Sonar)"),
-        ("browserless", &config.keys.browserless,   "BROWSERLESS_API_KEY", "Cloud browser for Cloudflare/JS-heavy pages"),
-        ("xai",         &config.keys.xai,          "XAI_API_KEY",         "X/Twitter social search via xAI Grok"),
+        (
+            "parallel",
+            &config.keys.parallel,
+            "PARALLEL_API_KEY",
+            "Independent web index (Parallel AI)",
+        ),
+        (
+            "brave",
+            &config.keys.brave,
+            "BRAVE_API_KEY",
+            "Web + News search",
+        ),
+        (
+            "serper",
+            &config.keys.serper,
+            "SERPER_API_KEY",
+            "Google SERP, Scholar, Patents, Images, Places",
+        ),
+        (
+            "exa",
+            &config.keys.exa,
+            "EXA_API_KEY",
+            "Semantic search, People, Similar pages",
+        ),
+        (
+            "jina",
+            &config.keys.jina,
+            "JINA_API_KEY",
+            "Web search + URL reader",
+        ),
+        (
+            "firecrawl",
+            &config.keys.firecrawl,
+            "FIRECRAWL_API_KEY",
+            "Web scraping + extraction",
+        ),
+        (
+            "tavily",
+            &config.keys.tavily,
+            "TAVILY_API_KEY",
+            "General, News, Academic, Deep search",
+        ),
+        (
+            "serpapi",
+            &config.keys.serpapi,
+            "SERPAPI_API_KEY",
+            "80+ engines: Google, Bing, YouTube, Baidu, Scholar",
+        ),
+        (
+            "perplexity",
+            &config.keys.perplexity,
+            "PERPLEXITY_API_KEY",
+            "AI-powered answers with citations (Perplexity Sonar)",
+        ),
+        (
+            "browserless",
+            &config.keys.browserless,
+            "BROWSERLESS_API_KEY",
+            "Cloud browser for Cloudflare/JS-heavy pages",
+        ),
+        (
+            "xai",
+            &config.keys.xai,
+            "XAI_API_KEY",
+            "X/Twitter social search via xAI Grok",
+        ),
     ];
 
     if c {
@@ -239,14 +318,24 @@ pub fn config_check(config: &AppConfig) {
         let is_configured = !providers::resolve_key(config_val, env_var).is_empty();
         if !is_configured {
             if c {
-                println!("  {} {:<12} {}", "x".red().bold(), name.white(), desc.dimmed());
+                println!(
+                    "  {} {:<12} {}",
+                    "x".red().bold(),
+                    name.white(),
+                    desc.dimmed()
+                );
             } else {
                 println!("  [x] {name}: NOT SET - {desc}");
             }
         } else {
             configured += 1;
             if c {
-                println!("  {} {:<12} {}", "+".green().bold(), name.white().bold(), desc.dimmed());
+                println!(
+                    "  {} {:<12} {}",
+                    "+".green().bold(),
+                    name.white().bold(),
+                    desc.dimmed()
+                );
             } else {
                 println!("  [+] {name}: OK - {desc}");
             }

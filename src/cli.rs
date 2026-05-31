@@ -182,9 +182,18 @@ pub mod skill {
     fn targets() -> Vec<Target> {
         let h = home();
         vec![
-            Target { name: "Claude Code", path: h.join(".claude/skills/search") },
-            Target { name: "Codex CLI", path: h.join(".codex/skills/search") },
-            Target { name: "Gemini CLI", path: h.join(".gemini/skills/search") },
+            Target {
+                name: "Claude Code",
+                path: h.join(".claude/skills/search"),
+            },
+            Target {
+                name: "Codex CLI",
+                path: h.join(".codex/skills/search"),
+            },
+            Target {
+                name: "Gemini CLI",
+                path: h.join(".gemini/skills/search"),
+            },
         ]
     }
 

@@ -45,7 +45,9 @@ impl super::Provider for Firecrawl {
         "firecrawl"
     }
 
-    fn env_keys(&self) -> &[&'static str] { &["FIRECRAWL_API_KEY", "SEARCH_KEYS_FIRECRAWL"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["FIRECRAWL_API_KEY", "SEARCH_KEYS_FIRECRAWL"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["general", "scrape", "extract"]
     }
@@ -58,9 +60,16 @@ impl super::Provider for Firecrawl {
         Duration::from_secs(30)
     }
 
-    async fn search(&self, query: &str, count: usize, _opts: &SearchOpts) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        count: usize,
+        _opts: &SearchOpts,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing { provider: "firecrawl" });
+            return Err(SearchError::AuthMissing {
+                provider: "firecrawl",
+            });
         }
         // Firecrawl v2 search endpoint — web search + scrape combo
         let client = &self.ctx.client;
@@ -82,29 +91,42 @@ impl super::Provider for Firecrawl {
             let resp = super::ok_or_api_error(resp, "firecrawl").await?;
 
             let val: serde_json::Value = resp.json().await?;
-            let results = val.get("data")
+            let results = val
+                .get("data")
                 .and_then(|d| d.get("web"))
                 .or_else(|| val.get("data"))
                 .and_then(|v| v.as_array())
                 .map(|arr| {
-                    arr.iter().map(|item| SearchResult {
-                        title: item.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                        url: item.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                        snippet: item.get("description")
-                            .or_else(|| item.get("markdown"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        source: "firecrawl_search".to_string(),
-                        published: None,
-                        image_url: None,
-                        extra: None,
-                    }).collect()
+                    arr.iter()
+                        .map(|item| SearchResult {
+                            title: item
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            url: item
+                                .get("url")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            snippet: item
+                                .get("description")
+                                .or_else(|| item.get("markdown"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            source: "firecrawl_search".to_string(),
+                            published: None,
+                            image_url: None,
+                            extra: None,
+                        })
+                        .collect()
                 })
                 .unwrap_or_default();
 
             Ok(results)
-        }).await
+        })
+        .await
     }
 
     async fn search_news(

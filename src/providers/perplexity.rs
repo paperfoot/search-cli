@@ -175,7 +175,9 @@ impl super::Provider for Perplexity {
     fn name(&self) -> &'static str {
         "perplexity"
     }
-    fn env_keys(&self) -> &[&'static str] { &["PERPLEXITY_API_KEY", "SEARCH_KEYS_PERPLEXITY"] }
+    fn env_keys(&self) -> &[&'static str] {
+        &["PERPLEXITY_API_KEY", "SEARCH_KEYS_PERPLEXITY"]
+    }
     fn capabilities(&self) -> &[&'static str] {
         &["general", "news", "academic", "deep"]
     }
@@ -208,4 +210,3 @@ impl super::Provider for Perplexity {
             .await
     }
 }
-

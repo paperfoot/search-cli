@@ -9,7 +9,11 @@ fn log_dir() -> PathBuf {
         proj.data_dir().join("logs")
     } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".local").join("share").join("search").join("logs")
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("search")
+            .join("logs")
     }
 }
 
@@ -50,7 +54,11 @@ pub fn log_search(response: &SearchResponse) {
     });
 
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{}", serde_json::to_string(&entry).unwrap_or_default());
+        let _ = writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&entry).unwrap_or_default()
+        );
     }
 }
 

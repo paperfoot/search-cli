@@ -35,11 +35,7 @@ pub fn render(response: &SearchResponse) {
         let source = &result.source;
 
         if use_color {
-            println!(
-                "{} {}",
-                num.on_cyan().black().bold(),
-                title.bold(),
-            );
+            println!("{} {}", num.on_cyan().black().bold(), title.bold(),);
             println!("  {} {}", "->".dimmed(), url.blue().underline());
             if !snippet.is_empty() {
                 println!("  {}", snippet.dimmed());
@@ -92,8 +88,19 @@ pub fn render(response: &SearchResponse) {
         // Structured detail: which provider, why, and the underlying reason.
         for f in &response.metadata.provider_failures {
             let line = match f.http_status {
-                Some(s) => format!("  failed: {} [{} · {}] {}", f.provider, f.category.as_str(), s, f.reason),
-                None => format!("  failed: {} [{}] {}", f.provider, f.category.as_str(), f.reason),
+                Some(s) => format!(
+                    "  failed: {} [{} · {}] {}",
+                    f.provider,
+                    f.category.as_str(),
+                    s,
+                    f.reason
+                ),
+                None => format!(
+                    "  failed: {} [{}] {}",
+                    f.provider,
+                    f.category.as_str(),
+                    f.reason
+                ),
             };
             if use_color {
                 eprintln!("{}", line.red());
@@ -117,7 +124,13 @@ fn truncate(s: &str, max: usize) -> String {
     // Clean up: collapse whitespace, remove newlines
     let cleaned: String = s
         .chars()
-        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
