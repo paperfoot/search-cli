@@ -77,6 +77,64 @@ async fn serpapi_usage(ctx: &AppContext, key: String) -> Result<serde_json::Valu
     }))
 }
 
+/// Brave has no balance endpoint, but every search response carries
+/// X-RateLimit-Remaining, whose second comma-separated value is the
+/// remaining monthly quota. Reading it requires one minimal metered
+/// request (~$0.005) — flagged in the output so the cost is explicit.
+async fn brave_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value, String> {
+    let resp = ctx
+        .client
+        .get("https://api.search.brave.com/res/v1/web/search?q=a&count=1")
+        .header("X-Subscription-Token", key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let remaining = resp
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let monthly = remaining
+        .as_deref()
+        .and_then(|s| s.split(',').nth(1))
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    Ok(serde_json::json!({
+        "credits_remaining": monthly,
+        "raw_rate_limit_remaining": remaining,
+        "unit": "requests (this month)",
+        "note": "read from X-RateLimit-Remaining headers; this check consumed one metered request",
+    }))
+}
+
+/// xAI: GET https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance.
+/// Needs a management key (not the xai- inference key) plus a team id, so both
+/// come from dedicated env vars.
+async fn xai_usage(ctx: &AppContext, _key: String) -> Result<serde_json::Value, String> {
+    let mgmt_key = std::env::var("XAI_MANAGEMENT_API_KEY").unwrap_or_default();
+    let team_id = std::env::var("XAI_TEAM_ID").unwrap_or_default();
+    if mgmt_key.is_empty() || team_id.is_empty() {
+        return Err(
+            "set XAI_MANAGEMENT_API_KEY and XAI_TEAM_ID (management key differs from the xai- inference key)"
+                .to_string(),
+        );
+    }
+    let url = format!("https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance");
+    let v = get_json(ctx, &url, Some(&mgmt_key), None).await?;
+    let cents = v
+        .get("total")
+        .and_then(|t| t.get("val"))
+        .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
+    Ok(serde_json::json!({
+        "credits_remaining": cents.map(|c| c / 100.0),
+        "unit": "USD",
+    }))
+}
+
 /// Firecrawl: GET https://api.firecrawl.dev/v2/team/credit-usage (Bearer).
 /// Falls back to the v1 path if v2 is unavailable.
 async fn firecrawl_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value, String> {
@@ -119,10 +177,14 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
     >;
 
     // Providers with a usage endpoint. Extend here as APIs appear.
+    // Confirmed absent (dashboard-only) as of 2026-07: perplexity, serper,
+    // parallel, browserless.
     fn fetcher(name: &str) -> Option<UsageFetch> {
         match name {
             "serpapi" => Some(|ctx, key| Box::pin(serpapi_usage(ctx, key))),
             "firecrawl" => Some(|ctx, key| Box::pin(firecrawl_usage(ctx, key))),
+            "brave" => Some(|ctx, key| Box::pin(brave_usage(ctx, key))),
+            "xai" => Some(|ctx, key| Box::pin(xai_usage(ctx, key))),
             _ => None,
         }
     }

@@ -49,9 +49,16 @@ impl Perplexity {
             body["search_mode"] = json!(sm);
         }
 
-        // Apply domain filter from opts
-        if !opts.include_domains.is_empty() {
-            body["search_domain_filter"] = json!(opts.include_domains);
+        // Apply domain filters from opts. Perplexity's search_domain_filter
+        // takes one array; exclusions are entries prefixed with '-'.
+        if !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty() {
+            let domains: Vec<String> = opts
+                .include_domains
+                .iter()
+                .cloned()
+                .chain(opts.exclude_domains.iter().map(|d| format!("-{d}")))
+                .collect();
+            body["search_domain_filter"] = json!(domains);
         }
 
         // Apply recency filter: explicit param first, then opts.freshness
