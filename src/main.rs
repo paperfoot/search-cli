@@ -7,7 +7,9 @@ mod errors;
 mod logging;
 mod output;
 mod providers;
+mod registry;
 mod types;
+mod usage;
 mod verify;
 
 use clap::Parser;
@@ -277,7 +279,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             }
 
             if cli.last {
-                if let Some(cached) = cache::load_last() {
+                if let Some(mut cached) = cache::load_last() {
+                    cached.metadata.cached = true;
+                    cached.metadata.cache_age_secs = cache::last_age_secs();
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -293,7 +297,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     } else {
                         eprintln!("No cached results found. Run a search first.");
                     }
-                    return Ok(1);
+                    return Ok(err.exit_code());
                 }
             }
 
@@ -330,6 +334,27 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 }
             }
 
+            // URL-input modes (extract/scrape/similar) take a URL, not a
+            // query — fail fast (exit 3) instead of feeding a text query to
+            // paid scrapers as if it were an address.
+            let spec = registry::spec(args.mode);
+            if spec.input == registry::InputKind::Url
+                && !(args.query.starts_with("http://") || args.query.starts_with("https://"))
+            {
+                let err = errors::SearchError::InvalidInput {
+                    message: format!(
+                        "mode '{}' takes a URL as -q, not a text query. Example: search search -m {} -q https://example.com/page",
+                        args.mode, args.mode
+                    ),
+                };
+                if ctx.is_json() {
+                    output::json::render_error(&err);
+                } else {
+                    eprintln!("Error: {err}");
+                }
+                return Ok(err.exit_code());
+            }
+
             let count = args.count.unwrap_or(app.config.settings.count);
             let opts = types::SearchOpts {
                 include_domains: args.domain.unwrap_or_default(),
@@ -344,7 +369,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 && opts.exclude_domains.is_empty()
                 && opts.freshness.is_none()
             {
-                if let Some(cached) = cache::load_query(&args.query, &mode_str, count) {
+                if let Some((mut cached, age)) = cache::load_query(&args.query, &mode_str, count) {
+                    cached.metadata.cached = true;
+                    cached.metadata.cache_age_secs = Some(age);
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -502,11 +529,33 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let providers_info: Vec<serde_json::Value> = all
                 .iter()
                 .map(|p| {
+                    let fs = registry::filter_support(p.name());
                     serde_json::json!({
                         "name": p.name(),
                         "configured": p.is_configured(),
                         "capabilities": p.capabilities(),
                         "env_keys": p.env_keys(),
+                        "applies_filters": {
+                            "freshness": fs.freshness,
+                            "domains": fs.domains,
+                            "note": fs.note,
+                        },
+                    })
+                })
+                .collect();
+
+            // Modes come straight from the routing registry, so this manifest
+            // cannot drift from what the engine actually does.
+            let modes_info: Vec<serde_json::Value> = registry::MODES
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.mode.to_string(),
+                        "description": s.description,
+                        "when_to_use": s.when_to_use,
+                        "input": s.input.as_str(),
+                        "merge": s.merge.as_str(),
+                        "providers": s.providers,
                     })
                 })
                 .collect();
@@ -515,12 +564,12 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 "name": "search",
                 "version": env!("CARGO_PKG_VERSION"),
                 "description": env!("CARGO_PKG_DESCRIPTION"),
-                "commands": ["search", "verify", "config show", "config set", "config check", "config path", "agent-info", "providers", "skill install", "skill status", "update"],
+                "commands": ["search", "verify", "usage", "config show", "config set", "config check", "config path", "agent-info", "providers", "skill install", "skill status", "update"],
                 "command_schemas": {
                     "search": {
                         "description": "Search across providers",
                         "args": [
-                            {"name": "-q/--query", "type": "string", "required": true, "description": "Search query"},
+                            {"name": "-q/--query", "type": "string", "required": true, "description": "Search query — except in extract/scrape/similar modes, where it must be a full http(s) URL (see modes[].input)"},
                         ],
                         "options": [
                             {"name": "-m/--mode", "type": "string", "required": false, "default": "general",
@@ -570,6 +619,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             {"name": "--check", "type": "bool", "required": false, "default": false, "description": "Check only, don't install"}
                         ]
                     },
+                    "usage": {
+                        "description": "Remaining credits/quota for providers that expose a usage API (informational; never disables a provider)",
+                        "args": [],
+                        "options": []
+                    },
                 },
                 "global_flags": {
                     "--json": {"type": "bool", "default": false, "description": "Force JSON output (auto-enabled when piped)"},
@@ -587,15 +641,18 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 },
                 "envelope": {
                     "version": "1",
-                    "success": "{ version, status, query, mode, results, metadata: { elapsed_ms, result_count, providers_queried, providers_failed, provider_failures } }",
+                    "success": "{ version, status, query, mode, results, answers?, metadata: { elapsed_ms, result_count, providers_queried, providers_failed, providers_cancelled?, provider_results?, warnings?, cached?, cache_age_secs?, provider_failures? } }",
                     "error": "{ version, status, error: { code, message, suggestion, provider_failures } }",
                     "statuses": ["success", "partial_success", "no_results"],
                     "provider_failure": "{ provider, category, http_status, code, reason, retryable }",
                     "failure_categories": ["auth", "billing_quota", "rate_limit", "timeout", "network", "bad_request", "server", "parse", "config", "other"],
+                    "answers": "AI-synthesized answers (e.g. Perplexity/Tavily) as { provider, text } — kept out of results so every results[].url is a fetchable web URL",
+                    "metadata_notes": "provider_results maps provider -> result count contributed (auditability); providers_cancelled were cut off by the early-stop grace window and neither failed nor contributed; warnings flag filters a provider didn't apply; cached=true marks a replay from the local 5-minute cache",
                 },
                 "providers": providers_info,
-                "modes": ["general","news","academic","people","deep","extract","similar","scrape","scholar","patents","images","places","social"],
-                "routing": "explicit — the caller picks -m/--mode and/or -p/--providers. There is no automatic intent detection; an unspecified mode is a plain general multi-provider web search.",
+                "modes": modes_info,
+                "routing": "explicit — the caller picks -m/--mode and/or -p/--providers. There is no automatic intent detection; an unspecified mode is a plain general multi-provider web search. -p overrides the mode's provider set entirely.",
+                "merge_semantics": "fused modes rank results with reciprocal rank fusion: URLs found by multiple providers score higher, ties broken by per-provider rank. Ordering is deterministic and independent of provider speed. Once enough unique results arrive, still-running providers get a 1.5s grace window and are then cancelled (reported in metadata.providers_cancelled) — except deep mode, which always waits for every provider.",
                 "config": {
                     "path": config::config_path().to_string_lossy(),
                     "env_prefix": "SEARCH_",
@@ -629,6 +686,46 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             match action {
                 SkillAction::Install => cli::skill::install(ctx),
                 SkillAction::Status => cli::skill::status(ctx),
+            }
+            Ok(0)
+        }
+
+        Commands::Usage => {
+            let usages = usage::collect(app).await;
+            if ctx.is_json() {
+                output::json::render_value(&serde_json::json!({
+                    "version": types::ENVELOPE_VERSION,
+                    "status": "success",
+                    "providers": usages,
+                    "note": "informational only — the CLI never disables a provider based on balance",
+                }));
+            } else if !ctx.suppress_human() {
+                use owo_colors::OwoColorize;
+                for u in &usages {
+                    if !u.supported {
+                        println!("  {:<12} {}", u.provider, "no usage API".dimmed());
+                    } else if !u.configured {
+                        println!("  {:<12} {}", u.provider, "not configured".yellow());
+                    } else if let Some(err) = &u.error {
+                        println!("  {:<12} {}", u.provider.bold(), err.red());
+                    } else if let Some(data) = &u.data {
+                        let remaining = data
+                            .get("credits_remaining")
+                            .filter(|v| !v.is_null())
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "?".to_string());
+                        let unit = data
+                            .get("unit")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("credits");
+                        println!(
+                            "  {:<12} {} {} remaining",
+                            u.provider.bold(),
+                            remaining.green(),
+                            unit
+                        );
+                    }
+                }
             }
             Ok(0)
         }

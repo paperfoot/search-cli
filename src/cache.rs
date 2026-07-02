@@ -55,6 +55,13 @@ pub fn load_last() -> Option<SearchResponse> {
     serde_json::from_str(&content).ok()
 }
 
+/// Age of the `--last` snapshot from the file's mtime (the snapshot itself
+/// predates timestamped entries), so replays can report how stale they are.
+pub fn last_age_secs() -> Option<u64> {
+    let modified = std::fs::metadata(last_path()).ok()?.modified().ok()?;
+    SystemTime::now().duration_since(modified).ok().map(|d| d.as_secs())
+}
+
 #[derive(Serialize, Deserialize)]
 struct CachedEntry {
     timestamp: u64,
@@ -88,17 +95,19 @@ pub fn save_query(query: &str, mode: &str, count: usize, response: &SearchRespon
 }
 
 /// Load a cached query result if fresh and it held at least `count` results.
-pub fn load_query(query: &str, mode: &str, count: usize) -> Option<SearchResponse> {
+/// Returns the response plus its age in seconds so the caller can mark the
+/// replay as cached in the envelope.
+pub fn load_query(query: &str, mode: &str, count: usize) -> Option<(SearchResponse, u64)> {
     let path = query_cache_path(query, mode);
     let content = std::fs::read_to_string(path).ok()?;
     let entry: CachedEntry = serde_json::from_str(&content).ok()?;
     // saturating_sub: a backward clock step (NTP/VM resume) must not underflow.
-    let fresh = now_secs().saturating_sub(entry.timestamp) < CACHE_TTL_SECS;
-    if fresh && entry.count >= count {
+    let age = now_secs().saturating_sub(entry.timestamp);
+    if age < CACHE_TTL_SECS && entry.count >= count {
         let mut resp = entry.response;
         resp.results.truncate(count);
         resp.metadata.result_count = resp.results.len();
-        Some(resp)
+        Some((resp, age))
     } else {
         None
     }
