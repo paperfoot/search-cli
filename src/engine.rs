@@ -116,7 +116,9 @@ pub async fn execute_search(
             },
             None => set.join_next().await,
         };
-        let Some(join_result) = join_result else { break };
+        let Some(join_result) = join_result else {
+            break;
+        };
         match join_result {
             Ok((name, Ok(Ok(items)))) => {
                 for item in &items {
@@ -254,10 +256,7 @@ fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
                     if f.result.image_url.is_none() {
                         f.result.image_url = item.image_url;
                     }
-                    let extra = f
-                        .result
-                        .extra
-                        .get_or_insert_with(|| serde_json::json!({}));
+                    let extra = f.result.extra.get_or_insert_with(|| serde_json::json!({}));
                     if let Some(obj) = extra.as_object_mut() {
                         let list = obj
                             .entry("also_found_by")
@@ -623,11 +622,17 @@ mod tests {
         let buckets = vec![
             (
                 "a".to_string(),
-                vec![result("https://only-a.com", "a"), result("https://both.com", "a")],
+                vec![
+                    result("https://only-a.com", "a"),
+                    result("https://both.com", "a"),
+                ],
             ),
             (
                 "b".to_string(),
-                vec![result("https://only-b.com", "b"), result("https://both.com", "b")],
+                vec![
+                    result("https://only-b.com", "b"),
+                    result("https://both.com", "b"),
+                ],
             ),
         ];
         let fused = fuse_rrf(buckets);
@@ -641,11 +646,17 @@ mod tests {
             vec![
                 (
                     first.to_string(),
-                    vec![result("https://x.com", first), result("https://y.com", first)],
+                    vec![
+                        result("https://x.com", first),
+                        result("https://y.com", first),
+                    ],
                 ),
                 (
                     second.to_string(),
-                    vec![result("https://y.com", second), result("https://z.com", second)],
+                    vec![
+                        result("https://y.com", second),
+                        result("https://z.com", second),
+                    ],
                 ),
             ]
         };
@@ -673,9 +684,15 @@ mod tests {
 
     #[test]
     fn synthetic_answers_are_detected_by_scheme() {
-        assert!(is_synthetic_answer(&result("perplexity://answer", "perplexity")));
+        assert!(is_synthetic_answer(&result(
+            "perplexity://answer",
+            "perplexity"
+        )));
         assert!(is_synthetic_answer(&result("tavily://answer", "tavily")));
-        assert!(!is_synthetic_answer(&result("https://x.com/search?q=a", "xai")));
+        assert!(!is_synthetic_answer(&result(
+            "https://x.com/search?q=a",
+            "xai"
+        )));
         // A malformed/scheme-less URL is still a result — it must not
         // silently vanish into answers[].
         assert!(!is_synthetic_answer(&result("example.com/page", "serper")));

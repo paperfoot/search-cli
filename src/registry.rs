@@ -269,10 +269,7 @@ mod tests {
 
     #[test]
     fn scrape_is_exact_alias_of_extract() {
-        assert_eq!(
-            spec(Mode::Scrape).providers,
-            spec(Mode::Extract).providers
-        );
+        assert_eq!(spec(Mode::Scrape).providers, spec(Mode::Extract).providers);
     }
 
     #[test]

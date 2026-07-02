@@ -61,7 +61,9 @@ async fn get_json(
         let excerpt: String = excerpt.chars().take(160).collect();
         return Err(format!("HTTP {status}: {excerpt}"));
     }
-    resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// SerpApi: GET https://serpapi.com/account.json?api_key=...
@@ -125,10 +127,10 @@ async fn xai_usage(ctx: &AppContext, _key: String) -> Result<serde_json::Value, 
     }
     let url = format!("https://management-api.x.ai/v1/billing/teams/{team_id}/prepaid/balance");
     let v = get_json(ctx, &url, Some(&mgmt_key), None).await?;
-    let cents = v
-        .get("total")
-        .and_then(|t| t.get("val"))
-        .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
+    let cents = v.get("total").and_then(|t| t.get("val")).and_then(|x| {
+        x.as_f64()
+            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+    });
     Ok(serde_json::json!({
         "credits_remaining": cents.map(|c| c / 100.0),
         "unit": "USD",
