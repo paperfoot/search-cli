@@ -219,9 +219,12 @@ pub async fn execute_search(
 }
 
 /// True for provider-synthesized answers smuggled in as results under a
-/// non-web pseudo-URL scheme (perplexity://answer, tavily://answer).
+/// known pseudo-URL scheme (perplexity://answer, tavily://answer). Matched
+/// exactly — a result with a merely malformed or scheme-less URL is still a
+/// result, not an answer, and must not silently vanish from results[].
 fn is_synthetic_answer(r: &SearchResult) -> bool {
-    !(r.url.starts_with("http://") || r.url.starts_with("https://"))
+    const ANSWER_SCHEMES: &[&str] = &["perplexity://", "tavily://"];
+    ANSWER_SCHEMES.iter().any(|s| r.url.starts_with(s))
 }
 
 /// Reciprocal rank fusion across provider buckets. Each URL scores
@@ -673,6 +676,10 @@ mod tests {
         assert!(is_synthetic_answer(&result("perplexity://answer", "perplexity")));
         assert!(is_synthetic_answer(&result("tavily://answer", "tavily")));
         assert!(!is_synthetic_answer(&result("https://x.com/search?q=a", "xai")));
+        // A malformed/scheme-less URL is still a result — it must not
+        // silently vanish into answers[].
+        assert!(!is_synthetic_answer(&result("example.com/page", "serper")));
+        assert!(!is_synthetic_answer(&result("", "serper")));
     }
 
     #[test]
