@@ -2,12 +2,15 @@ mod cache;
 mod cli;
 mod config;
 mod context;
+mod doctor;
 mod engine;
 mod errors;
+mod guard;
 mod logging;
 mod output;
 mod providers;
 mod registry;
+mod stats;
 mod types;
 mod usage;
 mod verify;
@@ -219,20 +222,48 @@ async fn main() {
     std::process::exit(exit_code);
 }
 
+/// Cap snippet/answer text at `max` characters (char-safe) so agents can
+/// bound how much web content enters their context window.
+fn apply_max_chars(response: &mut types::SearchResponse, max_chars: Option<usize>) {
+    let Some(max) = max_chars else { return };
+    let cap = |s: &mut String| {
+        if s.chars().count() > max {
+            let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+            *s = format!("{kept}…");
+        }
+    };
+    for r in &mut response.results {
+        cap(&mut r.snippet);
+    }
+    for a in &mut response.answers {
+        cap(&mut a.text);
+    }
+}
+
+/// SearchArgs for the bare `search "query"` shorthand: general mode, defaults.
+fn default_search_args(query: String) -> cli::SearchArgs {
+    cli::SearchArgs {
+        query,
+        mode: types::Mode::General,
+        count: None,
+        providers: None,
+        domain: None,
+        exclude_domain: None,
+        freshness: None,
+        no_cache: false,
+        max_chars: None,
+        country: None,
+        lang: None,
+        allow_private: false,
+    }
+}
+
 async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::SearchError> {
     // Handle bare `search "query"` without subcommand
     let command = if let Some(cmd) = cli.command {
         cmd
     } else if cli.last {
-        Commands::Search(cli::SearchArgs {
-            query: String::new(),
-            mode: types::Mode::General,
-            count: None,
-            providers: None,
-            domain: None,
-            exclude_domain: None,
-            freshness: None,
-        })
+        Commands::Search(default_search_args(String::new()))
     } else if !cli.query_words.is_empty() {
         // Drop any global-flag tokens trailing_var_arg swallowed into the query
         // (their effect was already applied via the pre-scan merge in main).
@@ -243,15 +274,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             .cloned()
             .collect::<Vec<_>>()
             .join(" ");
-        Commands::Search(cli::SearchArgs {
-            query,
-            mode: types::Mode::General,
-            count: None,
-            providers: None,
-            domain: None,
-            exclude_domain: None,
-            freshness: None,
-        })
+        Commands::Search(default_search_args(query))
     } else {
         use clap::CommandFactory;
         if ctx.is_json() {
@@ -335,6 +358,44 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 }
             }
 
+            // Input validation, all exit 3: empty/oversized queries would fan
+            // out paid API calls for nothing; unbounded -c passes straight to
+            // provider billing.
+            let bail = |err: errors::SearchError, ctx: &Ctx| {
+                if ctx.is_json() {
+                    output::json::render_error(&err);
+                } else {
+                    eprintln!("Error: {err}");
+                }
+                Ok(err.exit_code())
+            };
+            if args.query.trim().is_empty() {
+                return bail(
+                    errors::SearchError::InvalidInput {
+                        message: "query is empty".to_string(),
+                    },
+                    ctx,
+                );
+            }
+            if args.query.chars().count() > 2000 {
+                return bail(
+                    errors::SearchError::InvalidInput {
+                        message: "query exceeds 2000 characters".to_string(),
+                    },
+                    ctx,
+                );
+            }
+            if let Some(c) = args.count {
+                if c == 0 || c > 100 {
+                    return bail(
+                        errors::SearchError::InvalidInput {
+                            message: format!("-c must be between 1 and 100 (got {c})"),
+                        },
+                        ctx,
+                    );
+                }
+            }
+
             // URL-input modes (extract/scrape/similar) take a URL, not a
             // query — fail fast (exit 3) instead of feeding a text query to
             // paid scrapers as if it were an address.
@@ -342,37 +403,59 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             if spec.input == registry::InputKind::Url
                 && !(args.query.starts_with("http://") || args.query.starts_with("https://"))
             {
-                let err = errors::SearchError::InvalidInput {
-                    message: format!(
-                        "mode '{}' takes a URL as -q, not a text query. Example: search search -m {} -q https://example.com/page",
-                        args.mode, args.mode
-                    ),
-                };
-                if ctx.is_json() {
-                    output::json::render_error(&err);
-                } else {
-                    eprintln!("Error: {err}");
-                }
-                return Ok(err.exit_code());
+                return bail(
+                    errors::SearchError::InvalidInput {
+                        message: format!(
+                            "mode '{}' takes a URL as -q, not a text query. Example: search search -m {} -q https://example.com/page",
+                            args.mode, args.mode
+                        ),
+                    },
+                    ctx,
+                );
             }
 
-            let count = args.count.unwrap_or(app.config.settings.count);
+            // Extract/scrape fetch the URL directly (the stealth rung runs on
+            // THIS machine) — refuse private/internal targets unless
+            // explicitly allowed, so a prompt-injected agent can't be steered
+            // into localhost, the LAN, or cloud metadata.
+            if matches!(args.mode, types::Mode::Extract | types::Mode::Scrape)
+                && !args.allow_private
+            {
+                if let Err(err) = guard::assert_public_url(&args.query).await {
+                    return bail(err, ctx);
+                }
+            }
+
+            let count = args
+                .count
+                .unwrap_or(app.config.settings.count)
+                .clamp(1, 100);
             let opts = types::SearchOpts {
                 include_domains: args.domain.unwrap_or_default(),
                 exclude_domains: args.exclude_domain.unwrap_or_default(),
                 freshness: args.freshness,
+                country: args.country.clone(),
+                lang: args.lang.clone(),
             };
 
-            // Check query cache (5min TTL)
+            // Query cache (5min TTL). Only plain searches share it — any
+            // -p/filter/locale variant must neither read NOR write the plain
+            // entry (an ungated save here used to let a filtered result be
+            // replayed for a later unfiltered query). --no-cache skips the
+            // read but still refreshes the entry.
             let mode_str = args.mode.to_string();
-            if args.providers.is_none()
+            let cacheable = args.providers.is_none()
                 && opts.include_domains.is_empty()
                 && opts.exclude_domains.is_empty()
                 && opts.freshness.is_none()
-            {
+                && opts.country.is_none()
+                && opts.lang.is_none();
+            if cacheable && !args.no_cache {
                 if let Some((mut cached, age)) = cache::load_query(&args.query, &mode_str, count) {
                     cached.metadata.cached = true;
                     cached.metadata.cache_age_secs = Some(age);
+                    logging::log_search(&cached);
+                    apply_max_chars(&mut cached, args.max_chars);
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -413,16 +496,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 sp.finish_and_clear();
             }
 
-            let response = response?;
+            let mut response = response?;
 
             // Don't cache empty results — a transient no_results shouldn't be
             // replayed for 5 minutes after the cause clears. (Total failure is
-            // already an Err and never reaches here.)
+            // already an Err and never reaches here.) The full response is
+            // cached; --max-chars truncation applies per invocation at render.
             if !response.results.is_empty() {
                 cache::save_last(&response);
-                cache::save_query(&args.query, &mode_str, count, &response);
+                if cacheable {
+                    cache::save_query(&args.query, &mode_str, count, &response);
+                }
             }
             logging::log_search(&response);
+            apply_max_chars(&mut response, args.max_chars);
 
             if ctx.is_json() {
                 output::json::render(&response);
@@ -466,6 +553,16 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     }
                 }
                 ConfigAction::Set { key, value } => {
+                    // `search config set keys.x -` reads the value from stdin
+                    // so secrets stay out of shell history and `ps` output.
+                    let value = if value == "-" {
+                        use std::io::BufRead;
+                        let mut line = String::new();
+                        std::io::stdin().lock().read_line(&mut line)?;
+                        line.trim().to_string()
+                    } else {
+                        value
+                    };
                     config_set(&key, &value)?;
                     if ctx.is_json() {
                         output::json::render_value(&serde_json::json!({
@@ -687,6 +784,64 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             match action {
                 SkillAction::Install => cli::skill::install(ctx),
                 SkillAction::Status => cli::skill::status(ctx),
+            }
+            Ok(0)
+        }
+
+        Commands::Cache { action } => match action {
+            cli::CacheAction::Clear => {
+                let removed = cache::clear();
+                if ctx.is_json() {
+                    output::json::render_value(&serde_json::json!({
+                        "version": types::ENVELOPE_VERSION,
+                        "status": "success",
+                        "removed_entries": removed,
+                    }));
+                } else if !ctx.suppress_human() {
+                    eprintln!("Removed {removed} cached entries");
+                }
+                Ok(0)
+            }
+        },
+
+        Commands::Doctor => {
+            let report = doctor::run(app).await;
+            let healthy = report.iter().all(|c| c.ok);
+            if ctx.is_json() {
+                output::json::render_value(&serde_json::json!({
+                    "version": types::ENVELOPE_VERSION,
+                    "status": if healthy { "success" } else { "partial_success" },
+                    "checks": report,
+                }));
+            } else if !ctx.suppress_human() {
+                doctor::render_human(&report);
+            }
+            Ok(if healthy { 0 } else { 1 })
+        }
+
+        Commands::Stats(stats_args) => {
+            if let Some(days) = stats_args.prune {
+                let removed = stats::prune_logs(days);
+                if ctx.is_json() {
+                    output::json::render_value(&serde_json::json!({
+                        "version": types::ENVELOPE_VERSION,
+                        "status": "success",
+                        "pruned_files": removed,
+                    }));
+                } else if !ctx.suppress_human() {
+                    eprintln!("Pruned {removed} log files older than {days} days");
+                }
+                return Ok(0);
+            }
+            let report = stats::compute(stats_args.days);
+            if ctx.is_json() {
+                output::json::render_value(&serde_json::json!({
+                    "version": types::ENVELOPE_VERSION,
+                    "status": "success",
+                    "stats": report,
+                }));
+            } else if !ctx.suppress_human() {
+                stats::render_human(&report);
             }
             Ok(0)
         }

@@ -335,10 +335,44 @@ fn normalize_url(url: &str) -> String {
         .strip_prefix("https://")
         .or_else(|| lower.strip_prefix("http://"))
         .unwrap_or(&lower);
-    no_scheme
-        .strip_prefix("www.")
-        .unwrap_or(no_scheme)
-        .to_string()
+    let no_www = no_scheme.strip_prefix("www.").unwrap_or(no_scheme);
+    strip_tracking_params(no_www)
+}
+
+/// Drop known tracking parameters from the dedup key. Without this,
+/// `article?utm_source=x` and `article` count as different URLs, defeating
+/// both dedup and the cross-provider consensus that fusion ranks on.
+/// Meaningful params (page=, q=, id=) are preserved.
+fn strip_tracking_params(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let is_tracker = |param: &str| {
+        let name = param.split('=').next().unwrap_or(param);
+        name.starts_with("utm_")
+            || matches!(
+                name,
+                "fbclid"
+                    | "gclid"
+                    | "gclsrc"
+                    | "dclid"
+                    | "msclkid"
+                    | "igshid"
+                    | "mc_cid"
+                    | "mc_eid"
+                    | "ref_src"
+                    | "ref_url"
+                    | "cmpid"
+                    | "_hsenc"
+                    | "_hsmi"
+            )
+    };
+    let kept: Vec<&str> = query.split('&').filter(|p| !is_tracker(p)).collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
 }
 
 fn provider_allowed(name: &str, only: &Option<Vec<String>>) -> bool {
@@ -488,6 +522,20 @@ pub async fn execute_special(
         return Err(SearchError::AllProvidersFailed {
             failed: provider_failures,
         });
+    }
+
+    // Scraped page content is untrusted input for the consuming agent —
+    // label it so downstream prompts can treat it as data, not instructions.
+    if matches!(mode, Mode::Extract | Mode::Scrape) {
+        for r in &mut results {
+            let extra = r.extra.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = extra.as_object_mut() {
+                obj.insert(
+                    "content_origin".to_string(),
+                    serde_json::json!("untrusted_web_content"),
+                );
+            }
+        }
     }
 
     // Filter honesty: apart from social (xai, which remaps domains to X
@@ -816,6 +864,23 @@ mod tests {
         assert_ne!(
             normalize_url("https://x.com/r?page=1"),
             normalize_url("https://x.com/r?page=2")
+        );
+    }
+
+    #[test]
+    fn tracking_params_do_not_defeat_dedup() {
+        assert_eq!(
+            normalize_url("https://a.com/post?utm_source=x&utm_medium=y"),
+            normalize_url("https://a.com/post")
+        );
+        assert_eq!(
+            normalize_url("https://a.com/post?fbclid=abc"),
+            normalize_url("https://a.com/post")
+        );
+        // Meaningful params survive alongside stripped trackers.
+        assert_eq!(
+            normalize_url("https://a.com/r?page=2&gclid=zz"),
+            normalize_url("https://a.com/r?page=2")
         );
     }
 

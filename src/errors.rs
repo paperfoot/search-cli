@@ -132,7 +132,7 @@ impl SearchError {
             category: self.category(),
             http_status: self.http_status(),
             code: self.error_code().to_string(),
-            reason: self.to_string(),
+            reason: redact_secrets(&self.to_string()),
             retryable: self.is_retryable(),
         }
     }
@@ -140,7 +140,7 @@ impl SearchError {
     pub fn suggestion(&self) -> Option<String> {
         match self {
             Self::AuthMissing { provider } => Some(format!(
-                "Set {}_API_KEY env var or run: search config set keys.{} YOUR_KEY",
+                "Set {}_API_KEY env var, or: echo YOUR_KEY | search config set keys.{} -",
                 provider.to_uppercase(),
                 provider
             )),
@@ -172,12 +172,38 @@ impl SearchError {
             status: "error".to_string(),
             error: ErrorDetail {
                 code: self.error_code().to_string(),
-                message: self.to_string(),
+                message: redact_secrets(&self.to_string()),
                 suggestion: self.suggestion(),
                 provider_failures,
             },
         }
     }
+}
+
+/// Scrub credential values from user-visible strings. Transport errors can
+/// embed full request URLs (SerpApi authenticates via `?api_key=` in the
+/// query string), and provider error bodies sometimes echo the caller's key.
+pub fn redact_secrets(s: &str) -> String {
+    const MARKERS: &[&str] = &["api_key=", "apikey=", "apiKey=", "token=", "key="];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    // Earliest marker wins each pass; ties resolve to the longer marker so
+    // "api_key=" isn't half-matched as "key=".
+    while let Some((pos, mlen)) = MARKERS
+        .iter()
+        .filter_map(|m| rest.find(m).map(|p| (p, m.len())))
+        .min_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+    {
+        out.push_str(&rest[..pos + mlen]);
+        let value = &rest[pos + mlen..];
+        let end = value
+            .find(|c: char| matches!(c, '&' | ' ' | '"' | '\'' | '\n'))
+            .unwrap_or(value.len());
+        out.push_str("REDACTED");
+        rest = &value[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Exit code for total failure, derived from the underlying causes:
@@ -218,6 +244,19 @@ fn suggestion_for_failures(failed: &[ProviderFailure]) -> String {
 mod tests {
     use super::*;
     use crate::types::FailureCategory;
+
+    #[test]
+    fn redacts_keys_in_urls_and_bodies() {
+        assert_eq!(
+            redact_secrets("GET https://serpapi.com/account.json?api_key=sk-123&x=1 failed"),
+            "GET https://serpapi.com/account.json?api_key=REDACTED&x=1 failed"
+        );
+        assert_eq!(
+            redact_secrets("body: {\"token=abc def\"}"),
+            "body: {\"token=REDACTED def\"}"
+        );
+        assert_eq!(redact_secrets("no secrets here"), "no secrets here");
+    }
 
     fn api(status: u16) -> SearchError {
         SearchError::Api {

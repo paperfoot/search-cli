@@ -99,11 +99,27 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn load_config() -> Result<AppConfig, Box<figment::Error>> {
+    tighten_config_permissions();
     Ok(Figment::new()
         .merge(Serialized::defaults(AppConfig::default()))
         .merge(Toml::file(config_path()))
         .merge(Env::prefixed("SEARCH_").split("_"))
         .extract()?)
+}
+
+/// One-time migration: config files written before 0.8.0 were mode 644, so
+/// every local process could read the API keys. Quietly chmod to 0600.
+fn tighten_config_permissions() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = config_path();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
 }
 
 /// Valid provider key names for `config set keys.<name>`.
@@ -284,7 +300,16 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, doc.to_string())?;
+    // Atomic replace (temp + rename) so concurrent `config set` calls can't
+    // interleave a torn file, and 0600 because this file holds API keys.
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 

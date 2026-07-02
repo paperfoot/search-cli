@@ -127,6 +127,12 @@ impl super::Provider for Brave {
             if let Some(f) = freshness {
                 req = req.query(&[("freshness", f)]);
             }
+            if let Some(country) = &opts.country {
+                req = req.query(&[("country", country.to_uppercase())]);
+            }
+            if let Some(lang) = &opts.lang {
+                req = req.query(&[("search_lang", lang.to_lowercase())]);
+            }
 
             let resp = req.send().await?;
 
@@ -196,6 +202,12 @@ impl super::Provider for Brave {
 
             if let Some(f) = freshness {
                 req = req.query(&[("freshness", f)]);
+            }
+            if let Some(country) = &opts.country {
+                req = req.query(&[("country", country.to_uppercase())]);
+            }
+            if let Some(lang) = &opts.lang {
+                req = req.query(&[("search_lang", lang.to_lowercase())]);
             }
 
             let resp = req.send().await?;

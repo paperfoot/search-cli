@@ -48,6 +48,12 @@ impl Serper {
             };
             body["tbs"] = json!(tbs);
         }
+        if let Some(country) = &opts.country {
+            body["gl"] = json!(country.to_lowercase());
+        }
+        if let Some(lang) = &opts.lang {
+            body["hl"] = json!(lang.to_lowercase());
+        }
 
         super::retry_request(|| async {
             let resp = client
