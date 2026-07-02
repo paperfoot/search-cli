@@ -8,6 +8,7 @@ pub mod parallel;
 pub mod perplexity;
 pub mod serpapi;
 pub mod serper;
+#[cfg(feature = "stealth")]
 pub mod stealth;
 pub mod tavily;
 pub mod xai;
@@ -187,6 +188,7 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(exa::Exa::new(ctx.clone())),
         Box::new(jina::Jina::new(ctx.clone())),
         Box::new(linkup::Linkup::new(ctx.clone())),
+        #[cfg(feature = "stealth")]
         Box::new(stealth::Stealth::new(ctx.clone())),
         Box::new(firecrawl::Firecrawl::new(ctx.clone())),
         Box::new(tavily::Tavily::new(ctx.clone())),

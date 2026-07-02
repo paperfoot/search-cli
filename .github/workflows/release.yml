@@ -13,12 +13,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux disabled: rquest/boring-sys has BoringSSL linking issues in CI
-          # Linux users: cargo install agent-search
           - target: x86_64-apple-darwin
             os: macos-latest
+            flags: ""
           - target: aarch64-apple-darwin
             os: macos-latest
+            flags: ""
+          # Linux ships without the stealth feature (wreq/BoringSSL doesn't
+          # link on Linux runners); the extract chain starts at jina there.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            flags: "--no-default-features"
 
     runs-on: ${{ matrix.os }}
 
@@ -32,7 +37,7 @@ jobs:
 
       - name: Build
         # --locked: reproducible release builds from the committed Cargo.lock.
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked ${{ matrix.flags }} --target ${{ matrix.target }}
 
       - name: Package
         run: |
@@ -54,8 +59,15 @@ jobs:
         with:
           merge-multiple: true
 
+      # One checksums file per release: install.sh and the Homebrew bump
+      # verify against it instead of hand-computing hashes.
+      - name: Checksums
+        run: sha256sum search-*.tar.gz > SHA256SUMS
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: search-*.tar.gz
+          files: |
+            search-*.tar.gz
+            SHA256SUMS
           generate_release_notes: true

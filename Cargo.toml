@@ -15,6 +15,12 @@ readme = "README.md"
 name = "search"
 path = "src/main.rs"
 
+[features]
+# The stealth provider needs wreq (BoringSSL), which doesn't link on Linux —
+# build with --no-default-features there; the extract chain starts at jina.
+default = ["stealth"]
+stealth = ["dep:wreq", "dep:wreq-util"]
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
@@ -36,10 +42,10 @@ backon = "1"
 url = "2.5.8"
 mimalloc = "0.1.48"
 simd-json = "0.17.0"
-wreq = { version = "=6.0.0-rc.28", features = ["json", "cookies"] }
-wreq-util = "=3.0.0-rc.11"
+wreq = { version = "=6.0.0-rc.28", features = ["json", "cookies"], optional = true }
+wreq-util = { version = "=3.0.0-rc.11", optional = true }
 tl = "0.7"
-hickory-resolver = { version = "0.25", features = ["tokio"] }
+hickory-resolver = { version = "0.26", features = ["tokio"] }
 readability = "0.3"
 
 [dev-dependencies]
