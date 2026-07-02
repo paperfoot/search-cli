@@ -202,16 +202,13 @@ pub fn filter_support(provider: &str) -> FilterSupport {
     // Base name so "brave_llm_context" inherits brave's support.
     let base = provider.split("_llm_").next().unwrap_or(provider);
     match base {
-        "brave" | "serper" | "serpapi" | "tavily" | "exa" => FilterSupport {
-            freshness: true,
-            domains: true,
-            note: None,
-        },
-        "perplexity" => FilterSupport {
-            freshness: true,
-            domains: true,
-            note: Some("perplexity applies --domain but ignores --exclude-domain"),
-        },
+        "brave" | "serper" | "serpapi" | "tavily" | "exa" | "perplexity" | "parallel" => {
+            FilterSupport {
+                freshness: true,
+                domains: true,
+                note: None,
+            }
+        }
         "jina" => FilterSupport {
             freshness: false,
             domains: true,

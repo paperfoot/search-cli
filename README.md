@@ -216,18 +216,34 @@ search "query" 2>/dev/null             # suppress diagnostics
 
 | Provider | What it does | Best for |
 |----------|-------------|----------|
-| **[Parallel](https://parallel.ai/)** | Web search API built for AI agents | Agent-grade web search, news, deep research |
-| **[Brave](https://brave.com/search/api/)** | Independent 35B-page index + LLM Context API | Web search, news, RAG-ready content |
-| **[Serper](https://serper.dev/)** | Raw Google SERP + specialist endpoints | Scholar, patents, images, places |
+| **[Parallel](https://parallel.ai/)** | Agent-native search: objective in, LLM-ready ranked excerpts out | Grounding content for agents, deterministic per-query cost |
+| **[Brave](https://brave.com/search/api/)** | Independent index (not resold Google/Bing) + LLM Context API | Independent ranking signal, news, RAG grounding |
+| **[Serper](https://serper.dev/)** | Cheapest raw Google SERP + specialist endpoints | Actual Google rankings; scholar, patents, images, places |
 | **[Exa](https://exa.ai/)** | Neural/semantic search, category filters | Research papers, people search, similar sites |
 | **[Jina](https://jina.ai/)** | Fast URL-to-markdown, 500 RPM free tier | Reading article content, quick extraction |
 | **[Firecrawl](https://firecrawl.dev/)** | JavaScript rendering, structured extraction | Dynamic pages, SPAs, data extraction |
 | **[Tavily](https://tavily.com/)** | General + deep search, research-focused | Broad coverage, research queries |
-| **[SerpApi](https://serpapi.com/)** | 80+ engines: Google, Bing, YouTube, Baidu | Scholar, multi-engine coverage |
-| **[Perplexity](https://perplexity.ai/)** | AI-powered answers with citations (Sonar Pro) | Complex queries, synthesized answers |
+| **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
+| **[Perplexity](https://perplexity.ai/)** | LLM-synthesized answer with citations (Sonar) | When you want an answer with sources, not raw pages |
 | **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, dynamic rendering |
 | **Stealth** | Built-in anti-bot scraper | Protected pages, no API key needed |
-| **[xAI](https://x.ai/)** | X/Twitter search via Grok AI | Tweets, trending topics, social sentiment |
+| **[xAI](https://x.ai/)** | Only provider with native real-time X/Twitter search (Grok) | Live social signal, trending topics, account activity |
+
+### Checking Credits
+
+```bash
+search usage --json
+```
+
+Reports remaining credits/quota for every provider whose API exposes it:
+**SerpApi** (`account.json`), **Firecrawl** (credit-usage endpoint), **xAI**
+(management API — set `XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`), and **Brave**
+(rate-limit headers; the check consumes one metered request). The rest are
+dashboard-only and reported as `supported: false`. Purely informational: the
+CLI never disables or deprioritizes a provider because its balance is low —
+if a provider is out of credits, the failed call shows up as a
+`billing_quota` entry in `metadata.provider_failures` and you decide what to
+top up.
 
 ## Configuration
 

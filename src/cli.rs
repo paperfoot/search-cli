@@ -11,18 +11,18 @@ use clap::{Parser, Subcommand};
         intent. Run `search agent-info` for the machine-readable capability map.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
         PROVIDERS:\n  \
-          parallel   Independent web index (Parallel AI), news, deep\n  \
-          brave      Independent web index (35B pages), news search\n  \
-          serper     Google SERP: web, news, scholar, patents, images, places\n  \
+          parallel   Agent-native search (Parallel AI): LLM-ready excerpts\n  \
+          brave      Independent web index (not Google/Bing) + LLM grounding\n  \
+          serper     Cheapest raw Google SERP: web, news, scholar, patents, places\n  \
           exa        Neural/semantic search, LinkedIn people, find-similar\n  \
           jina       Fast web search + URL-to-markdown reader\n  \
           firecrawl  JS-rendered page scraping + structured extraction\n  \
-          tavily     General, news, academic, deep search\n  \
-          serpapi    80+ engines: Google, Bing, YouTube, Baidu, Scholar\n  \
-          perplexity AI-powered answers with citations (Sonar)\n  \
+          tavily     RAG-oriented search: general, news, academic, deep\n  \
+          serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
+          perplexity LLM-synthesized answer with citations (Sonar)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
-          stealth    Anti-bot stealth scraper\n  \
-          xai        X/Twitter social search via xAI Grok\n\n\
+          stealth    Local anti-bot scraper (no API key)\n  \
+          xai        Only real-time X/Twitter search (Grok agentic)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # general web search\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \

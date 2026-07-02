@@ -97,6 +97,39 @@ pub fn http_error_message(status: u16, body: &str) -> String {
     }
 }
 
+/// UTC date `days` ago as `YYYY-MM-DD`, without a date-crate dependency.
+/// Used to translate the CLI's freshness words into provider date floors.
+pub fn date_days_ago(days: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let total_days = now.saturating_sub(days * 86400) / 86400;
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = total_days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days of lookback for a freshness word (day/week/month/year).
+pub fn freshness_days(freshness: &str) -> Option<u64> {
+    match freshness {
+        "day" => Some(1),
+        "week" => Some(7),
+        "month" => Some(30),
+        "year" => Some(365),
+        _ => None,
+    }
+}
+
 /// Collapse whitespace and clip to `max` chars (char-safe, never panics on UTF-8).
 fn sanitize_excerpt(body: &str, max: usize) -> String {
     let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
