@@ -31,3 +31,28 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  # Linux build without the stealth feature (wreq/BoringSSL doesn't link on
+  # Linux runners) — proves the container/agent-fleet build stays green.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test (no stealth)
+        run: cargo test --locked --no-default-features
+
+  # Advisory + license + source gate. wreq is a pre-release pin inherited
+  # from the yanked rquest crate — exactly the dependency class to watch.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses sources

@@ -78,7 +78,8 @@ pub async fn verify_emails(
     // would abort with a backtrace and break the --json envelope contract.
     let resolver = Resolver::builder_tokio()
         .map_err(|e| crate::errors::SearchError::Resolver(e.to_string()))?
-        .build();
+        .build()
+        .map_err(|e| crate::errors::SearchError::Resolver(e.to_string()))?;
 
     let mut results = Vec::with_capacity(emails.len());
     for email in emails {
@@ -229,11 +230,19 @@ async fn verify_one(resolver: &hickory_resolver::TokioResolver, email: &str) -> 
 }
 
 async fn resolve_mx(resolver: &hickory_resolver::TokioResolver, domain: &str) -> Option<String> {
+    // hickory 0.26: mx_lookup returns a plain Lookup; MX rdata comes out of
+    // the answer records.
+    use hickory_resolver::proto::rr::RData;
     match resolver.mx_lookup(domain).await {
-        Ok(mx) => mx
-            .into_iter()
-            .min_by_key(|r| r.preference())
-            .map(|r| r.exchange().to_string().trim_end_matches('.').to_string()),
+        Ok(lookup) => lookup
+            .answers()
+            .iter()
+            .filter_map(|rec| match &rec.data {
+                RData::MX(mx) => Some(mx),
+                _ => None,
+            })
+            .min_by_key(|mx| mx.preference)
+            .map(|mx| mx.exchange.to_string().trim_end_matches('.').to_string()),
         Err(_) => None,
     }
 }

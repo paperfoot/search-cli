@@ -38,6 +38,7 @@ pub enum SearchError {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 
+    #[cfg(feature = "stealth")]
     #[error(transparent)]
     Wreq(#[from] wreq::Error),
 
@@ -55,7 +56,9 @@ impl SearchError {
             Self::InvalidInput { .. } => 3,
             Self::RateLimited { .. } => 4,
             Self::AllProvidersFailed { failed } => exit_code_for_failures(failed),
-            Self::Api { .. } | Self::Http(_) | Self::Wreq(_) | Self::Resolver(_) => 1,
+            #[cfg(feature = "stealth")]
+            Self::Wreq(_) => 1,
+            Self::Api { .. } | Self::Http(_) | Self::Resolver(_) => 1,
             Self::Json(_) | Self::Io(_) => 1,
         }
     }
@@ -70,7 +73,9 @@ impl SearchError {
             Self::InvalidInput { .. } => "invalid_input",
             Self::AllProvidersFailed { .. } => "all_providers_failed",
             Self::Resolver(_) => "resolver_error",
-            Self::Http(_) | Self::Wreq(_) => "http_error",
+            #[cfg(feature = "stealth")]
+            Self::Wreq(_) => "http_error",
+            Self::Http(_) => "http_error",
             Self::Json(_) => "json_error",
             Self::Io(_) => "io_error",
         }
@@ -103,7 +108,9 @@ impl SearchError {
                     C::Network
                 }
             }
-            Self::Wreq(_) | Self::Resolver(_) => C::Network,
+            #[cfg(feature = "stealth")]
+            Self::Wreq(_) => C::Network,
+            Self::Resolver(_) => C::Network,
             Self::Json(_) => C::Parse,
             Self::Config(_) | Self::NoProviders(_) => C::Config,
             Self::InvalidInput { .. } => C::BadRequest,

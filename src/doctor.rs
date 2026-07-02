@@ -5,7 +5,7 @@
 //! (minimal) request; scrape-only providers are probed against example.com.
 
 use crate::context::AppContext;
-use crate::providers::{self, Provider};
+use crate::providers;
 use crate::types::SearchOpts;
 use serde::Serialize;
 use std::sync::Arc;
@@ -56,6 +56,7 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
             let start = Instant::now();
             let outcome = match name {
                 // Scrape-only providers: probe with a fetch of example.com.
+                #[cfg(feature = "stealth")]
                 "stealth" => {
                     timeout(
                         Duration::from_secs(20),

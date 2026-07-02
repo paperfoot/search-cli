@@ -465,16 +465,19 @@ pub async fn execute_special(
             // challenge pages) is demoted to a failure so the chain keeps
             // escalating — a scraper "succeeding" with a Cloudflare
             // interstitial must not stop the fallback.
-            let stealth = providers::stealth::Stealth::new(ctx.clone());
-            if provider_allowed("stealth", only_providers) {
-                query_provider!("stealth", stealth.scrape_url(query), 30);
-                reject_bad_scrape(
-                    "stealth",
-                    &mut results,
-                    &mut providers_failed,
-                    &mut provider_failures,
-                    &mut provider_results,
-                );
+            #[cfg(feature = "stealth")]
+            {
+                let stealth = providers::stealth::Stealth::new(ctx.clone());
+                if provider_allowed("stealth", only_providers) {
+                    query_provider!("stealth", stealth.scrape_url(query), 30);
+                    reject_bad_scrape(
+                        "stealth",
+                        &mut results,
+                        &mut providers_failed,
+                        &mut provider_failures,
+                        &mut provider_results,
+                    );
+                }
             }
             if results.is_empty() {
                 let jina = providers::jina::Jina::new(ctx.clone());
