@@ -68,6 +68,7 @@ pub const MODES: &[ModeSpec] = &[
             "serper",
             "exa",
             "jina",
+            "linkup",
             "tavily",
             "perplexity",
         ],
@@ -78,7 +79,7 @@ pub const MODES: &[ModeSpec] = &[
         mode: Mode::News,
         input: InputKind::Query,
         merge: MergeKind::Fused,
-        providers: &["parallel", "brave", "serper", "tavily", "perplexity"],
+        providers: &["parallel", "brave", "serper", "linkup", "tavily", "perplexity"],
         description: "News-specific endpoints of the news-capable providers",
         when_to_use: "Current events and anything where recency dominates; combine with -f day or -f week.",
     },
@@ -107,6 +108,7 @@ pub const MODES: &[ModeSpec] = &[
             "brave",
             "serper",
             "exa",
+            "linkup",
             "tavily",
             "perplexity",
             "xai",
@@ -202,13 +204,12 @@ pub fn filter_support(provider: &str) -> FilterSupport {
     // Base name so "brave_llm_context" inherits brave's support.
     let base = provider.split("_llm_").next().unwrap_or(provider);
     match base {
-        "brave" | "serper" | "serpapi" | "tavily" | "exa" | "perplexity" | "parallel" => {
-            FilterSupport {
-                freshness: true,
-                domains: true,
-                note: None,
-            }
-        }
+        "brave" | "serper" | "serpapi" | "tavily" | "exa" | "perplexity" | "parallel"
+        | "linkup" => FilterSupport {
+            freshness: true,
+            domains: true,
+            note: None,
+        },
         "jina" => FilterSupport {
             freshness: false,
             domains: true,
@@ -252,6 +253,7 @@ mod tests {
             "serper",
             "exa",
             "jina",
+            "linkup",
             "firecrawl",
             "tavily",
             "serpapi",

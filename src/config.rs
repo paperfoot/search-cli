@@ -26,6 +26,8 @@ pub struct ApiKeys {
     #[serde(default)]
     pub jina: String,
     #[serde(default)]
+    pub linkup: String,
+    #[serde(default)]
     pub firecrawl: String,
     #[serde(default)]
     pub tavily: String,
@@ -63,6 +65,7 @@ impl Default for AppConfig {
                 serper: String::new(),
                 exa: String::new(),
                 jina: String::new(),
+                linkup: String::new(),
                 firecrawl: String::new(),
                 tavily: String::new(),
                 serpapi: String::new(),
@@ -110,6 +113,7 @@ pub const PROVIDER_KEYS: &[&str] = &[
     "serper",
     "exa",
     "jina",
+    "linkup",
     "firecrawl",
     "tavily",
     "serpapi",
@@ -161,6 +165,7 @@ pub fn config_show(config: &AppConfig) {
         ("serper", &config.keys.serper, "SERPER_API_KEY"),
         ("exa", &config.keys.exa, "EXA_API_KEY"),
         ("jina", &config.keys.jina, "JINA_API_KEY"),
+        ("linkup", &config.keys.linkup, "LINKUP_API_KEY"),
         ("firecrawl", &config.keys.firecrawl, "FIRECRAWL_API_KEY"),
         ("tavily", &config.keys.tavily, "TAVILY_API_KEY"),
         ("serpapi", &config.keys.serpapi, "SERPAPI_API_KEY"),
@@ -339,6 +344,12 @@ pub fn config_check(config: &AppConfig) {
             &config.keys.jina,
             "JINA_API_KEY",
             "Web search + URL reader",
+        ),
+        (
+            "linkup",
+            &config.keys.linkup,
+            "LINKUP_API_KEY",
+            "High-accuracy agent search (SimpleQA leader)",
         ),
         (
             "firecrawl",

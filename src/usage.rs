@@ -187,6 +187,21 @@ async fn tavily_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value
     }))
 }
 
+/// Linkup: GET https://api.linkup.so/v1/credits/balance (Bearer) -> { balance }.
+async fn linkup_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value, String> {
+    let v = get_json(
+        ctx,
+        "https://api.linkup.so/v1/credits/balance",
+        Some(&key),
+        None,
+    )
+    .await?;
+    Ok(serde_json::json!({
+        "credits_remaining": v.get("balance").cloned(),
+        "unit": "credits (EUR)",
+    }))
+}
+
 /// Fetch usage for every provider, concurrently. Providers without a usage
 /// API come back `supported: false`; unconfigured ones are skipped for
 /// network calls but still listed.
@@ -209,6 +224,7 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
             "brave" => Some(|ctx, key| Box::pin(brave_usage(ctx, key))),
             "xai" => Some(|ctx, key| Box::pin(xai_usage(ctx, key))),
             "tavily" => Some(|ctx, key| Box::pin(tavily_usage(ctx, key))),
+            "linkup" => Some(|ctx, key| Box::pin(linkup_usage(ctx, key))),
             _ => None,
         }
     }
@@ -282,6 +298,7 @@ fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
         "firecrawl" => providers::resolve_key(&k.firecrawl, "FIRECRAWL_API_KEY"),
         "exa" => providers::resolve_key(&k.exa, "EXA_API_KEY"),
         "jina" => providers::resolve_key(&k.jina, "JINA_API_KEY"),
+        "linkup" => providers::resolve_key(&k.linkup, "LINKUP_API_KEY"),
         "tavily" => providers::resolve_key(&k.tavily, "TAVILY_API_KEY"),
         "brave" => providers::resolve_key(&k.brave, "BRAVE_API_KEY"),
         "serper" => providers::resolve_key(&k.serper, "SERPER_API_KEY"),

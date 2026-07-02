@@ -3,6 +3,7 @@ pub mod browserless;
 pub mod exa;
 pub mod firecrawl;
 pub mod jina;
+pub mod linkup;
 pub mod parallel;
 pub mod perplexity;
 pub mod serpapi;
@@ -172,6 +173,7 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(serper::Serper::new(ctx.clone())),
         Box::new(exa::Exa::new(ctx.clone())),
         Box::new(jina::Jina::new(ctx.clone())),
+        Box::new(linkup::Linkup::new(ctx.clone())),
         Box::new(stealth::Stealth::new(ctx.clone())),
         Box::new(firecrawl::Firecrawl::new(ctx.clone())),
         Box::new(tavily::Tavily::new(ctx.clone())),
