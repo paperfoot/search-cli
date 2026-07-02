@@ -4,35 +4,37 @@ use std::fmt;
 /// JSON envelope schema version. Bump only on breaking schema changes.
 pub const ENVELOPE_VERSION: &str = "1";
 
+/// Provider lists and when-to-use guidance live in `registry::MODES` (the
+/// single source of truth, surfaced via `search agent-info`); these doc
+/// comments stay short so they cannot drift from the routing table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// General multi-provider web search (Brave + Serper + Exa + Jina + Tavily
-    /// + Perplexity). Default when no `-m` is given.
+    /// Broad multi-provider web search, rank-fused. Default when no `-m` is given
     General,
-    /// Breaking news and current events (Brave + Serper + Tavily + Perplexity)
+    /// News and current events (pair with -f day/week)
     News,
-    /// Research papers and studies (Exa + Serper + Tavily + Perplexity)
+    /// Papers and studies on the open web; see also `scholar`
     Academic,
-    /// Find people, LinkedIn profiles (Exa)
+    /// Person / LinkedIn profile search
     People,
-    /// Maximum coverage (Brave LLM Context + Exa + Serper + Tavily + Perplexity + xAI)
+    /// Maximum-coverage fan-out; waits for all providers, never cancels early
     Deep,
-    /// Extract full text content from a URL (Jina Reader -> Firecrawl)
+    /// Full page content as markdown. -q must be a URL
     Extract,
-    /// Find pages similar to a URL (Exa findSimilar)
+    /// Pages similar to a given page. -q must be a URL
     Similar,
-    /// Scrape page content (Jina Reader -> Firecrawl)
+    /// Alias of `extract` (identical behavior). -q must be a URL
     Scrape,
-    /// Google Scholar search (Serper)
+    /// Google Scholar records (citations, PDFs); see also `academic`
     Scholar,
-    /// Patent search (Serper)
+    /// Google Patents search
     Patents,
-    /// Image search (Serper)
+    /// Google Images search
     Images,
-    /// Local businesses and places (Serper)
+    /// Local businesses and places
     Places,
-    /// X/Twitter social search (xAI Grok)
+    /// Live X/Twitter search (X summary + cited posts)
     Social,
 }
 
@@ -159,6 +161,16 @@ pub struct SearchResult {
     pub extra: Option<serde_json::Value>,
 }
 
+/// An AI-synthesized answer a provider returned alongside (not as) web
+/// results — e.g. Perplexity's or Tavily's answer text. Kept out of
+/// `results` so `.results[].url` is always a fetchable web URL and answers
+/// never consume `-c` result slots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Answer {
+    pub provider: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResponse {
     pub version: String,
@@ -166,6 +178,9 @@ pub struct SearchResponse {
     pub query: String,
     pub mode: String,
     pub results: Vec<SearchResult>,
+    /// AI-synthesized answers (Perplexity/Tavily), separate from web results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<Answer>,
     pub metadata: ResponseMetadata,
 }
 
@@ -177,6 +192,23 @@ pub struct ResponseMetadata {
     /// Names of providers that failed. Kept for backward compatibility; see
     /// `provider_failures` for the reason behind each.
     pub providers_failed: Vec<String>,
+    /// Providers cancelled by the early-stop grace window after enough unique
+    /// results had already arrived. They neither failed nor contributed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers_cancelled: Vec<String>,
+    /// Results each provider actually contributed (pre-dedup), so the fused
+    /// list is auditable: absent name = returned nothing or was cancelled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provider_results: std::collections::BTreeMap<String, usize>,
+    /// Honesty notes, e.g. providers that don't apply a requested -f/-d filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// True when this response was replayed from the local cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
+    /// Age of the cached response in seconds (only set when `cached`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_age_secs: Option<u64>,
     /// Per-provider failure detail (category, HTTP status, reason, retryable).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_failures: Vec<ProviderFailure>,

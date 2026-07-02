@@ -1,49 +1,27 @@
 use crate::context::AppContext;
 use crate::errors::SearchError;
 use crate::providers::{self, Provider};
+use crate::registry;
 use crate::types::{
-    FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus, SearchOpts,
+    Answer, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus, SearchOpts,
     SearchResponse, SearchResult, ENVELOPE_VERSION,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-/// Which providers to query for each mode
-fn providers_for_mode(mode: Mode) -> &'static [&'static str] {
-    match mode {
-        Mode::General => &[
-            "parallel",
-            "brave",
-            "serper",
-            "exa",
-            "jina",
-            "tavily",
-            "perplexity",
-        ],
-        Mode::News => &["parallel", "brave", "serper", "tavily", "perplexity"],
-        Mode::Academic => &["exa", "serper", "tavily", "perplexity"],
-        Mode::Deep => &[
-            "parallel",
-            "brave",
-            "exa",
-            "serper",
-            "tavily",
-            "perplexity",
-            "xai",
-        ],
-        Mode::Scholar => &["serper", "serpapi"],
-        Mode::Patents => &["serper"],
-        Mode::People => &["exa"],
-        Mode::Images => &["serper"],
-        Mode::Places => &["serper"],
-        Mode::Extract | Mode::Scrape => &["stealth", "jina", "firecrawl", "browserless"],
-        Mode::Similar => &["exa"],
-        Mode::Social => &["xai"],
-    }
-}
+/// Once enough unique results have arrived, in-flight providers get this long
+/// to land before being cancelled. Long enough for the second/third-fastest
+/// providers to contribute (so fusion has consensus to rank on), short enough
+/// that one slow provider doesn't hold the response hostage.
+const EARLY_STOP_GRACE: Duration = Duration::from_millis(1500);
+
+/// Reciprocal-rank-fusion constant (standard k=60): dampens the gap between
+/// rank 1 and rank 2 so cross-provider consensus outweighs any single
+/// provider's top pick.
+const RRF_K: f64 = 60.0;
 
 pub async fn execute_search(
     ctx: Arc<AppContext>,
@@ -59,7 +37,7 @@ pub async fn execute_search(
     // Concrete mode in, concrete provider set out — no intent guessing, no
     // speculative pre-launch. The set is the mode's providers (or whatever -p
     // requested), intersected with what's actually configured.
-    let wanted = providers_for_mode(mode);
+    let wanted = registry::spec(mode).providers;
     let active: Vec<Box<dyn Provider>> = providers::build_providers(&ctx)
         .into_iter()
         .filter(|p| {
@@ -114,23 +92,39 @@ pub async fn execute_search(
         }
     }
 
-    let mut all_results = Vec::new();
+    // Per-provider result buckets, fused after collection. Early-stop: once
+    // enough unique results exist, in-flight providers get EARLY_STOP_GRACE
+    // to land, then are cancelled. Deep mode never cancels — coverage is its
+    // entire purpose.
+    let mut buckets: Vec<(String, Vec<SearchResult>)> = Vec::new();
     let mut providers_failed = Vec::new();
     let mut provider_failures: Vec<ProviderFailure> = Vec::new();
     let mut unique_urls = HashSet::new();
+    let mut deadline: Option<tokio::time::Instant> = None;
 
-    while let Some(join_result) = set.join_next().await {
-        match join_result {
-            Ok((_name, Ok(Ok(items)))) => {
-                for item in items {
-                    if unique_urls.insert(normalize_url(&item.url)) {
-                        all_results.push(item);
-                    }
-                }
-                // Enough results: cancel still-pending providers, but keep
-                // draining finished tasks so their paid-for results aren't lost.
-                if all_results.len() >= count {
+    loop {
+        let join_result = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, set.join_next()).await {
+                Ok(r) => r,
+                Err(_) => {
+                    // Grace expired: cancel stragglers, then drain without a
+                    // deadline so already-finished tasks aren't lost.
                     set.abort_all();
+                    deadline = None;
+                    continue;
+                }
+            },
+            None => set.join_next().await,
+        };
+        let Some(join_result) = join_result else { break };
+        match join_result {
+            Ok((name, Ok(Ok(items)))) => {
+                for item in &items {
+                    unique_urls.insert(normalize_url(&item.url));
+                }
+                buckets.push((name.to_string(), items));
+                if mode != Mode::Deep && deadline.is_none() && unique_urls.len() >= count {
+                    deadline = Some(tokio::time::Instant::now() + EARLY_STOP_GRACE);
                 }
             }
             Ok((name, Ok(Err(e)))) => {
@@ -151,18 +145,56 @@ pub async fn execute_search(
         }
     }
 
+    // Synthetic AI answers (non-http pseudo-URLs like perplexity://answer)
+    // move to the answers field: they aren't fetchable web results and must
+    // not consume result slots or pollute `.results[].url` pipelines.
+    let mut answers: Vec<Answer> = Vec::new();
+    for (_, items) in &mut buckets {
+        items.retain(|r| {
+            if is_synthetic_answer(r) {
+                answers.push(Answer {
+                    provider: r.source.clone(),
+                    text: r.snippet.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    let provider_results: BTreeMap<String, usize> = buckets
+        .iter()
+        .filter(|(_, items)| !items.is_empty())
+        .map(|(name, items)| (name.clone(), items.len()))
+        .collect();
+
+    // Cancelled = started but neither returned nor failed.
+    let providers_cancelled: Vec<String> = providers_queried
+        .iter()
+        .filter(|q| {
+            !buckets.iter().any(|(n, _)| n == *q) && !providers_failed.iter().any(|f| f == *q)
+        })
+        .cloned()
+        .collect();
+
+    let mut all_results = fuse_rrf(buckets);
     all_results.truncate(count);
     let result_count = all_results.len();
+    let warnings = filter_warnings(&providers_queried, opts);
     let elapsed = start.elapsed();
 
     // Total failure is an error, not a success-shaped envelope.
-    if all_results.is_empty() && !provider_failures.is_empty() {
+    if all_results.is_empty() && answers.is_empty() && !provider_failures.is_empty() {
         return Err(SearchError::AllProvidersFailed {
             failed: provider_failures,
         });
     }
 
-    let status = ResponseStatus::classify(all_results.is_empty(), !providers_failed.is_empty());
+    let status = ResponseStatus::classify(
+        all_results.is_empty() && answers.is_empty(),
+        !providers_failed.is_empty(),
+    );
 
     Ok(SearchResponse {
         version: ENVELOPE_VERSION.to_string(),
@@ -170,14 +202,124 @@ pub async fn execute_search(
         query: query.to_string(),
         mode: mode.to_string(),
         results: all_results,
+        answers,
         metadata: ResponseMetadata {
             elapsed_ms: elapsed.as_millis(),
             result_count,
             providers_queried,
             providers_failed,
+            providers_cancelled,
+            provider_results,
+            warnings,
+            cached: false,
+            cache_age_secs: None,
             provider_failures,
         },
     })
+}
+
+/// True for provider-synthesized answers smuggled in as results under a
+/// non-web pseudo-URL scheme (perplexity://answer, tavily://answer).
+fn is_synthetic_answer(r: &SearchResult) -> bool {
+    !(r.url.starts_with("http://") || r.url.starts_with("https://"))
+}
+
+/// Reciprocal rank fusion across provider buckets. Each URL scores
+/// Σ 1/(RRF_K + rank) over the providers that returned it, so a result two
+/// engines agree on outranks any single engine's top hit. Deterministic:
+/// independent of provider completion order. Duplicates keep the first-seen
+/// content (by bucket order), enriched with missing fields and an
+/// `also_found_by` list in `extra`.
+fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
+    struct Fused {
+        result: SearchResult,
+        score: f64,
+        insertion: usize,
+    }
+    let mut map: std::collections::HashMap<String, Fused> = std::collections::HashMap::new();
+    let mut insertion = 0usize;
+    for (provider, items) in buckets {
+        for (rank, item) in items.into_iter().enumerate() {
+            let key = normalize_url(&item.url);
+            let add = 1.0 / (RRF_K + rank as f64 + 1.0);
+            match map.get_mut(&key) {
+                Some(f) => {
+                    f.score += add;
+                    if f.result.published.is_none() {
+                        f.result.published = item.published;
+                    }
+                    if f.result.image_url.is_none() {
+                        f.result.image_url = item.image_url;
+                    }
+                    let extra = f
+                        .result
+                        .extra
+                        .get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(obj) = extra.as_object_mut() {
+                        let list = obj
+                            .entry("also_found_by")
+                            .or_insert_with(|| serde_json::json!([]));
+                        if let Some(arr) = list.as_array_mut() {
+                            arr.push(serde_json::json!(provider.clone()));
+                        }
+                    }
+                }
+                None => {
+                    insertion += 1;
+                    map.insert(
+                        key,
+                        Fused {
+                            result: item,
+                            score: add,
+                            insertion,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let mut fused: Vec<Fused> = map.into_values().collect();
+    fused.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.insertion.cmp(&b.insertion))
+    });
+    fused.into_iter().map(|f| f.result).collect()
+}
+
+/// One warning per active provider that will silently not apply a requested
+/// -f/-d filter, so filtered searches stay auditable. Never excludes a
+/// provider — the caller decides whether unfiltered results are acceptable.
+fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
+    let wants_freshness = opts.freshness.is_some();
+    let wants_domains = !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty();
+    if !wants_freshness && !wants_domains {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    for name in active {
+        let support = registry::filter_support(name);
+        let mut missing = Vec::new();
+        if wants_freshness && !support.freshness {
+            missing.push("-f freshness");
+        }
+        if wants_domains && !support.domains {
+            missing.push("-d/--exclude-domain");
+        }
+        if !missing.is_empty() {
+            warnings.push(format!(
+                "{name} does not apply {}; its results are unfiltered",
+                missing.join(" or ")
+            ));
+        }
+        if wants_domains {
+            if let Some(note) = support.note {
+                warnings.push(note.to_string());
+            }
+        }
+    }
+    warnings
 }
 
 /// Dedup key for a URL. Strips scheme and a leading `www.` only — anchored, so
@@ -217,6 +359,7 @@ pub async fn execute_special(
     let mut providers_queried = Vec::new();
     let mut providers_failed = Vec::new();
     let mut provider_failures: Vec<ProviderFailure> = Vec::new();
+    let mut provider_results: BTreeMap<String, usize> = BTreeMap::new();
 
     // Run one timed provider call, recording success/failure uniformly.
     macro_rules! query_provider {
@@ -228,6 +371,7 @@ pub async fn execute_special(
                 &mut results,
                 &mut providers_failed,
                 &mut provider_failures,
+                &mut provider_results,
             );
         }};
     }
@@ -317,6 +461,24 @@ pub async fn execute_special(
         });
     }
 
+    // Filter honesty: apart from social (xai, which remaps domains to X
+    // handles), no special-mode provider call forwards -f/-d filters.
+    let mut warnings = Vec::new();
+    let wants_filters = opts.freshness.is_some()
+        || !opts.include_domains.is_empty()
+        || !opts.exclude_domains.is_empty();
+    if wants_filters {
+        if mode == Mode::Social {
+            if let Some(note) = registry::filter_support("xai").note {
+                warnings.push(note.to_string());
+            }
+        } else {
+            warnings.push(format!(
+                "mode '{mode}' does not apply -f/-d filters; results are unfiltered"
+            ));
+        }
+    }
+
     let elapsed = start.elapsed();
     let result_count = results.len();
     let status = ResponseStatus::classify(results.is_empty(), !providers_failed.is_empty());
@@ -327,11 +489,17 @@ pub async fn execute_special(
         query: query.to_string(),
         mode: mode.to_string(),
         results,
+        answers: Vec::new(),
         metadata: ResponseMetadata {
             elapsed_ms: elapsed.as_millis(),
             result_count,
             providers_queried,
             providers_failed,
+            providers_cancelled: Vec::new(),
+            provider_results,
+            warnings,
+            cached: false,
+            cache_age_secs: None,
             provider_failures,
         },
     })
@@ -345,9 +513,15 @@ fn record_result(
     results: &mut Vec<SearchResult>,
     failed: &mut Vec<String>,
     failures: &mut Vec<ProviderFailure>,
+    counts: &mut BTreeMap<String, usize>,
 ) {
     match outcome {
-        Ok(Ok(items)) => results.extend(items),
+        Ok(Ok(items)) => {
+            if !items.is_empty() {
+                counts.insert(provider.to_string(), items.len());
+            }
+            results.extend(items);
+        }
         Ok(Err(e)) => {
             tracing::warn!("{provider}: {e}");
             failures.push(e.to_provider_failure(provider));
@@ -405,7 +579,82 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_url;
+    use super::{fuse_rrf, is_synthetic_answer, normalize_url};
+    use crate::types::SearchResult;
+
+    fn result(url: &str, source: &str) -> SearchResult {
+        SearchResult {
+            title: url.to_string(),
+            url: url.to_string(),
+            snippet: String::new(),
+            source: source.to_string(),
+            published: None,
+            image_url: None,
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn rrf_consensus_beats_single_provider_top_rank() {
+        // URL found by two providers (at ranks 2 and 2) must outrank a URL
+        // only one provider returned at rank 1.
+        let buckets = vec![
+            (
+                "a".to_string(),
+                vec![result("https://only-a.com", "a"), result("https://both.com", "a")],
+            ),
+            (
+                "b".to_string(),
+                vec![result("https://only-b.com", "b"), result("https://both.com", "b")],
+            ),
+        ];
+        let fused = fuse_rrf(buckets);
+        assert_eq!(fused[0].url, "https://both.com");
+        assert_eq!(fused.len(), 3);
+    }
+
+    #[test]
+    fn rrf_is_independent_of_bucket_arrival_order() {
+        let mk = |first: &str, second: &str| {
+            vec![
+                (
+                    first.to_string(),
+                    vec![result("https://x.com", first), result("https://y.com", first)],
+                ),
+                (
+                    second.to_string(),
+                    vec![result("https://y.com", second), result("https://z.com", second)],
+                ),
+            ]
+        };
+        let urls = |buckets| {
+            fuse_rrf(buckets)
+                .into_iter()
+                .map(|r| r.url)
+                .collect::<Vec<_>>()
+        };
+        // y.com has consensus and wins in both arrival orders.
+        assert_eq!(urls(mk("a", "b"))[0], "https://y.com");
+        assert_eq!(urls(mk("b", "a"))[0], "https://y.com");
+    }
+
+    #[test]
+    fn rrf_records_consensus_in_extra() {
+        let buckets = vec![
+            ("a".to_string(), vec![result("https://both.com", "a")]),
+            ("b".to_string(), vec![result("https://both.com", "b")]),
+        ];
+        let fused = fuse_rrf(buckets);
+        let also = fused[0].extra.as_ref().unwrap()["also_found_by"].clone();
+        assert_eq!(also, serde_json::json!(["b"]));
+    }
+
+    #[test]
+    fn synthetic_answers_are_detected_by_scheme() {
+        assert!(is_synthetic_answer(&result("perplexity://answer", "perplexity")));
+        assert!(is_synthetic_answer(&result("tavily://answer", "tavily")));
+        assert!(!is_synthetic_answer(&result("https://x.com/search?q=a", "xai")));
+    }
 
     #[test]
     fn dedupes_scheme_and_leading_www() {

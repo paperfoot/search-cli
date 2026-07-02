@@ -95,6 +95,9 @@ pub enum Commands {
         #[arg(long)]
         check: bool,
     },
+
+    /// Show remaining credits/quota for providers that expose a usage API
+    Usage,
 }
 
 #[derive(Parser)]
