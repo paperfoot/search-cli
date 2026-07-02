@@ -286,6 +286,16 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
         out.push(u);
     }
     out.sort_by(|a, b| a.provider.cmp(&b.provider));
+
+    // Snapshot balances so `search stats` can report measured burn over time.
+    let snapshot: serde_json::Map<String, serde_json::Value> = out
+        .iter()
+        .filter_map(|u| u.data.clone().map(|d| (u.provider.clone(), d)))
+        .collect();
+    if !snapshot.is_empty() {
+        crate::logging::log_balances(&serde_json::Value::Object(snapshot));
+    }
+
     out
 }
 

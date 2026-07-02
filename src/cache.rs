@@ -65,6 +65,24 @@ pub fn last_age_secs() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+/// Delete every cached entry (query cache + --last snapshot). Returns the
+/// number of files removed.
+pub fn clear() -> usize {
+    let Ok(entries) = std::fs::read_dir(cache_dir()) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if (name.starts_with("q2_") || name == "last.json") && name.ends_with(".json") {
+            if std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 #[derive(Serialize, Deserialize)]
 struct CachedEntry {
     timestamp: u64,

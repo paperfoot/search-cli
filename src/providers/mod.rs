@@ -76,6 +76,19 @@ pub async fn ok_or_api_error(
     }
     let code = status.as_u16();
     if code == 429 {
+        // Honor Retry-After (seconds form) up to 2s before surfacing the
+        // error, so the backon retry that follows lands after the window the
+        // provider asked for instead of blind-hammering a throttled API.
+        // Capped so it always fits inside the provider timeout budget.
+        let wait = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|s| s.min(2));
+        if let Some(secs) = wait {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+        }
         return Err(SearchError::RateLimited { provider });
     }
     // Body is only read on the error path; the success path stays zero-copy.

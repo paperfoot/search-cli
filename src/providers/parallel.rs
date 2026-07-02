@@ -77,6 +77,7 @@ impl super::Provider for Parallel {
         if let Some(days) = opts.freshness.as_deref().and_then(super::freshness_days) {
             source_policy.insert("after_date".to_string(), json!(super::date_days_ago(days)));
         }
+        let location = opts.country.as_ref().map(|c| c.to_uppercase());
 
         super::retry_request(|| async {
             let mut body = json!({
@@ -88,6 +89,9 @@ impl super::Provider for Parallel {
             });
             if !source_policy.is_empty() {
                 body["advanced_settings"] = json!({ "source_policy": source_policy.clone() });
+            }
+            if let Some(loc) = &location {
+                body["location"] = json!(loc);
             }
 
             let resp = client

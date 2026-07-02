@@ -99,6 +99,36 @@ pub enum Commands {
 
     /// Show remaining credits/quota for providers that expose a usage API
     Usage,
+
+    /// Test-fire every configured provider with a minimal query and report
+    /// health, latency, and failure causes (each check is one billed request)
+    Doctor,
+
+    /// Usage statistics from the local search logs (spend, modes, providers)
+    Stats(StatsArgs),
+
+    /// Manage the local query cache
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+}
+
+#[derive(Parser)]
+pub struct StatsArgs {
+    /// Analysis window in days
+    #[arg(long, default_value = "30")]
+    pub days: u64,
+
+    /// Delete log files older than this many days, then exit
+    #[arg(long)]
+    pub prune: Option<u64>,
+}
+
+#[derive(Subcommand)]
+pub enum CacheAction {
+    /// Delete all cached query results
+    Clear,
 }
 
 #[derive(Parser)]
@@ -142,6 +172,30 @@ pub struct SearchArgs {
     /// Freshness filter: day, week, month, year
     #[arg(short, long)]
     pub freshness: Option<String>,
+
+    /// Bypass the local 5-minute query cache and force a fresh search
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Cap each result snippet (and answer) at this many characters
+    #[arg(long)]
+    pub max_chars: Option<usize>,
+
+    /// Country code for region-biased results (e.g. gb, de, jp) — applied by
+    /// providers that support it (serper, serpapi, brave, parallel)
+    #[arg(long)]
+    pub country: Option<String>,
+
+    /// Language code for results (e.g. en, de, fr) — applied by providers
+    /// that support it (serper, serpapi, brave)
+    #[arg(long)]
+    pub lang: Option<String>,
+
+    /// Allow extract/scrape of private, loopback, and link-local addresses
+    /// (blocked by default to keep prompt-injected agents away from
+    /// localhost and cloud metadata endpoints)
+    #[arg(long)]
+    pub allow_private: bool,
 }
 
 #[derive(Subcommand)]
@@ -152,7 +206,8 @@ pub enum ConfigAction {
     Set {
         /// Config key (e.g. keys.brave, settings.timeout)
         key: String,
-        /// Value to set
+        /// Value to set. Pass "-" to read it from stdin, keeping secrets out
+        /// of shell history and process listings
         value: String,
     },
     /// Health-check which providers are configured and ready

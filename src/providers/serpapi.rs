@@ -56,6 +56,12 @@ impl SerpApi {
             };
             params.push(("tbs".to_string(), tbs.to_string()));
         }
+        if let Some(country) = &opts.country {
+            params.push(("gl".to_string(), country.to_lowercase()));
+        }
+        if let Some(lang) = &opts.lang {
+            params.push(("hl".to_string(), lang.to_lowercase()));
+        }
 
         super::retry_request(|| async {
             let resp = client

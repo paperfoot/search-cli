@@ -220,6 +220,11 @@ pub struct SearchOpts {
     pub exclude_domains: Vec<String>,
     /// day, week, month, year
     pub freshness: Option<String>,
+    /// ISO country code (e.g. "gb") for region-biased results; applied by
+    /// providers that support it (serper/serpapi gl, brave country, parallel location).
+    pub country: Option<String>,
+    /// Language code (e.g. "de"); applied by serper/serpapi (hl) and brave.
+    pub lang: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
