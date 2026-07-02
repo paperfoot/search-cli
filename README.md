@@ -2,7 +2,7 @@
 
 # Search CLI — Web Search for AI Agents
 
-**One binary, 12 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
+**One binary, 13 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -19,7 +19,7 @@
 
 ---
 
-A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
+A single Rust binary that aggregates Brave, Serper, Exa, Linkup, Jina, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
 
 [Install](#install) | [How It Works](#how-it-works) | [Features](#features) | [Providers](#providers) | [Contributing](#contributing)
 
@@ -125,11 +125,11 @@ same routing registry the engine uses.
 
 | Mode | Use when | `-q` is | Providers used |
 |------|----------|---------|----------------|
-| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Tavily + Perplexity |
-| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Tavily + Perplexity (news endpoints) |
+| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Linkup + Tavily + Perplexity |
+| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Linkup + Tavily + Perplexity (news endpoints) |
 | `academic` | Papers/studies by topic (semantic + web) | query | Exa + Serper + Tavily + Perplexity |
 | `scholar` | Google Scholar records: citations, PDFs | query | Serper + SerpApi |
-| `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Tavily + Perplexity + xAI |
+| `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Linkup + Tavily + Perplexity + xAI |
 | `people` | A person, their role, LinkedIn profile | query | Exa |
 | `social` | What's being said on X/Twitter | query | xAI (Grok) |
 | `patents` | Prior art, patent families | query | Serper |
@@ -225,6 +225,7 @@ search "query" 2>/dev/null             # suppress diagnostics
 | **[Serper](https://serper.dev/)** | Cheapest raw Google SERP + specialist endpoints | Actual Google rankings; scholar, patents, images, places |
 | **[Exa](https://exa.ai/)** | Neural/semantic search, category filters | Research papers, people search, similar sites |
 | **[Jina](https://jina.ai/)** | Fast URL-to-markdown, 500 RPM free tier | Reading article content, quick extraction |
+| **[Linkup](https://www.linkup.so/)** | High-accuracy agent search (leads the SimpleQA benchmark) | Factual lookups where accuracy matters most |
 | **[Firecrawl](https://firecrawl.dev/)** | JavaScript rendering, structured extraction | Dynamic pages, SPAs, data extraction |
 | **[Tavily](https://tavily.com/)** | General + deep search, research-focused | Broad coverage, research queries |
 | **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
@@ -241,9 +242,9 @@ search usage --json
 
 Reports remaining credits/quota for every provider whose API exposes it:
 **SerpApi** (`account.json`), **Firecrawl** (credit-usage endpoint),
-**Tavily** (usage endpoint), **xAI** (management API — set
-`XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`), and **Brave** (rate-limit headers;
-the check consumes one metered request). The rest are dashboard-only and
+**Tavily** (usage endpoint), **Linkup** (credits balance endpoint), **xAI**
+(management API — set `XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`), and **Brave**
+(rate-limit headers; the check consumes one metered request). The rest are dashboard-only and
 reported as `supported: false`. Purely informational: the
 CLI never disables or deprioritizes a provider because its balance is low —
 if a provider is out of credits, the failed call shows up as a
@@ -268,8 +269,9 @@ CI-injected key always wins over stale local config. Two accepted forms:
 export BRAVE_API_KEY=your-key
 export SERPER_API_KEY=your-key
 export EXA_API_KEY=your-key
-# ...also PERPLEXITY_API_KEY, JINA_API_KEY, FIRECRAWL_API_KEY, TAVILY_API_KEY,
-#        SERPAPI_API_KEY, BROWSERLESS_API_KEY, XAI_API_KEY, PARALLEL_API_KEY
+# ...also PERPLEXITY_API_KEY, JINA_API_KEY, LINKUP_API_KEY, FIRECRAWL_API_KEY,
+#        TAVILY_API_KEY, SERPAPI_API_KEY, BROWSERLESS_API_KEY, XAI_API_KEY,
+#        PARALLEL_API_KEY
 
 # Or the SEARCH_KEYS_ prefixed form:
 export SEARCH_KEYS_BRAVE=your-key
