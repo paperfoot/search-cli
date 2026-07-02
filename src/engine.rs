@@ -50,7 +50,7 @@ pub async fn execute_search(
         .collect();
 
     if active.is_empty() {
-        return Err(SearchError::NoProviders(mode.to_string()));
+        return Err(no_providers_error(mode, only_providers));
     }
 
     let mut set = JoinSet::new();
@@ -453,7 +453,7 @@ pub async fn execute_special(
     }
 
     if results.is_empty() && providers_queried.is_empty() {
-        return Err(SearchError::NoProviders(mode.to_string()));
+        return Err(no_providers_error(mode, only_providers));
     }
     if results.is_empty() && !provider_failures.is_empty() {
         return Err(SearchError::AllProvidersFailed {
@@ -532,6 +532,25 @@ fn record_result(
             failures.push(timeout_failure(provider));
             failed.push(provider.to_string());
         }
+    }
+}
+
+/// Zero providers ran. With `-p` that's the caller's filter excluding (or
+/// selecting unconfigured) providers — a bad-input error naming the mode's
+/// real provider set. Without `-p` it's a configuration problem. The old
+/// blanket "No providers configured for mode X / run config check" misled:
+/// config check shows all green when a -p filter was the actual cause.
+fn no_providers_error(mode: Mode, only_providers: &Option<Vec<String>>) -> SearchError {
+    match only_providers {
+        Some(list) => SearchError::InvalidInput {
+            message: format!(
+                "no provider ran: mode '{}' is served by [{}], but -p {} selected none of them that are configured",
+                mode,
+                registry::spec(mode).providers.join(", "),
+                list.join(",")
+            ),
+        },
+        None => SearchError::NoProviders(mode.to_string()),
     }
 }
 
