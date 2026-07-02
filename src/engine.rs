@@ -427,23 +427,50 @@ pub async fn execute_special(
         }
         Mode::Scrape | Mode::Extract => {
             // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
+            // After each attempt, garbage output (binary bytes, anti-bot
+            // challenge pages) is demoted to a failure so the chain keeps
+            // escalating — a scraper "succeeding" with a Cloudflare
+            // interstitial must not stop the fallback.
             let stealth = providers::stealth::Stealth::new(ctx.clone());
             if provider_allowed("stealth", only_providers) {
                 query_provider!("stealth", stealth.scrape_url(query), 30);
+                reject_bad_scrape(
+                    "stealth",
+                    &mut results,
+                    &mut providers_failed,
+                    &mut provider_failures,
+                    &mut provider_results,
+                );
             }
             if results.is_empty() {
                 let jina = providers::jina::Jina::new(ctx.clone());
                 if jina.is_configured() && provider_allowed("jina", only_providers) {
                     query_provider!("jina", jina.read_url(query), 30);
+                    reject_bad_scrape(
+                        "jina",
+                        &mut results,
+                        &mut providers_failed,
+                        &mut provider_failures,
+                        &mut provider_results,
+                    );
                 }
             }
             if results.is_empty() {
                 let fc = providers::firecrawl::Firecrawl::new(ctx.clone());
                 if fc.is_configured() && provider_allowed("firecrawl", only_providers) {
                     query_provider!("firecrawl", fc.scrape_url(query), 30);
+                    reject_bad_scrape(
+                        "firecrawl",
+                        &mut results,
+                        &mut providers_failed,
+                        &mut provider_failures,
+                        &mut provider_results,
+                    );
                 }
             }
-            // Last resort: Browserless cloud browser (handles Cloudflare, JS rendering).
+            // Last resort: Browserless cloud browser (handles Cloudflare, JS
+            // rendering). Its output is NOT rejected — after the last rung
+            // there is nothing to escalate to, so imperfect content beats none.
             if results.is_empty() {
                 let bl = providers::browserless::Browserless::new(ctx.clone());
                 if bl.is_configured() && provider_allowed("browserless", only_providers) {
@@ -554,6 +581,64 @@ fn no_providers_error(mode: Mode, only_providers: &Option<Vec<String>>) -> Searc
         },
         None => SearchError::NoProviders(mode.to_string()),
     }
+}
+
+/// Why scraped content is unusable, or None if it looks like real page text.
+/// Two failure classes seen in the wild: undecompressed/binary bytes served
+/// as text (mojibake), and anti-bot challenge pages returned with HTTP 200.
+fn scrape_rejection(content: &str) -> Option<&'static str> {
+    let sample: Vec<char> = content.chars().take(4000).collect();
+    if sample.len() > 200 {
+        let garbage = sample
+            .iter()
+            .filter(|c| **c == '\u{FFFD}' || (c.is_control() && !c.is_whitespace()))
+            .count();
+        if garbage * 20 > sample.len() {
+            return Some("binary or undecodable content");
+        }
+    }
+    // Challenge pages are short; a real article mentioning Cloudflare isn't.
+    if content.chars().count() < 4000 {
+        const CHALLENGE_MARKERS: &[&str] = &[
+            "Checking your browser before accessing",
+            "Just a moment...",
+            "Verifying you are human",
+            "Enable JavaScript and cookies to continue",
+            "cf-browser-verification",
+            "Attention Required! | Cloudflare",
+        ];
+        if CHALLENGE_MARKERS.iter().any(|m| content.contains(m)) {
+            return Some("anti-bot challenge page instead of content");
+        }
+    }
+    None
+}
+
+/// Demote a scrape "success" whose content is garbage to a structured failure
+/// and clear `results`, so the extract/scrape chain escalates to the next
+/// provider instead of returning junk as success.
+fn reject_bad_scrape(
+    provider: &'static str,
+    results: &mut Vec<SearchResult>,
+    failed: &mut Vec<String>,
+    failures: &mut Vec<ProviderFailure>,
+    counts: &mut BTreeMap<String, usize>,
+) {
+    let Some(reason) = results.first().and_then(|r| scrape_rejection(&r.snippet)) else {
+        return;
+    };
+    tracing::warn!("{provider}: {reason}");
+    results.clear();
+    counts.remove(provider);
+    failures.push(ProviderFailure {
+        provider: provider.to_string(),
+        category: FailureCategory::Parse,
+        http_status: None,
+        code: "garbage_content".to_string(),
+        reason: format!("{provider} returned {reason}"),
+        retryable: false,
+    });
+    failed.push(provider.to_string());
 }
 
 /// Failure record for a provider that exceeded its timeout.
@@ -680,6 +765,25 @@ mod tests {
         let fused = fuse_rrf(buckets);
         let also = fused[0].extra.as_ref().unwrap()["also_found_by"].clone();
         assert_eq!(also, serde_json::json!(["b"]));
+    }
+
+    #[test]
+    fn scrape_rejection_catches_binary_and_challenge_pages() {
+        use super::scrape_rejection;
+        // Mojibake: mostly replacement characters.
+        let binary: String = "\u{FFFD}x\u{FFFD}\u{FFFD}".repeat(100);
+        assert!(scrape_rejection(&binary).is_some());
+        // Cloudflare interstitial served as 200.
+        assert!(
+            scrape_rejection("## Checking your browser before accessing\nexample.com").is_some()
+        );
+        // Real prose passes, even when long or mentioning Cloudflare.
+        let article = format!(
+            "How Cloudflare works. {}",
+            "Real sentence with ordinary words. ".repeat(300)
+        );
+        assert!(scrape_rejection(&article).is_none());
+        assert!(scrape_rejection("Short but real snippet about rust.").is_none());
     }
 
     #[test]
