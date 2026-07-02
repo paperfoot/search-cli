@@ -204,7 +204,7 @@ pub fn redact_secrets(s: &str) -> String {
         out.push_str(&rest[..pos + mlen]);
         let value = &rest[pos + mlen..];
         let end = value
-            .find(|c: char| matches!(c, '&' | ' ' | '"' | '\'' | '\n'))
+            .find(['&', ' ', '"', '\'', '\n'])
             .unwrap_or(value.len());
         out.push_str("REDACTED");
         rest = &value[end..];

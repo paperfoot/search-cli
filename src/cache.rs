@@ -74,10 +74,11 @@ pub fn clear() -> usize {
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if (name.starts_with("q2_") || name == "last.json") && name.ends_with(".json") {
-            if std::fs::remove_file(entry.path()).is_ok() {
-                removed += 1;
-            }
+        if (name.starts_with("q2_") || name == "last.json")
+            && name.ends_with(".json")
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
         }
     }
     removed
