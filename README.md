@@ -1,8 +1,8 @@
 <div align="center">
 
-# Search CLI
+# Search CLI — Web Search for AI Agents
 
-**One binary, 12 providers, 13 modes. The web search tool your AI agent is missing.**
+**One binary, 12 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -19,7 +19,7 @@
 
 ---
 
-A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily, SerpApi, Perplexity, xAI, and more into one unified search interface. Designed from day one for AI agents -- structured JSON output, semantic exit codes, auto-JSON when piped, and parallel fan-out across providers in under 2 seconds.
+A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
 
 [Install](#install) | [How It Works](#how-it-works) | [Features](#features) | [Providers](#providers) | [Contributing](#contributing)
 
@@ -29,7 +29,7 @@ A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily
 
 Every search API is good at something different. Brave has its own 35-billion page index. Serper gives you raw Google results plus Scholar, Patents, and Places. Exa does neural/semantic search. Perplexity gives AI-synthesized answers with citations. Jina reads any URL into clean markdown. Firecrawl renders JavaScript-heavy pages. xAI searches X/Twitter.
 
-You shouldn't have to wire up each one separately, handle their different response formats, or manage rate limits. `search` does the plumbing: you pick the mode (the CLI never guesses intent), it fans out to that mode's providers in parallel, dedupes across them, and rank-fuses the results into a single clean response — URLs that multiple engines agree on rank first.
+You shouldn't have to wire up each one separately, handle their different response formats, or manage rate limits. `search` does the plumbing: you pick the mode (the CLI never guesses intent), it fans out to that mode's providers in parallel and fuses the results with reciprocal rank fusion. A URL that three engines independently return outranks any single engine's top hit — the fastest provider no longer wins by default, the most-agreed-on result does.
 
 ```bash
 search "CRISPR gene therapy breakthroughs"
@@ -139,6 +139,10 @@ same routing registry the engine uses.
 | `scrape` | Alias of `extract` (identical) | **URL** | Stealth -> Jina -> Firecrawl -> Browserless |
 | `similar` | "More like this page" | **URL** | Exa |
 
+### Rank Fusion, Not Fastest-Provider-First
+
+Most meta-search tools return results in whatever order providers answer, so result #1 is the fastest API's opinion. `search` scores every URL across all providers (RRF, k=60): consensus ranks first, ordering is deterministic, and each result carries `extra.also_found_by` so you can see which engines agreed. The envelope tells you exactly what happened — who contributed (`provider_results`), who was cancelled (`providers_cancelled`), which filters a provider ignored (`warnings`), and whether you got a cached replay (`cached`).
+
 ### Agent-First Design
 
 Built for Claude Code, Codex CLI, Gemini CLI, [OpenClaw](https://github.com/openclaw), and any AI agent that can shell out to a command.
@@ -225,7 +229,7 @@ search "query" 2>/dev/null             # suppress diagnostics
 | **[Tavily](https://tavily.com/)** | General + deep search, research-focused | Broad coverage, research queries |
 | **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
 | **[Perplexity](https://perplexity.ai/)** | LLM-synthesized answer with citations (Sonar) | When you want an answer with sources, not raw pages |
-| **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, dynamic rendering |
+| **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, pages that need a real browser |
 | **Stealth** | Built-in anti-bot scraper | Protected pages, no API key needed |
 | **[xAI](https://x.ai/)** | Only provider with native real-time X/Twitter search (Grok) | Live social signal, trending topics, account activity |
 
@@ -301,7 +305,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 <div align="center">
 
-Built by [Boris Djordjevic](https://github.com/longevityboris) at [199 Biotechnologies](https://github.com/199-biotechnologies) | [Paperfoot AI](https://paperfoot.ai)
+Built by [Boris Djordjevic](https://github.com/longevityboris) at [Paperfoot AI](https://paperfoot.com)
 
 <br />
 
