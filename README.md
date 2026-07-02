@@ -46,7 +46,7 @@ cargo install agent-search
 
 **Homebrew:**
 ```bash
-brew tap 199-biotechnologies/tap
+brew tap paperfoot/tap
 brew install search-cli
 ```
 
@@ -236,10 +236,11 @@ search usage --json
 ```
 
 Reports remaining credits/quota for every provider whose API exposes it:
-**SerpApi** (`account.json`), **Firecrawl** (credit-usage endpoint), **xAI**
-(management API — set `XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`), and **Brave**
-(rate-limit headers; the check consumes one metered request). The rest are
-dashboard-only and reported as `supported: false`. Purely informational: the
+**SerpApi** (`account.json`), **Firecrawl** (credit-usage endpoint),
+**Tavily** (usage endpoint), **xAI** (management API — set
+`XAI_MANAGEMENT_API_KEY` + `XAI_TEAM_ID`), and **Brave** (rate-limit headers;
+the check consumes one metered request). The rest are dashboard-only and
+reported as `supported: false`. Purely informational: the
 CLI never disables or deprioritizes a provider because its balance is low —
 if a provider is out of credits, the failed call shows up as a
 `billing_quota` entry in `metadata.provider_failures` and you decide what to

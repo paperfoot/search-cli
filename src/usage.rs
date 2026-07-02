@@ -165,9 +165,32 @@ async fn firecrawl_usage(ctx: &AppContext, key: String) -> Result<serde_json::Va
     }))
 }
 
+/// Tavily: GET https://api.tavily.com/usage (Bearer tvly- key). Reports
+/// consumption + limits; remaining is computed as limit - usage.
+async fn tavily_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value, String> {
+    let v = get_json(ctx, "https://api.tavily.com/usage", Some(&key), None).await?;
+    let account = v.get("account").unwrap_or(&v);
+    let plan_usage = account.get("plan_usage").and_then(|x| x.as_f64());
+    let plan_limit = account.get("plan_limit").and_then(|x| x.as_f64());
+    let remaining = match (plan_usage, plan_limit) {
+        (Some(u), Some(l)) => Some(l - u),
+        _ => None,
+    };
+    Ok(serde_json::json!({
+        "credits_remaining": remaining,
+        "plan_usage": plan_usage,
+        "plan_limit": plan_limit,
+        "current_plan": account.get("current_plan").cloned(),
+        "unit": "credits",
+    }))
+}
+
 /// Fetch usage for every provider, concurrently. Providers without a usage
 /// API come back `supported: false`; unconfigured ones are skipped for
 /// network calls but still listed.
+/// Confirmed no supported balance API (dashboard-only) as of 2026-07:
+/// perplexity, serper, parallel, browserless, jina. Exa exposes only
+/// cost-over-time per key id (no remaining balance) — not wired up.
 pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
     type UsageFetch = fn(
         &AppContext,
@@ -177,14 +200,13 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
     >;
 
     // Providers with a usage endpoint. Extend here as APIs appear.
-    // Confirmed absent (dashboard-only) as of 2026-07: perplexity, serper,
-    // parallel, browserless.
     fn fetcher(name: &str) -> Option<UsageFetch> {
         match name {
             "serpapi" => Some(|ctx, key| Box::pin(serpapi_usage(ctx, key))),
             "firecrawl" => Some(|ctx, key| Box::pin(firecrawl_usage(ctx, key))),
             "brave" => Some(|ctx, key| Box::pin(brave_usage(ctx, key))),
             "xai" => Some(|ctx, key| Box::pin(xai_usage(ctx, key))),
+            "tavily" => Some(|ctx, key| Box::pin(tavily_usage(ctx, key))),
             _ => None,
         }
     }
