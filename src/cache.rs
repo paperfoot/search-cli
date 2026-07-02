@@ -59,7 +59,10 @@ pub fn load_last() -> Option<SearchResponse> {
 /// predates timestamped entries), so replays can report how stale they are.
 pub fn last_age_secs() -> Option<u64> {
     let modified = std::fs::metadata(last_path()).ok()?.modified().ok()?;
-    SystemTime::now().duration_since(modified).ok().map(|d| d.as_secs())
+    SystemTime::now()
+        .duration_since(modified)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 #[derive(Serialize, Deserialize)]

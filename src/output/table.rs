@@ -31,7 +31,11 @@ pub fn render(response: &SearchResponse) {
     // AI-synthesized answers (Perplexity/Tavily) — separate from web results.
     for answer in &response.answers {
         if use_color {
-            println!("{} {}", "answer".on_green().black().bold(), answer.provider.cyan());
+            println!(
+                "{} {}",
+                "answer".on_green().black().bold(),
+                answer.provider.cyan()
+            );
             println!("  {}", truncate(&answer.text, 600));
             println!();
         } else {
