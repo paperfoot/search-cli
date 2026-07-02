@@ -81,7 +81,8 @@ pub enum Commands {
     /// List all providers with status and capabilities
     Providers,
 
-    /// Verify if email addresses exist via SMTP (no API key needed)
+    /// Verify if email addresses exist via SMTP (no API key needed). Probes
+    /// mail servers directly (RCPT TO) — bulk probing can hurt IP reputation
     Verify(VerifyArgs),
 
     /// Manage skill file installation for agent platforms

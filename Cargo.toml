@@ -1,6 +1,6 @@
 [package]
 name = "agent-search"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "Unified multi-provider search CLI for AI agents — 13 providers, 13 modes, email verification, one binary"
 license = "MIT"

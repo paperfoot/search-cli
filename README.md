@@ -251,15 +251,48 @@ if a provider is out of credits, the failed call shows up as a
 `billing_quota` entry in `metadata.provider_failures` and you decide what to
 top up.
 
+### Health Check
+
+```bash
+search doctor --json
+```
+
+Test-fires every configured provider with a minimal query and reports
+`ok`/`fail`, latency, and failure category — the preflight to run before a
+fleet trusts the tool. `config check` tells you a key exists; `doctor` tells
+you it works. Each check is one billed (minimal) request. Exit 0 if all
+healthy, 1 otherwise.
+
+### Usage Analytics
+
+```bash
+search stats --json          # last 30 days
+search stats --days 7        # custom window
+search stats --prune 90      # delete logs older than 90 days
+```
+
+Computed entirely from the local search logs — nothing leaves the machine.
+Reports search volume by mode, per-provider call counts / failures /
+cancellations, estimated spend (from a static price table), **measured**
+balance burn (deltas between `search usage` snapshots), cache-hit rate,
+repeated queries, and a read-through table — which providers' results agents
+actually extract afterwards, the closest local proxy for result usefulness.
+Set `SEARCH_LOG=off` to disable logging entirely.
+
 ## Configuration
 
 Config file lives at `~/.config/search/config.toml` (Linux) or `~/Library/Application Support/search/config.toml` (macOS).
 
 ```bash
-search config show       # View current config (keys masked)
-search config check      # Health check all providers
-search config set K V    # Set a value
+search config show          # View current config (keys masked)
+search config check         # Which providers have a key set
+search config set K V       # Set a value
+echo "$KEY" | search config set keys.brave -   # read secret from stdin
 ```
+
+The config file holds API keys, so it's created `0600` (owner-only) and any
+older world-readable file is tightened on load. Set secrets with `-` as the
+value to read from stdin and keep keys out of shell history and `ps`.
 
 Environment variables override the config file, so a freshly-exported or
 CI-injected key always wins over stale local config. Two accepted forms:
@@ -294,6 +327,18 @@ cd search-cli
 cargo build --release
 # Binary at target/release/search
 ```
+
+**Linux / containers:** the `stealth` scraper depends on BoringSSL, which
+doesn't link on Linux. Build without it — the extract chain simply starts at
+Jina instead of the local scraper:
+
+```bash
+cargo install agent-search --no-default-features
+```
+
+Prebuilt binaries ship for macOS (both architectures) and Linux x86_64; every
+release includes a `SHA256SUMS` file, and both `install.sh` and self-update
+verify the checksum before installing.
 
 ## Contributing
 
