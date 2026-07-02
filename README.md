@@ -2,7 +2,7 @@
 
 # Search CLI
 
-**One binary, 11 providers, 14 modes. The web search tool your AI agent is missing.**
+**One binary, 12 providers, 13 modes. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -29,7 +29,7 @@ A single Rust binary that aggregates Brave, Serper, Exa, Jina, Firecrawl, Tavily
 
 Every search API is good at something different. Brave has its own 35-billion page index. Serper gives you raw Google results plus Scholar, Patents, and Places. Exa does neural/semantic search. Perplexity gives AI-synthesized answers with citations. Jina reads any URL into clean markdown. Firecrawl renders JavaScript-heavy pages. xAI searches X/Twitter.
 
-You shouldn't have to wire up each one separately, handle their different response formats, manage rate limits, or figure out which provider to use for which query type. `search` does all of that for you -- routes your query to the right combination automatically, fans out in parallel, deduplicates results, and gives you a single clean response.
+You shouldn't have to wire up each one separately, handle their different response formats, or manage rate limits. `search` does the plumbing: you pick the mode (the CLI never guesses intent), it fans out to that mode's providers in parallel, dedupes across them, and rank-fuses the results into a single clean response — URLs that multiple engines agree on rank first.
 
 ```bash
 search "CRISPR gene therapy breakthroughs"
@@ -82,12 +82,8 @@ search "your query here"
 
 ```
                           ┌─────────────┐
-                          │  Your Query │
-                          └──────┬──────┘
-                                 │
-                          ┌──────▼──────┐
-                          │   Classify  │  regex-based intent detection
-                          └──────┬──────┘
+                          │ Query + -m  │  you pick the mode —
+                          └──────┬──────┘  no intent guessing
                                  │
                     ┌────────────┼────────────┐
                     ▼            ▼            ▼
@@ -98,8 +94,8 @@ search "your query here"
                    └────────────┼────────────┘
                                 │
                          ┌──────▼──────┐
-                         │   Dedup &   │  URL normalization
-                         │   Merge     │  across providers
+                         │ Rank fusion │  dedup + reciprocal rank
+                         │  (RRF k=60) │  fusion across providers
                          └──────┬──────┘
                                 │
                     ┌───────────┴───────────┐
@@ -111,34 +107,37 @@ search "your query here"
 ```
 
 1. **Parse** -- Clap parses your query, mode, provider filter, and output preferences
-2. **Classify** -- If mode is `auto`, regex-based intent classifier picks the right mode
-3. **Route** -- Mode determines which providers to query (or you override with `-p`)
-4. **Fan out** -- `tokio::JoinSet` fires all providers in parallel with per-provider timeouts
-5. **Collect** -- Results stream in as providers respond (no waiting for the slowest)
-6. **Dedup** -- URL normalization removes duplicates across providers
+2. **Route** -- Your mode determines which providers to query (or you override with `-p`)
+3. **Fan out** -- `tokio::JoinSet` fires all providers in parallel with per-provider timeouts
+4. **Collect** -- Once enough unique results arrive, stragglers get a 1.5s grace window, then are cancelled (reported in `metadata.providers_cancelled`; `deep` mode always waits for everyone)
+5. **Fuse** -- Reciprocal rank fusion: URLs returned by multiple providers rank first (`extra.also_found_by` records consensus); ordering is deterministic, not fastest-provider-first
+6. **Separate answers** -- AI-synthesized answers (Perplexity/Tavily) land in `answers[]`, so every `results[].url` is a fetchable web URL
 7. **Render** -- JSON envelope when piped, colored terminal table when interactive
 
 ## Features
 
-### 14 Search Modes
+### 13 Search Modes
 
-Pick a mode explicitly with `-m` (default is `general`):
+Pick a mode explicitly with `-m` (default is `general`). The `-q` column
+matters: `extract`/`scrape`/`similar` take a URL and reject text queries
+(exit 3). This table mirrors `search agent-info`, which is generated from the
+same routing registry the engine uses.
 
-| Mode | What it does | Providers used |
-|------|-------------|----------------|
-| `general` | Broad web search (default) | Brave + Serper + Exa + Jina + Tavily + Perplexity |
-| `news` | Breaking news, current events | Brave News + Serper News + Tavily + Perplexity |
-| `academic` | Research papers, studies | Exa + Serper + Tavily + Perplexity |
-| `people` | LinkedIn profiles, bios | Exa |
-| `deep` | Maximum coverage | Brave (LLM Context) + Exa + Serper + Tavily + Perplexity + xAI |
-| `scholar` | Google Scholar | Serper + SerpApi |
-| `patents` | Patent search | Serper |
-| `images` | Image search | Serper |
-| `places` | Local businesses, maps | Serper |
-| `extract` | Full text from a URL | Stealth -> Jina -> Firecrawl -> Browserless |
-| `scrape` | Page scraping | Stealth -> Jina -> Firecrawl -> Browserless |
-| `similar` | Find similar pages to a URL | Exa |
-| `social` | X/Twitter social search | xAI (Grok) |
+| Mode | Use when | `-q` is | Providers used |
+|------|----------|---------|----------------|
+| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Tavily + Perplexity |
+| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Tavily + Perplexity (news endpoints) |
+| `academic` | Papers/studies by topic (semantic + web) | query | Exa + Serper + Tavily + Perplexity |
+| `scholar` | Google Scholar records: citations, PDFs | query | Serper + SerpApi |
+| `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Tavily + Perplexity + xAI |
+| `people` | A person, their role, LinkedIn profile | query | Exa |
+| `social` | What's being said on X/Twitter | query | xAI (Grok) |
+| `patents` | Prior art, patent families | query | Serper |
+| `images` | Image search (check `image_url` fields) | query | Serper |
+| `places` | Local businesses, maps | query | Serper |
+| `extract` | Read one page as markdown, incl. JS/anti-bot | **URL** | Stealth -> Jina -> Firecrawl -> Browserless |
+| `scrape` | Alias of `extract` (identical) | **URL** | Stealth -> Jina -> Firecrawl -> Browserless |
+| `similar` | "More like this page" | **URL** | Exa |
 
 ### Agent-First Design
 
@@ -154,13 +153,20 @@ search "query" --json
 #   "status": "success",
 #   "query": "...",
 #   "mode": "general",
-#   "results": [...],
+#   "results": [...],                              // rank-fused, deduped
+#   "answers": [{"provider": "perplexity_sonar", "text": "..."}],
 #   "metadata": {
 #     "elapsed_ms": 1542,
 #     "result_count": 10,
-#     "providers_queried": ["brave", "serper", "exa"]
+#     "providers_queried": ["brave", "serper", "exa", "jina"],
+#     "provider_results": {"brave": 10, "serper": 10},  // who contributed
+#     "providers_cancelled": ["jina"],             // cut off after enough results
+#     "warnings": []                               // e.g. filters a provider ignored
 #   }
 # }
+
+# Check remaining credits (where the provider API exposes them)
+search usage --json
 ```
 
 **Auto-JSON:** Output is automatically JSON when piped to another program. Human-readable tables when you're in a terminal.
@@ -170,9 +176,9 @@ search "query" --json
 | Code | Meaning | Agent action |
 |------|---------|-------------|
 | 0 | Success | Process results |
-| 1 | Runtime error | Retry might help |
-| 2 | Config error | Fix configuration |
-| 3 | Auth missing | Set API key |
+| 1 | Transient error (API, network) | Retry might help |
+| 2 | Config or auth error | Fix setup / set API key |
+| 3 | Bad input | Fix arguments |
 | 4 | Rate limited | Back off and retry |
 
 ### Usage Examples
@@ -192,6 +198,10 @@ search search -q "BRCA1 gene patent" -m patents
 # Search X (Twitter) only
 search --x "AI agents"
 
+# URL modes take a URL, not a query
+search search -q https://example.com/article -m extract
+search search -q https://stripe.com -m similar
+
 # Pick specific providers
 search search -q "machine learning" -p exa
 search search -q "rust programming" -p brave,serper
@@ -206,6 +216,7 @@ search "query" 2>/dev/null             # suppress diagnostics
 
 | Provider | What it does | Best for |
 |----------|-------------|----------|
+| **[Parallel](https://parallel.ai/)** | Web search API built for AI agents | Agent-grade web search, news, deep research |
 | **[Brave](https://brave.com/search/api/)** | Independent 35B-page index + LLM Context API | Web search, news, RAG-ready content |
 | **[Serper](https://serper.dev/)** | Raw Google SERP + specialist endpoints | Scholar, patents, images, places |
 | **[Exa](https://exa.ai/)** | Neural/semantic search, category filters | Research papers, people search, similar sites |

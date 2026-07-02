@@ -6,13 +6,47 @@ use std::io::IsTerminal;
 pub fn render(response: &SearchResponse) {
     let use_color = std::io::stdout().is_terminal();
 
-    if response.results.is_empty() {
+    if response.results.is_empty() && response.answers.is_empty() {
         if use_color {
             eprintln!("{}", "No results found.".yellow());
         } else {
             eprintln!("No results found.");
         }
         return;
+    }
+
+    if response.metadata.cached {
+        let age = response
+            .metadata
+            .cache_age_secs
+            .map(|s| format!(" ({s}s old)"))
+            .unwrap_or_default();
+        if use_color {
+            eprintln!("{}", format!("  cached result{age}").yellow());
+        } else {
+            eprintln!("  cached result{age}");
+        }
+    }
+
+    // AI-synthesized answers (Perplexity/Tavily) — separate from web results.
+    for answer in &response.answers {
+        if use_color {
+            println!("{} {}", "answer".on_green().black().bold(), answer.provider.cyan());
+            println!("  {}", truncate(&answer.text, 600));
+            println!();
+        } else {
+            println!("[answer via {}]", answer.provider);
+            println!("  {}", truncate(&answer.text, 600));
+            println!();
+        }
+    }
+
+    for warning in &response.metadata.warnings {
+        if use_color {
+            eprintln!("  {} {}", "!".yellow().bold(), warning.yellow());
+        } else {
+            eprintln!("  ! {warning}");
+        }
     }
 
     // Header
