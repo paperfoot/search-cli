@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 13 search providers across 13 explicit search modes.\n\
+    long_about = "Aggregates 14 search providers across 13 explicit search modes.\n\
         You choose the mode (-m) and/or providers (-p); the CLI does not guess\n\
         intent. Run `search agent-info` for the machine-readable capability map.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
@@ -22,6 +22,7 @@ use clap::{Parser, Subcommand};
           serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
           perplexity LLM-synthesized answer with citations (Sonar)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
+          youcom     You.com web search with live news results\n  \
           stealth    Local anti-bot scraper (no API key)\n  \
           xai        Only real-time X/Twitter search (Grok agentic)\n\n\
         EXAMPLES:\n  \
@@ -32,6 +33,7 @@ use clap::{Parser, Subcommand};
           search search -q \"trending on twitter\" -m social # X/Twitter search\n  \
           search search -q \"query\" -p exa                 # force Exa only\n  \
           search search -q \"query\" -p exa,brave           # only Exa + Brave\n  \
+          search search -q \"query\" -p youcom             # force You.com only\n  \
           search --x \"AI agents\"                          # search X (Twitter) only\n  \
           search \"query\" --json | jq '.results[].url'     # pipe JSON to jq"
 )]

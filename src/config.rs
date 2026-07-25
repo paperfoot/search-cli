@@ -38,6 +38,8 @@ pub struct ApiKeys {
     #[serde(default)]
     pub browserless: String,
     #[serde(default)]
+    pub youcom: String,
+    #[serde(default)]
     pub xai: String,
 }
 
@@ -71,6 +73,7 @@ impl Default for AppConfig {
                 serpapi: String::new(),
                 perplexity: String::new(),
                 browserless: String::new(),
+                youcom: String::new(),
                 xai: String::new(),
             },
             settings: Settings {
@@ -135,6 +138,7 @@ pub const PROVIDER_KEYS: &[&str] = &[
     "serpapi",
     "perplexity",
     "browserless",
+    "youcom",
     "xai",
 ];
 
@@ -191,6 +195,7 @@ pub fn config_show(config: &AppConfig) {
             &config.keys.browserless,
             "BROWSERLESS_API_KEY",
         ),
+        ("youcom", &config.keys.youcom, "YOUCOM_API_KEY"),
         ("xai", &config.keys.xai, "XAI_API_KEY"),
     ];
 
@@ -405,6 +410,12 @@ pub fn config_check(config: &AppConfig) {
             &config.keys.browserless,
             "BROWSERLESS_API_KEY",
             "Cloud browser for Cloudflare/JS-heavy pages",
+        ),
+        (
+            "youcom",
+            &config.keys.youcom,
+            "YOUCOM_API_KEY",
+            "You.com web search with live news results",
         ),
         (
             "xai",

@@ -12,6 +12,7 @@ pub mod serper;
 pub mod stealth;
 pub mod tavily;
 pub mod xai;
+pub mod youcom;
 
 use crate::context::AppContext;
 use crate::errors::SearchError;
@@ -192,6 +193,7 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
         Box::new(stealth::Stealth::new(ctx.clone())),
         Box::new(firecrawl::Firecrawl::new(ctx.clone())),
         Box::new(tavily::Tavily::new(ctx.clone())),
+        Box::new(youcom::YouCom::new(ctx.clone())),
         Box::new(browserless::Browserless::new(ctx.clone())),
         Box::new(perplexity::Perplexity::new(ctx.clone())),
         Box::new(serpapi::SerpApi::new(ctx.clone())),

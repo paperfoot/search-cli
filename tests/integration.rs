@@ -34,7 +34,7 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Aggregates 13 search providers"))
+        .stdout(predicate::str::contains("Aggregates 14 search providers"))
         .stdout(predicate::str::contains("brave"))
         .stdout(predicate::str::contains("serper"))
         .stdout(predicate::str::contains("exa"));
@@ -92,6 +92,7 @@ fn test_providers_json() {
     assert!(names.contains(&"serper"));
     assert!(names.contains(&"exa"));
     assert!(names.contains(&"jina"));
+    assert!(names.contains(&"youcom"));
     assert!(names.contains(&"firecrawl"));
     assert!(names.contains(&"tavily"));
 }
@@ -106,6 +107,7 @@ fn test_config_check() {
         .stdout(predicate::str::contains("serper"))
         .stdout(predicate::str::contains("exa"))
         .stdout(predicate::str::contains("jina"))
+        .stdout(predicate::str::contains("youcom"))
         .stdout(predicate::str::contains("firecrawl"))
         .stdout(predicate::str::contains("tavily"));
 }

@@ -94,6 +94,7 @@ async fn main() {
             "api.exa.ai:443",
             "api.jina.ai:443",
             "api.tavily.com:443",
+            "ydc-index.io:443",
             "api.perplexity.ai:443",
         ];
         for domain in domains {
@@ -191,6 +192,7 @@ async fn main() {
                 "https://api.search.brave.com/res/v1/web/search",
                 "https://google.serper.dev/search",
                 "https://api.exa.ai/search",
+                "https://ydc-index.io/v1/search",
             ];
             for url in urls {
                 let _ = app_c.client.head(url).send().await;

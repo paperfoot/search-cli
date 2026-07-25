@@ -2,7 +2,7 @@
 
 # Search CLI — Web Search for AI Agents
 
-**One binary, 13 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
+**One binary, 14 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -19,7 +19,7 @@
 
 ---
 
-A single Rust binary that aggregates Brave, Serper, Exa, Linkup, Jina, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
+A single Rust binary that aggregates Brave, Serper, Exa, Linkup, Jina, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, You.com, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
 
 [Install](#install) | [How It Works](#how-it-works) | [Features](#features) | [Providers](#providers) | [Contributing](#contributing)
 
@@ -125,11 +125,11 @@ same routing registry the engine uses.
 
 | Mode | Use when | `-q` is | Providers used |
 |------|----------|---------|----------------|
-| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Linkup + Tavily + Perplexity |
-| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Linkup + Tavily + Perplexity (news endpoints) |
+| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Linkup + Tavily + You.com + Perplexity |
+| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Linkup + Tavily + You.com + Perplexity (news endpoints) |
 | `academic` | Papers/studies by topic (semantic + web) | query | Exa + Serper + Tavily + Perplexity |
 | `scholar` | Google Scholar records: citations, PDFs | query | Serper + SerpApi |
-| `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Linkup + Tavily + Perplexity + xAI |
+| `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Linkup + Tavily + You.com + Perplexity + xAI |
 | `people` | A person, their role, LinkedIn profile | query | Exa |
 | `social` | What's being said on X/Twitter | query | xAI (Grok) |
 | `patents` | Prior art, patent families | query | Serper |
@@ -230,6 +230,7 @@ search "query" 2>/dev/null             # suppress diagnostics
 | **[Tavily](https://tavily.com/)** | General + deep search, research-focused | Broad coverage, research queries |
 | **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
 | **[Perplexity](https://perplexity.ai/)** | LLM-synthesized answer with citations (Sonar) | When you want an answer with sources, not raw pages |
+| **You.com** | Web + news search with freshness controls | Fresh web research, news queries |
 | **Browserless** | Cloud browser for Cloudflare/JS-heavy pages | Anti-bot bypass, pages that need a real browser |
 | **Stealth** | Built-in anti-bot scraper | Protected pages, no API key needed |
 | **[xAI](https://x.ai/)** | Only provider with native real-time X/Twitter search (Grok) | Live social signal, trending topics, account activity |
@@ -303,11 +304,12 @@ export BRAVE_API_KEY=your-key
 export SERPER_API_KEY=your-key
 export EXA_API_KEY=your-key
 # ...also PERPLEXITY_API_KEY, JINA_API_KEY, LINKUP_API_KEY, FIRECRAWL_API_KEY,
-#        TAVILY_API_KEY, SERPAPI_API_KEY, BROWSERLESS_API_KEY, XAI_API_KEY,
+#        TAVILY_API_KEY, SERPAPI_API_KEY, YOUCOM_API_KEY, BROWSERLESS_API_KEY, XAI_API_KEY,
 #        PARALLEL_API_KEY
 
 # Or the SEARCH_KEYS_ prefixed form:
 export SEARCH_KEYS_BRAVE=your-key
+export SEARCH_KEYS_YOUCOM=your-key
 ```
 
 Precedence (highest first): `<PROVIDER>_API_KEY` env → `SEARCH_KEYS_*` env → config file.
