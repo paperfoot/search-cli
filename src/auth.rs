@@ -352,9 +352,16 @@ pub async fn login(
             format!("${:.2}", token.balance_usd).green()
         );
         println!(
-            "  config   {}\n",
+            "  config   {}",
             crate::config::config_path().display().to_string().dimmed()
         );
+        // Say it here rather than let someone find out at their first search:
+        // this release stores the credential, it does not route through it.
+        println!(
+            "\n  {} searches still use your own provider keys. Routing them",
+            "note".yellow()
+        );
+        println!("       through metasearch.sh lands in the next release.\n");
     }
 
     Ok(0)
