@@ -314,10 +314,13 @@ Precedence (highest first): `<PROVIDER>_API_KEY` env → `SEARCH_KEYS_*` env →
 
 ## Signing in to metasearch.sh
 
-Instead of holding thirteen provider accounts, you can point the CLI at a
-[metasearch.sh](https://metasearch.sh) account: one prepaid balance, one key,
-per-call metering. `search login` does the OAuth device flow — it prints a
-short code, opens your browser, and stores the key it gets back.
+[metasearch.sh](https://metasearch.sh) is the hosted sibling: one prepaid
+balance, one key, per-call metering. `search login` does the OAuth device flow
+— it prints a short code, opens your browser, and stores the key it gets back.
+
+**What this does today:** it stores the credential. Searches still run through
+your own provider keys. Routing queries through metasearch.sh — so one machine
+needs one key instead of thirteen — is the next release.
 
 ```bash
 search login              # code + browser approval, key saved to config
