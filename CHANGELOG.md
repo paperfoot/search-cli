@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 — 2026-07-25
+
+### Terminal login
+- `search login` signs in to a metasearch.sh account using the OAuth 2.0
+  device authorization grant (RFC 8628): the CLI prints a short confirmation
+  code, opens the browser, and polls until the request is approved. No key is
+  ever copied by hand. `--no-browser` covers headless and SSH sessions.
+- `search whoami` reports the account, balance, and key behind the stored
+  credentials; `search logout` clears them locally, `--revoke` also kills the
+  key server-side so a lost machine stops spending.
+- Credentials live in the same 0600 config file as provider keys, under a new
+  `[metasearch]` section. Precedence: `METASEARCH_TOKEN` env →
+  `SEARCH_METASEARCH_TOKEN` env → config file. `METASEARCH_URL` points the CLI
+  at a self-hosted or local instance.
+- Polling survives dropped keep-alive connections, sleeping laptops, and wifi
+  blips — only a sustained outage aborts a login.
+
+Search dispatch is unchanged: this release stores credentials, it does not yet
+route queries through metasearch.sh.
+
 ## 0.8.0 — 2026-07-02
 
 Production-hardening release from a full blindspot audit (cross-checked by an

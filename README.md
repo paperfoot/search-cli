@@ -312,6 +312,28 @@ export SEARCH_KEYS_BRAVE=your-key
 
 Precedence (highest first): `<PROVIDER>_API_KEY` env → `SEARCH_KEYS_*` env → config file.
 
+## Signing in to metasearch.sh
+
+Instead of holding thirteen provider accounts, you can point the CLI at a
+[metasearch.sh](https://metasearch.sh) account: one prepaid balance, one key,
+per-call metering. `search login` does the OAuth device flow — it prints a
+short code, opens your browser, and stores the key it gets back.
+
+```bash
+search login              # code + browser approval, key saved to config
+search login --no-browser # headless: prints the URL to open elsewhere
+search whoami             # which account, what balance, which key
+search logout --revoke    # clear locally and kill the key server-side
+```
+
+Repeat logins from the same machine reuse that machine's key rather than
+minting a new one, and every key shows up in the metasearch.sh dashboard
+labelled with the hostname it was issued to.
+
+Precedence (highest first): `METASEARCH_TOKEN` env → `SEARCH_METASEARCH_TOKEN`
+env → config file. `METASEARCH_URL` overrides the API host for self-hosted or
+local instances.
+
 ## Updating
 
 ```bash

@@ -1,3 +1,4 @@
+mod auth;
 mod cache;
 mod cli;
 mod config;
@@ -523,6 +524,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             Ok(0)
         }
 
+        Commands::Login(args) => {
+            auth::login(&app.config, &app.client, ctx, args.url, args.no_browser).await
+        }
+
+        Commands::Logout { revoke } => auth::logout(&app.config, &app.client, ctx, revoke).await,
+
+        Commands::Whoami => auth::whoami(&app.config, &app.client, ctx).await,
+
         Commands::Config { action } => {
             match action {
                 ConfigAction::Show => {
@@ -546,6 +555,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                 "count": app.config.settings.count,
                             },
                             "providers_configured": configured,
+                            "metasearch": {
+                                "logged_in": !auth::resolve_token(&app.config).is_empty(),
+                                "email": app.config.metasearch.email,
+                                "url": auth::resolve_base_url(&app.config),
+                            },
                         });
                         output::json::render_value(&info);
                     } else if !ctx.suppress_human() {

@@ -11,6 +11,26 @@ use std::path::PathBuf;
 pub struct AppConfig {
     pub keys: ApiKeys,
     pub settings: Settings,
+    /// metasearch.sh account, populated by `search login`. Independent of the
+    /// per-provider keys above: either, both, or neither may be set.
+    #[serde(default)]
+    pub metasearch: Metasearch,
+}
+
+/// Field names deliberately avoid underscores — figment splits `SEARCH_*` env
+/// vars on `_`, so `token` maps cleanly from `SEARCH_METASEARCH_TOKEN` while
+/// an `api_key` field would not.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Metasearch {
+    /// `ms_live_…` API key issued by `search login`.
+    #[serde(default)]
+    pub token: String,
+    /// Account email, cached purely so `search config show` can display it.
+    #[serde(default)]
+    pub email: String,
+    /// Override the API host (self-host or local dev). Empty = metasearch.sh.
+    #[serde(default)]
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +97,7 @@ impl Default for AppConfig {
                 timeout: default_timeout(),
                 count: default_count(),
             },
+            metasearch: Metasearch::default(),
         }
     }
 }
@@ -140,6 +161,9 @@ pub const PROVIDER_KEYS: &[&str] = &[
 
 /// Valid setting names for `config set settings.<name>`.
 pub const SETTING_KEYS: &[&str] = &["timeout", "count"];
+
+/// Valid field names for `config set metasearch.<name>`.
+pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
 
 pub fn mask_key(key: &str) -> String {
     // Char-based: byte-slicing (`&key[..2]`) panics on multi-byte UTF-8 and
@@ -235,6 +259,41 @@ pub fn config_show(config: &AppConfig) {
         println!("  timeout  = {}s", config.settings.timeout);
         println!("  count    = {}", config.settings.count);
     }
+
+    println!();
+    let token = crate::auth::resolve_token(config);
+    let host = crate::auth::resolve_base_url(config);
+    if c {
+        println!("  {}", "[metasearch]".bold());
+        if token.is_empty() {
+            println!(
+                "    {:<10} {}",
+                "account".white(),
+                "not logged in — run `search login`".dimmed()
+            );
+        } else {
+            let who = if config.metasearch.email.is_empty() {
+                "logged in".to_string()
+            } else {
+                config.metasearch.email.clone()
+            };
+            println!("    {:<10} {}", "account".white(), who.green());
+            println!("    {:<10} {}", "token".white(), mask_key(&token).green());
+        }
+        println!("    {:<10} {}", "host".white(), host.dimmed());
+    } else {
+        println!("[metasearch]");
+        println!(
+            "  account  = {}",
+            if token.is_empty() {
+                "(not logged in)"
+            } else {
+                config.metasearch.email.as_str()
+            }
+        );
+        println!("  token    = {}", mask_key(&token));
+        println!("  host     = {host}");
+    }
     println!();
 }
 
@@ -267,9 +326,18 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
                     toml::Value::String(value.to_string())
                 }
                 "settings" => parse_setting(name, value)?,
+                "metasearch" => {
+                    if !METASEARCH_KEYS.contains(name) {
+                        return Err(SearchError::Config(format!(
+                            "Unknown field 'metasearch.{name}'. Valid: {}",
+                            METASEARCH_KEYS.join(", ")
+                        )));
+                    }
+                    toml::Value::String(value.to_string())
+                }
                 other => {
                     return Err(SearchError::Config(format!(
-                        "Unknown section '{other}'. Use 'keys.<provider>' or 'settings.<name>'."
+                        "Unknown section '{other}'. Use 'keys.<provider>', 'settings.<name>', or 'metasearch.<name>'."
                     )));
                 }
             };
@@ -297,11 +365,44 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
         }
     }
 
+    write_config_atomic(&path, &doc)
+}
+
+/// Remove a dotted key (e.g. `metasearch.token`) from the config file.
+/// Absent keys are not an error — `search logout` must be idempotent.
+pub fn config_unset(key: &str) -> Result<(), SearchError> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut doc: toml::Table = std::fs::read_to_string(&path)?
+        .parse()
+        .map_err(|e: toml::de::Error| SearchError::Config(e.to_string()))?;
+
+    let parts: Vec<&str> = key.split('.').collect();
+    let [section, name] = parts.as_slice() else {
+        return Err(SearchError::Config(format!(
+            "Invalid key '{key}'. Use a dotted form like 'metasearch.token'."
+        )));
+    };
+    match doc.get_mut(*section) {
+        Some(toml::Value::Table(t)) => {
+            if t.remove(*name).is_none() {
+                return Ok(());
+            }
+        }
+        _ => return Ok(()),
+    }
+
+    write_config_atomic(&path, &doc)
+}
+
+/// Atomic replace (temp + rename) so concurrent writes can't interleave a torn
+/// file, and 0600 because this file holds API keys.
+fn write_config_atomic(path: &std::path::Path, doc: &toml::Table) -> Result<(), SearchError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Atomic replace (temp + rename) so concurrent `config set` calls can't
-    // interleave a torn file, and 0600 because this file holds API keys.
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, doc.to_string())?;
     #[cfg(unix)]
@@ -309,7 +410,7 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    std::fs::rename(&tmp, &path)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
