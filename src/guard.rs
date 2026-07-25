@@ -53,6 +53,37 @@ pub async fn assert_public_url(raw: &str) -> Result<(), SearchError> {
     Ok(())
 }
 
+/// Reject a bare hostname that resolves to a non-public address.
+///
+/// `search verify` opens a TCP connection to whatever host a domain's MX
+/// record names. An attacker who controls a domain can point its MX at
+/// 169.254.169.254 or a LAN address and use the CLI as a port scanner, so the
+/// same default-deny that guards extract/scrape has to guard this too.
+pub async fn assert_public_host(host: &str, port: u16) -> Result<(), SearchError> {
+    let lower = host.to_ascii_lowercase();
+    if let Ok(ip) = lower.parse::<IpAddr>() {
+        return reject_if_private(ip, &lower);
+    }
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+    {
+        return Err(blocked(&lower));
+    }
+    let lookup = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::lookup_host((lower.as_str(), port)),
+    )
+    .await;
+    if let Ok(Ok(addrs)) = lookup {
+        for addr in addrs {
+            reject_if_private(addr.ip(), &lower)?;
+        }
+    }
+    Ok(())
+}
+
 fn reject_if_private(ip: IpAddr, shown: &str) -> Result<(), SearchError> {
     if is_private(ip) {
         return Err(blocked(shown));
