@@ -71,6 +71,7 @@ impl YouCom {
                     provider: "youcom",
                     code: "api_error",
                     message: format!("HTTP {status}"),
+                    status: Some(status.as_u16()),
                 });
             }
 
