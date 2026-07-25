@@ -83,6 +83,50 @@ pub fn resolve_base_url(config: &AppConfig) -> String {
     DEFAULT_BASE_URL.to_string()
 }
 
+/// Hosts `search login` will hand an API key to without an explicit override.
+const TRUSTED_LOGIN_HOSTS: &[&str] = &["metasearch.sh", "www.metasearch.sh"];
+
+/// Environment variable that consents to logging in against another host.
+const OVERRIDE_VAR: &str = "METASEARCH_ALLOW_INSECURE_HOST";
+
+/// Guard the host `search login` will send credentials to.
+///
+/// The login flow ends with the server handing back an API key that can spend
+/// real money. An agent reading a poisoned web page can run
+/// `search config set metasearch.url https://attacker.tld` — or pass
+/// `--url` — and the next login delivers the key to whoever asked. Anything
+/// but the known hosts now needs deliberate consent, and plain http is
+/// refused outright: a bearer token must not cross the wire in clear.
+fn assert_login_host_allowed(base: &str) -> Result<(), SearchError> {
+    let parsed = url::Url::parse(base)
+        .map_err(|e| SearchError::Config(format!("'{base}' is not a valid URL: {e}")))?;
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+
+    if TRUSTED_LOGIN_HOSTS.contains(&host.as_str()) && parsed.scheme() == "https" {
+        return Ok(());
+    }
+
+    let consented = std::env::var(OVERRIDE_VAR).is_ok_and(|v| v == "1" || v == "true");
+    if !consented {
+        return Err(SearchError::Config(format!(
+            "refusing to send credentials to '{base}'. `search login` only trusts \
+             https://metasearch.sh. If you are running your own instance, set \
+             {OVERRIDE_VAR}=1 to confirm."
+        )));
+    }
+
+    // Consent covers an unfamiliar host, never an unencrypted one — except on
+    // loopback, where there is no wire to intercept.
+    let loopback = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1");
+    if parsed.scheme() != "https" && !loopback {
+        return Err(SearchError::Config(format!(
+            "refusing to send credentials over plain http to '{base}'"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Account API key: `METASEARCH_TOKEN` > config. Empty means "not logged in".
 pub fn resolve_token(config: &AppConfig) -> String {
     if let Ok(v) = std::env::var("METASEARCH_TOKEN") {
@@ -161,6 +205,7 @@ pub async fn login(
         Some(u) => u.trim_end_matches('/').to_string(),
         None => resolve_base_url(config),
     };
+    assert_login_host_allowed(&base)?;
 
     let start = client
         .post(format!("{base}/api/v1/device/code"))
@@ -460,6 +505,17 @@ mod tests {
         // A trailing slash would produce "https://host//api/v1/..." on join.
         cfg.metasearch.url = "https://ms.example.com/".to_string();
         assert_eq!(resolve_base_url(&cfg), "https://ms.example.com");
+    }
+
+    #[test]
+    fn login_host_is_pinned_unless_consented() {
+        use super::assert_login_host_allowed;
+        // The default host is fine.
+        assert!(assert_login_host_allowed("https://metasearch.sh").is_ok());
+        // A prompt-injected agent redirecting the flow gets refused.
+        assert!(assert_login_host_allowed("https://evil.example").is_err());
+        // So does plain http on the real host.
+        assert!(assert_login_host_allowed("http://metasearch.sh").is_err());
     }
 
     #[test]

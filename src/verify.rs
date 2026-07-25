@@ -256,6 +256,14 @@ enum SmtpResult {
 }
 
 async fn smtp_probe(mx_host: &str, email: &str) -> SmtpResult {
+    // An MX record is attacker-controlled input: whoever owns the domain
+    // decides which host we connect to. Without this the CLI probes whatever
+    // internal address a hostile domain names, and the SMTP response codes
+    // report back what is listening.
+    if let Err(e) = crate::guard::assert_public_host(mx_host, 25).await {
+        return SmtpResult::Error(e.to_string());
+    }
+
     let addr = format!("{mx_host}:25");
 
     let stream = match timeout(SMTP_TIMEOUT, TcpStream::connect(&addr)).await {

