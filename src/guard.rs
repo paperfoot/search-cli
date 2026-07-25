@@ -127,6 +127,25 @@ mod tests {
         assert_public_url(u).await.is_ok()
     }
 
+    /// `search verify` connects to whatever host a domain's MX record names,
+    /// which is input the attacker controls. Same default-deny as URL modes.
+    #[tokio::test]
+    async fn mx_hosts_are_checked_before_smtp_connects() {
+        let blocked =
+            |h: &'static str| async move { crate::guard::assert_public_host(h, 25).await.is_err() };
+        assert!(blocked("169.254.169.254").await, "cloud metadata");
+        assert!(blocked("127.0.0.1").await, "loopback");
+        assert!(blocked("10.0.0.5").await, "private");
+        assert!(blocked("192.168.1.1").await, "private");
+        assert!(blocked("mail.internal").await, "internal suffix");
+        assert!(blocked("localhost").await);
+        assert!(blocked("::1").await, "ipv6 loopback");
+        // A real MX host must still be reachable, or the feature is dead.
+        assert!(crate::guard::assert_public_host("aspmx.l.google.com", 25)
+            .await
+            .is_ok());
+    }
+
     #[tokio::test]
     async fn blocks_metadata_loopback_private_and_internal_names() {
         assert!(!ok("http://169.254.169.254/latest/meta-data/").await);
