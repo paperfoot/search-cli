@@ -75,6 +75,19 @@ pub enum Commands {
         action: ConfigAction,
     },
 
+    /// Sign in to metasearch.sh and store an API key for this machine
+    Login(LoginArgs),
+
+    /// Remove the stored metasearch.sh credentials from this machine
+    Logout {
+        /// Also revoke the key server-side so it stops working everywhere
+        #[arg(long)]
+        revoke: bool,
+    },
+
+    /// Show which metasearch.sh account this machine is signed in to
+    Whoami,
+
     /// Show machine-readable capabilities (for agents)
     AgentInfo,
 
@@ -113,6 +126,17 @@ pub enum Commands {
         #[command(subcommand)]
         action: CacheAction,
     },
+}
+
+#[derive(Parser)]
+pub struct LoginArgs {
+    /// Print the URL instead of launching a browser (headless boxes, SSH)
+    #[arg(long)]
+    pub no_browser: bool,
+
+    /// API host to sign in to (default: https://metasearch.sh)
+    #[arg(long)]
+    pub url: Option<String>,
 }
 
 #[derive(Parser)]
