@@ -527,6 +527,12 @@ pub async fn execute_special(
         });
     }
 
+    // Honour -c even when the upstream ignores it. Serper's scholar, places
+    // and patents endpoints return a full page whatever `num` says, so `-c 3`
+    // handed back ten. The fan-out path in execute_search already truncates
+    // after fusing; this path had no equivalent.
+    results.truncate(count);
+
     // Scraped page content is untrusted input for the consuming agent —
     // label it so downstream prompts can treat it as data, not instructions.
     if matches!(mode, Mode::Extract | Mode::Scrape) {
