@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 13 search providers across 13 explicit search modes.\n\
+    long_about = "Aggregates 14 search providers across 13 explicit search modes.\n\
         You choose the mode (-m) and/or providers (-p); the CLI does not guess\n\
         intent. Run `search agent-info` for the machine-readable capability map.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
           exa        Neural/semantic search, LinkedIn people, find-similar\n  \
           jina       Fast web search + URL-to-markdown reader\n  \
           linkup     High-accuracy agent search (SimpleQA leader)\n  \
+          youcom     You.com web search + news snippets\n  \
           firecrawl  JS-rendered page scraping + structured extraction\n  \
           tavily     RAG-oriented search: general, news, academic, deep\n  \
           serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
@@ -182,7 +183,7 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,stealth,xai)
+    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,youcom,firecrawl,tavily,serpapi,perplexity,browserless,stealth,xai)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 
