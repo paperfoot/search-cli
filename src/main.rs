@@ -94,6 +94,7 @@ async fn main() {
             "google.serper.dev:443",
             "api.exa.ai:443",
             "api.jina.ai:443",
+            "ydc-index.io:443",
             "api.tavily.com:443",
             "api.perplexity.ai:443",
         ];
@@ -192,6 +193,7 @@ async fn main() {
                 "https://api.search.brave.com/res/v1/web/search",
                 "https://google.serper.dev/search",
                 "https://api.exa.ai/search",
+                "https://ydc-index.io/v1/search",
             ];
             for url in urls {
                 let _ = app_c.client.head(url).send().await;
@@ -537,7 +539,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 ConfigAction::Show => {
                     if ctx.is_json() {
                         // Use the same resolver as `config check` (is_configured ->
-                        // resolve_key) so env-only keys count and all 12 providers
+                        // resolve_key) so env-only keys count and all providers
                         // are covered — the old hardcoded list missed parallel +
                         // stealth and ignored env vars.
                         let all = providers::build_providers(&app);
@@ -689,7 +691,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                              "description": "Search mode — chosen explicitly by the caller; the CLI does NOT infer intent from the query"},
                             {"name": "-c/--count", "type": "integer", "required": false, "description": "Number of results"},
                             {"name": "-p/--providers", "type": "string[]", "required": false,
-                             "values": ["parallel","brave","serper","exa","jina","linkup","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai"],
+                             "values": ["parallel","brave","serper","exa","jina","linkup","youcom","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai"],
                              "description": "Comma-separated provider list"},
                             {"name": "-d/--domain", "type": "string[]", "required": false, "description": "Include only these domains"},
                             {"name": "--exclude-domain", "type": "string[]", "required": false, "description": "Exclude these domains"},
@@ -724,7 +726,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     "config set": {
                         "description": "Set a configuration value",
                         "args": [
-                            {"name": "key", "type": "string", "required": true, "description": "Config key (e.g. keys.brave, settings.timeout)"},
+                            {"name": "key", "type": "string", "required": true, "description": "Config key (e.g. keys.brave, keys.youcom, settings.timeout)"},
                             {"name": "value", "type": "string", "required": true, "description": "Value to set"},
                         ],
                         "options": []

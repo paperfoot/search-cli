@@ -146,11 +146,7 @@ impl SearchError {
 
     pub fn suggestion(&self) -> Option<String> {
         match self {
-            Self::AuthMissing { provider } => Some(format!(
-                "Set {}_API_KEY env var, or: echo YOUR_KEY | search config set keys.{} -",
-                provider.to_uppercase(),
-                provider
-            )),
+            Self::AuthMissing { provider } => Some(auth_missing_suggestion(provider)),
             Self::NoProviders(mode) => Some(format!(
                 "No providers configured for mode '{}'. Run: search config check",
                 mode
@@ -184,6 +180,18 @@ impl SearchError {
                 provider_failures,
             },
         }
+    }
+}
+
+fn auth_missing_suggestion(provider: &str) -> String {
+    match provider {
+        "youcom" => "Set YDC_API_KEY env var, or: echo YOUR_KEY | search config set keys.youcom -"
+            .to_string(),
+        _ => format!(
+            "Set {}_API_KEY env var, or: echo YOUR_KEY | search config set keys.{} -",
+            provider.to_uppercase(),
+            provider
+        ),
     }
 }
 

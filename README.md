@@ -2,7 +2,7 @@
 
 # Search CLI — Web Search for AI Agents
 
-**One binary, 13 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
+**One binary, 14 providers, 13 modes, rank-fused results. The web search tool your AI agent is missing.**
 
 <br />
 
@@ -19,7 +19,7 @@
 
 ---
 
-A single Rust binary that aggregates Brave, Serper, Exa, Linkup, Jina, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
+A single Rust binary that aggregates Brave, Serper, Exa, Linkup, Jina, You.com, Firecrawl, Tavily, SerpApi, Perplexity, Parallel, xAI, and more into one search interface. Built for AI agents from day one: structured JSON, semantic exit codes, self-describing `agent-info`, reciprocal rank fusion across providers, and a `usage` command that reports remaining API credits.
 
 [Install](#install) | [How It Works](#how-it-works) | [Features](#features) | [Providers](#providers) | [Contributing](#contributing)
 
@@ -125,8 +125,8 @@ same routing registry the engine uses.
 
 | Mode | Use when | `-q` is | Providers used |
 |------|----------|---------|----------------|
-| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Linkup + Tavily + Perplexity |
-| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Linkup + Tavily + Perplexity (news endpoints) |
+| `general` | Any web lookup not covered below (default) | query | Parallel + Brave + Serper + Exa + Jina + Linkup + You.com + Tavily + Perplexity |
+| `news` | Current events; add `-f day`/`-f week` | query | Parallel + Brave + Serper + Linkup + You.com + Tavily + Perplexity (news endpoints) |
 | `academic` | Papers/studies by topic (semantic + web) | query | Exa + Serper + Tavily + Perplexity |
 | `scholar` | Google Scholar records: citations, PDFs | query | Serper + SerpApi |
 | `deep` | Max coverage; waits for all providers — use `-c 30` | query | Parallel + Brave (web + LLM Context) + Serper + Exa + Linkup + Tavily + Perplexity + xAI |
@@ -226,6 +226,7 @@ search "query" 2>/dev/null             # suppress diagnostics
 | **[Exa](https://exa.ai/)** | Neural/semantic search, category filters | Research papers, people search, similar sites |
 | **[Jina](https://jina.ai/)** | Fast URL-to-markdown, 500 RPM free tier | Reading article content, quick extraction |
 | **[Linkup](https://www.linkup.so/)** | High-accuracy agent search (leads the SimpleQA benchmark) | Factual lookups where accuracy matters most |
+| **You.com** | Current web + news snippets | Fast general search and news-grounded results |
 | **[Firecrawl](https://firecrawl.dev/)** | JavaScript rendering, structured extraction | Dynamic pages, SPAs, data extraction |
 | **[Tavily](https://tavily.com/)** | General + deep search, research-focused | Broad coverage, research queries |
 | **[SerpApi](https://serpapi.com/)** | Many engines: Google, Bing, YouTube, Baidu | Multi-engine coverage; only provider with a real balance API |
