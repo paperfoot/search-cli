@@ -260,8 +260,9 @@ fn x_cue(lower: &str) -> Option<String> {
     {
         return Some("x.com/".to_string());
     }
-    // (^|\s)@[A-Za-z0-9_]{2,15}\b — an @ at the start or after whitespace,
-    // so an email address never counts.
+    // (^|\s)@[A-Za-z0-9_]{2,15}\b(?![.@][A-Za-z0-9]) — an @ at the start or
+    // after whitespace, not followed by a domain or another @, so an email
+    // address or "@gmail.com" never counts.
     for (i, _) in lower.match_indices('@') {
         if !lower[..i]
             .chars()
@@ -275,7 +276,10 @@ fn x_cue(lower: &str) -> Option<String> {
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .count();
-        if (2..=15).contains(&n) && boundary_after(rest, n) {
+        let mut after = rest[n..].chars();
+        let looks_like_address = matches!(after.next(), Some('.' | '@'))
+            && after.next().is_some_and(|c| c.is_ascii_alphanumeric());
+        if (2..=15).contains(&n) && boundary_after(rest, n) && !looks_like_address {
             return Some(format!("@{}", &rest[..n]));
         }
     }
@@ -382,6 +386,9 @@ mod tests {
             ("x.com/elonmusk status", "social", "rule"),
             ("@sama thoughts on agi", "social", "rule"),
             ("mail boris@example.com", "general", "fallback"),
+            ("@gmail.com smtp settings", "general", "fallback"),
+            ("@john@example.com", "general", "fallback"),
+            ("ping @sama. thoughts?", "social", "rule"),
             ("onx deals", "general", "fallback"),
             ("similar to https://linear.app", "similar", "rule"),
             ("Competitors of https://stripe.com", "similar", "rule"),
