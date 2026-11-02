@@ -1,72 +1,66 @@
 #!/bin/sh
-# Install search-cli - agent-friendly multi-provider search
-# Usage: curl -fsSL https://raw.githubusercontent.com/paperfoot/search-cli/master/install.sh | sh
-set -e
+# Install search, the web search CLI for AI agents.
+# Usage: curl -fsSL https://metasearch.sh/install | sh
+#    or: curl -fsSL https://raw.githubusercontent.com/paperfoot/search-cli/master/install.sh | sh
+# Prebuilt binaries: macOS and Linux (glibc), x86_64 and arm64.
+set -eu
 
 REPO="paperfoot/search-cli"
 BINARY="search"
 
-# Detect OS and architecture
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS" in
   Linux)  OS_TAG="unknown-linux-gnu" ;;
   Darwin) OS_TAG="apple-darwin" ;;
-  *)      echo "Unsupported OS: $OS"; exit 1 ;;
+  *)      fail "Unsupported OS: $OS. Install from source: cargo install agent-search" ;;
 esac
 
 case "$ARCH" in
-  x86_64)  ARCH_TAG="x86_64" ;;
+  x86_64|amd64)  ARCH_TAG="x86_64" ;;
   aarch64|arm64) ARCH_TAG="aarch64" ;;
-  *)       echo "Unsupported architecture: $ARCH"; exit 1 ;;
+  *)             fail "Unsupported architecture: $ARCH. Install from source: cargo install agent-search" ;;
 esac
 
 TARGET="${ARCH_TAG}-${OS_TAG}"
+ASSET="${BINARY}-${TARGET}.tar.gz"
+# GitHub redirects latest/download to the newest release, with no API call
+# (the API allows 60 unauthenticated requests an hour per IP).
+BASE="https://github.com/${REPO}/releases/latest/download"
 
-# Prebuilt binaries exist for macOS (both arches) and Linux x86_64.
-if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then
-  echo "No prebuilt binary for aarch64 Linux. Install from source:"
-  echo "  cargo install agent-search --no-default-features"
-  exit 1
-fi
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT INT TERM
 
-if [ -z "$LATEST" ]; then
-  echo "No releases found. Install from source:"
-  echo "  cargo install --git https://github.com/${REPO}"
-  exit 1
-fi
-
-URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}-${TARGET}.tar.gz"
-echo "Downloading search ${LATEST} for ${TARGET}..."
-
-TMPDIR=$(mktemp -d)
-curl -fsSL "$URL" -o "${TMPDIR}/search.tar.gz"
+echo "Downloading ${ASSET}..."
+curl -fsSL "${BASE}/${ASSET}" -o "${WORK}/${ASSET}" \
+  || fail "Download failed: ${BASE}/${ASSET}. Install from source: cargo install agent-search"
 
 # Verify against the release's SHA256SUMS before extracting anything.
-SUMS_URL="https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS"
-if ! curl -fsSL "$SUMS_URL" -o "${TMPDIR}/SHA256SUMS"; then
-  echo "Release ${LATEST} has no SHA256SUMS file; refusing unverified install."
-  echo "Install from source instead: cargo install agent-search"
-  rm -rf "$TMPDIR"
-  exit 1
-fi
-EXPECTED=$(grep "${BINARY}-${TARGET}.tar.gz" "${TMPDIR}/SHA256SUMS" | awk '{print $1}')
+curl -fsSL "${BASE}/SHA256SUMS" -o "${WORK}/SHA256SUMS" \
+  || fail "The release has no SHA256SUMS file; refusing an unverified install. Install from source: cargo install agent-search"
+
+EXPECTED="$(awk -v f="$ASSET" '$2 == f || $2 == "*" f { print $1 }' "${WORK}/SHA256SUMS")"
 if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL=$(sha256sum "${TMPDIR}/search.tar.gz" | awk '{print $1}')
+  ACTUAL="$(sha256sum "${WORK}/${ASSET}" | awk '{ print $1 }')"
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL="$(shasum -a 256 "${WORK}/${ASSET}" | awk '{ print $1 }')"
 else
-  ACTUAL=$(shasum -a 256 "${TMPDIR}/search.tar.gz" | awk '{print $1}')
+  fail "Neither sha256sum nor shasum is installed, so the download cannot be verified."
 fi
 if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
-  echo "Checksum mismatch for ${BINARY}-${TARGET}.tar.gz (expected ${EXPECTED:-none}, got ${ACTUAL})."
-  rm -rf "$TMPDIR"
-  exit 1
+  fail "Checksum mismatch for ${ASSET} (expected ${EXPECTED:-none}, got ${ACTUAL})."
 fi
 
-tar -xzf "${TMPDIR}/search.tar.gz" -C "${TMPDIR}"
+tar -xzf "${WORK}/${ASSET}" -C "$WORK"
 
-# Install to ~/.local/bin or /usr/local/bin
+# Install to ~/.local/bin if it exists, else /usr/local/bin if writable,
+# else create ~/.local/bin.
 if [ -d "$HOME/.local/bin" ]; then
   INSTALL_DIR="$HOME/.local/bin"
 elif [ -w "/usr/local/bin" ]; then
@@ -76,22 +70,23 @@ else
   mkdir -p "$INSTALL_DIR"
 fi
 
-mv "${TMPDIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
+mv "${WORK}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 chmod +x "${INSTALL_DIR}/${BINARY}"
-rm -rf "$TMPDIR"
 
 echo ""
-echo "Installed search to ${INSTALL_DIR}/${BINARY}"
+echo "Installed ${BINARY} to ${INSTALL_DIR}/${BINARY}"
 echo ""
 
-# Check if in PATH
-if ! command -v search >/dev/null 2>&1; then
-  echo "Add to your PATH:"
-  echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
-  echo ""
-fi
+case ":${PATH}:" in
+  *":${INSTALL_DIR}:"*) ;;
+  *)
+    echo "Add it to your PATH:"
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+    echo ""
+    ;;
+esac
 
 echo "Get started:"
-echo "  search --help"
-echo "  search config check"
-echo ""
+echo "  search login              # no keys needed; new accounts get \$1 of credit"
+echo "  search \"your question\""
+echo "  search config check       # or use your own provider keys"
