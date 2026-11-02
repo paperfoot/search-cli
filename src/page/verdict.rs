@@ -197,7 +197,7 @@ fn looks_binary(body: &str) -> bool {
     total > 0 && control * 10 > total
 }
 
-fn sniff_html(body: &str) -> bool {
+pub(crate) fn sniff_html(body: &str) -> bool {
     let start = prefix(body.trim_start(), 64).to_ascii_lowercase();
     ["<!doctype html", "<html", "<head", "<body"]
         .iter()
