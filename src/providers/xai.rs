@@ -70,13 +70,20 @@ impl Xai {
 /// X handles from the domain filters, bare (no `@`). Deep mode's domains are
 /// web domains, not handles, so deep sends none.
 fn handles(call: &Call<'_>, list: &[String]) -> Vec<String> {
+    let mut all = all_handles(call, list);
+    all.truncate(MAX_HANDLES);
+    all
+}
+
+/// Every handle, uncapped: the local deny filter must cover the entries past
+/// the 20 xAI accepts.
+fn all_handles(call: &Call<'_>, list: &[String]) -> Vec<String> {
     if call.mode != Mode::Social {
         return Vec::new();
     }
     list.iter()
         .map(|h| h.trim().trim_start_matches('@').to_string())
         .filter(|h| !h.is_empty())
-        .take(MAX_HANDLES)
         .collect()
 }
 
@@ -357,12 +364,9 @@ fn parse(data: XaiResponse, call: &Call<'_>) -> Result<Output, SearchError> {
         Err(_) => (Vec::new(), text.trim().to_string()),
     };
 
-    // The deny list is applied here when the allow list took the request slot.
-    let deny: Vec<String> = if handles(call, &call.opts.include_domains).is_empty() {
-        Vec::new()
-    } else {
-        handles(call, &call.opts.exclude_domains)
-    };
+    // The whole deny list is applied here too: upstream gets at most 20, and
+    // none when the allow list took the request slot.
+    let deny = all_handles(call, &call.opts.exclude_domains);
     let denied = |author: &str| deny.iter().any(|h| h.eq_ignore_ascii_case(author));
 
     let mut results = Vec::new();
@@ -573,6 +577,17 @@ mod tests {
             }]}],
             "usage": { "cost_in_usd_ticks": 447_231_500u64 }
         });
+        let data: XaiResponse = serde_json::from_value(raw.clone()).unwrap();
+        // With no allow list, a deny entry past the 20 xAI accepts is still
+        // filtered here.
+        let mut deny: Vec<String> = (0..20).map(|i| format!("h{i}")).collect();
+        deny.push("spam".into());
+        let long = SearchOpts {
+            exclude_domains: deny,
+            ..SearchOpts::default()
+        };
+        let out = parse(data, &call(Mode::Social, 10, &long)).unwrap();
+        assert!(out.results.iter().all(|r| !r.url.contains("/spam/")));
         let data: XaiResponse = serde_json::from_value(raw).unwrap();
         let opts = SearchOpts {
             include_domains: vec!["a".into(), "spam".into()],

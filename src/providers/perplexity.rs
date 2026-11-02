@@ -138,12 +138,9 @@ fn clip(s: &str) -> String {
 
 fn parse(data: PerplexityResponse, call: &Call<'_>) -> Output {
     let opts = call.opts;
-    // Upstream honoured the deny list unless the allow list took the slot.
-    let drop: &[String] = if opts.include_domains.is_empty() {
-        &[]
-    } else {
-        &opts.exclude_domains
-    };
+    // The whole deny list is applied here too: upstream gets at most 20
+    // entries, and none when the allow list took the slot.
+    let drop: &[String] = &opts.exclude_domains;
     let results = data
         .results
         .into_iter()
@@ -288,6 +285,21 @@ mod tests {
         assert!(!r.snippet.is_empty());
         assert_eq!(out.results[2].published, None);
         assert_eq!(out.cost_micros, Some(5_000));
+    }
+
+    /// Upstream takes 20 deny entries; the 21st must still be filtered here.
+    #[test]
+    fn deny_entries_past_twenty_are_applied_locally() {
+        let mut exclude: Vec<String> = (0..20).map(|i| format!("d{i}.com")).collect();
+        exclude.push("reddit.com".into());
+        let opts = SearchOpts {
+            exclude_domains: exclude,
+            ..SearchOpts::default()
+        };
+        let all = parse(fixture(), &call(Mode::General, &SearchOpts::default()));
+        assert!(all.results.iter().any(|r| r.url.contains("reddit.com")));
+        let out = parse(fixture(), &call(Mode::General, &opts));
+        assert!(out.results.iter().all(|r| !r.url.contains("reddit.com")));
     }
 
     #[test]
