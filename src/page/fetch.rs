@@ -102,9 +102,11 @@ fn build_error(e: reqwest::Error) -> PageError {
     PageError::Network(format!("cannot build HTTP client: {e}"))
 }
 
-type LookupFuture = Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>;
+/// A DNS lookup: the system's, or a test's canned answers.
+pub(crate) type LookupFuture =
+    Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>;
 
-fn system_lookup(host: String) -> LookupFuture {
+pub(crate) fn system_lookup(host: String) -> LookupFuture {
     Box::pin(async move { Ok(tokio::net::lookup_host((host.as_str(), 0)).await?.collect()) })
 }
 
@@ -116,25 +118,64 @@ struct PublicOnly {
 
 impl Resolve for PublicOnly {
     fn resolve(&self, name: Name) -> Resolving {
-        let host = name.as_str().trim_end_matches('.').to_ascii_lowercase();
         let lookup = self.lookup;
+        let host = name.as_str().to_string();
         Box::pin(async move {
-            if is_internal_name(&host) {
-                return Err(Blocked(blocked_name(&host)).into());
-            }
-            let addrs = tokio::time::timeout(DNS_TIMEOUT, lookup(host.clone()))
-                .await
-                .map_err(|_| format!("DNS lookup for {host} timed out after {DNS_TIMEOUT:?}"))??;
-            if addrs.is_empty() {
-                return Err(format!("DNS lookup for {host} returned no addresses").into());
-            }
-            for addr in &addrs {
-                if let Err(e) = check_ip(addr.ip()).await {
-                    return Err(Blocked(format!("{host} resolves to {e}")).into());
-                }
-            }
+            let addrs = resolve_public(&host, lookup).await?;
             Ok(Box::new(addrs.into_iter()) as Addrs)
         })
+    }
+}
+
+/// The guarded resolution every local client shares (direct's reqwest, the
+/// stealth rung's wreq): the addresses returned are the ones the connection
+/// uses, so the check cannot be raced by a second, different DNS answer.
+/// Fails closed: an internal name, a lookup error, a timeout, an empty
+/// answer or any non-public address is an error ([`Blocked`] for the
+/// guard's refusals, found again by [`blocked_in`]).
+pub(crate) async fn resolve_public(
+    name: &str,
+    lookup: fn(String) -> LookupFuture,
+) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
+    let host = name.trim_end_matches('.').to_ascii_lowercase();
+    if is_internal_name(&host) {
+        return Err(Blocked(blocked_name(&host)).into());
+    }
+    let addrs = tokio::time::timeout(DNS_TIMEOUT, lookup(host.clone()))
+        .await
+        .map_err(|_| format!("DNS lookup for {host} timed out after {DNS_TIMEOUT:?}"))??;
+    if addrs.is_empty() {
+        return Err(format!("DNS lookup for {host} returned no addresses").into());
+    }
+    for addr in &addrs {
+        if let Err(e) = check_ip(addr.ip()).await {
+            return Err(Blocked(format!("{host} resolves to {e}")).into());
+        }
+    }
+    Ok(addrs)
+}
+
+/// The guard's refusal message, when `e` or one of its causes is one.
+pub(crate) fn blocked_in(e: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut source = Some(e);
+    while let Some(err) = source {
+        if let Some(blocked) = err.downcast_ref::<Blocked>() {
+            return Some(blocked.0.clone());
+        }
+        source = err.source();
+    }
+    None
+}
+
+/// IP-literal hosts never reach a resolver, so every hop checks them here.
+/// Names are left to the guarded resolver.
+#[cfg(feature = "stealth")]
+pub(crate) async fn check_literal_host(url: &Url) -> Result<(), String> {
+    match url.host() {
+        Some(Host::Ipv4(ip)) => check_ip(IpAddr::V4(ip)).await,
+        Some(Host::Ipv6(ip)) => check_ip(IpAddr::V6(ip)).await,
+        Some(Host::Domain(_)) => Ok(()),
+        None => Err(format!("{url}: no host")),
     }
 }
 
@@ -214,12 +255,8 @@ impl PageClient {
 }
 
 fn send_error(e: reqwest::Error) -> PageError {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&e);
-    while let Some(err) = source {
-        if let Some(blocked) = err.downcast_ref::<Blocked>() {
-            return PageError::Blocked(blocked.0.clone());
-        }
-        source = err.source();
+    if let Some(message) = blocked_in(&e) {
+        return PageError::Blocked(message);
     }
     PageError::Network(error_chain(&e.without_url()))
 }

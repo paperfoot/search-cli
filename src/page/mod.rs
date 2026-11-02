@@ -18,10 +18,14 @@ mod fetch;
 mod markdown;
 mod verdict;
 
-pub use fetch::{client, client_allow_private, fetch_direct, MAX_REDIRECTS};
-// The stealth rung reads the body and follows redirects itself.
+pub use fetch::{client, client_allow_private, fetch_direct, PageClient, MAX_REDIRECTS};
+// The stealth rung reads the body, follows redirects and resolves names
+// itself, through the same fail-closed guard.
 #[cfg(feature = "stealth")]
-pub(crate) use fetch::{decode, error_chain, MAX_BODY_BYTES};
+pub(crate) use fetch::{
+    blocked_in, check_literal_host, decode, error_chain, resolve_public, system_lookup,
+    LookupFuture, MAX_BODY_BYTES,
+};
 pub use markdown::to_markdown;
 pub use verdict::{verdict, Verdict};
 

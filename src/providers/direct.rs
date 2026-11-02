@@ -62,23 +62,36 @@ impl Adapter for Direct {
             page::client()
         }
         .map_err(|e| page_error("direct", e))?;
+        fetch_and_note(&client, call.query, call.timeout).await
+    }
+}
 
-        let fetched = page::fetch_direct(&client, call.query, call.timeout).await;
-        let page = match fetched {
-            Ok(page) => page,
-            Err(e) => {
-                if matches!(e, PageError::Network(_) | PageError::Timeout(_)) {
-                    registry::note_direct(call.query, DirectSaw::Unreachable);
+/// Fetch and judge `url`, noting for the later rungs what direct saw: a
+/// rejected page, no answer, or a destination the guard refused (then no
+/// rung, local or paid, is sent the URL).
+async fn fetch_and_note(
+    client: &page::PageClient,
+    url: &str,
+    timeout: Duration,
+) -> Result<Output, SearchError> {
+    let page = match page::fetch_direct(client, url, timeout).await {
+        Ok(page) => page,
+        Err(e) => {
+            match e {
+                PageError::Network(_) | PageError::Timeout(_) => {
+                    registry::note_direct(url, DirectSaw::Unreachable)
                 }
-                return Err(page_error("direct", e));
+                PageError::Blocked(_) => registry::note_direct(url, DirectSaw::Blocked),
+                _ => {}
             }
-        };
-        match extract_page("direct", page).await {
-            Ok(out) => Ok(out),
-            Err((verdict, err)) => {
-                registry::note_direct(call.query, DirectSaw::Rejected(verdict));
-                Err(err)
-            }
+            return Err(page_error("direct", e));
+        }
+    };
+    match extract_page("direct", page).await {
+        Ok(out) => Ok(out),
+        Err((verdict, err)) => {
+            registry::note_direct(url, DirectSaw::Rejected(verdict));
+            Err(err)
         }
     }
 }
@@ -343,6 +356,22 @@ mod tests {
         assert!(registry::rung_gate("stealth", &url).is_err());
         assert!(registry::rung_gate("jina", &url).is_ok());
         assert!(registry::rung_gate("firecrawl", &url).is_ok());
+    }
+
+    /// Review (wave 2): a URL direct's guard refused is not retried by
+    /// stealth (whose resolver may get a different answer) nor sent to a
+    /// paid rung.
+    #[tokio::test]
+    async fn a_guard_refusal_stops_every_later_rung() {
+        let url = "http://127.0.0.1:9/admin";
+        let client = page::client().unwrap();
+        let err = fetch_and_note(&client, url, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SearchError::InvalidInput { .. }), "{err}");
+        for rung in ["stealth", "jina", "firecrawl", "browserless"] {
+            assert!(registry::rung_gate(rung, url).is_err(), "{rung} ran");
+        }
     }
 
     #[tokio::test]

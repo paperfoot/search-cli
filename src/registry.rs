@@ -313,6 +313,9 @@ pub enum DirectSaw {
     Rejected(Verdict),
     /// No response at all: refused connection, TLS failure or timeout.
     Unreachable,
+    /// The SSRF guard refused the destination (a private address, by name,
+    /// by DNS answer or on a redirect hop). No later rung is sent it.
+    Blocked,
 }
 
 static DIRECT_NOTES: Mutex<Vec<(String, DirectSaw)>> = Mutex::new(Vec::new());
@@ -355,6 +358,16 @@ pub fn rung_gate(rung: &'static str, url: &str) -> Result<(), SearchError> {
                 ),
             });
         }
+        DirectSaw::Blocked => {
+            return Err(SearchError::Upstream {
+                provider: rung,
+                status: 0,
+                category: FailureCategory::BadRequest,
+                message: format!(
+                    "blocked: the guard refused this URL's destination (a private, loopback or link-local address); {rung} was not called. Pass --allow-private to override."
+                ),
+            });
+        }
         DirectSaw::Rejected(Verdict::HttpError(status @ (404 | 410))) => {
             return Err(SearchError::Upstream {
                 provider: rung,
@@ -372,6 +385,7 @@ pub fn rung_gate(rung: &'static str, url: &str) -> Result<(), SearchError> {
     }
     let refused = match &saw {
         DirectSaw::Unreachable => true,
+        DirectSaw::Blocked => false,
         DirectSaw::Rejected(v) => matches!(
             v,
             Verdict::Challenge | Verdict::HttpError(401 | 403 | 429 | 503)
@@ -384,6 +398,7 @@ pub fn rung_gate(rung: &'static str, url: &str) -> Result<(), SearchError> {
         DirectSaw::Rejected(Verdict::HttpError(s)) => format!("HTTP {s}"),
         DirectSaw::Rejected(v) => v.code().to_string(),
         DirectSaw::Unreachable => "no answer".to_string(),
+        DirectSaw::Blocked => "a blocked destination".to_string(),
     };
     Err(SearchError::Api {
         provider: rung,
