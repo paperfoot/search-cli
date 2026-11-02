@@ -61,7 +61,10 @@ pub fn log_search(response: &SearchResponse) {
         "providers_queried": response.metadata.providers_queried,
         "providers_failed": response.metadata.providers_failed,
         "providers_cancelled": response.metadata.providers_cancelled,
+        "providers_timed_out": response.metadata.providers_timed_out,
         "provider_results": response.metadata.provider_results,
+        // `search stats` prices a line from cost.by_provider when present.
+        "cost": response.metadata.cost,
         "failure_categories": response
             .metadata
             .provider_failures
