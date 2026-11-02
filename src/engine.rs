@@ -65,10 +65,6 @@ pub async fn run(
     opts: &SearchOpts,
     hosting: Option<&Hosting>,
 ) -> Result<SearchResponse, SearchError> {
-    let mode = match mode {
-        Mode::Scrape => Mode::Extract,
-        m => m,
-    };
     let request = Request {
         query,
         mode,
@@ -79,7 +75,12 @@ pub async fn run(
         hosted_cap: hosting.map(|h| h.cap(mode)),
         reranker: hosting.filter(|h| h.rerank).map(|h| h.client.as_ref()),
     };
-    let adapters = route(providers::build_providers(&ctx), mode, hosting);
+    // Specs list extract, never its alias.
+    let served = match mode {
+        Mode::Scrape => Mode::Extract,
+        m => m,
+    };
+    let adapters = route(providers::build_providers(&ctx), served, hosting);
     execute_with(adapters, &request).await
 }
 

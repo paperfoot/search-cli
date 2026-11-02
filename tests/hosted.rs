@@ -627,3 +627,20 @@ fn usage_shows_the_account_and_each_transport() {
     assert_eq!(row("serper")["transport"], "hosted");
     assert_eq!(row("exa")["transport"], "hosted");
 }
+
+#[test]
+fn without_login_or_keys_the_error_points_at_login() {
+    let mock = start("nologin", handler(|r, _| search_ok(r)));
+    let (code, v) = run_json(mock.cmd().env_remove("METASEARCH_TOKEN").args([
+        "search",
+        "-q",
+        "rust async",
+        "--json",
+    ]));
+    assert_eq!(code, 2, "{v}");
+    assert!(v["error"]["suggestion"]
+        .as_str()
+        .unwrap()
+        .contains("search login"));
+    assert!(mock.log.lock().unwrap().is_empty(), "no token, no calls");
+}

@@ -704,7 +704,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 response
                     .metadata
                     .notes
-                    .push("log in for JEV routing and reranking (free): search login".to_string());
+                    .push("log in for JEV routing and reranking (free)".to_string());
             }
 
             // Don't cache empty results — a transient no_results shouldn't be
