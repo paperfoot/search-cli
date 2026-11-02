@@ -173,7 +173,7 @@ impl Adapter for Brave {
                         tracing::warn!("brave web: {e}");
                         g
                     }
-                    (Err(e), Err(_)) => return Err(e),
+                    (Err(w), Err(g)) => return Err(both_failed(w, g)),
                 };
                 Ok(Output {
                     results,
@@ -201,6 +201,16 @@ impl Brave {
     {
         let resp = super::send(self, call.timeout, build).await?;
         Ok(resp.json().await?)
+    }
+}
+
+/// Both deep halves failed: report a billed half's error when there is one,
+/// so the engine books the spend instead of pricing the call at 0.
+fn both_failed(web: SearchError, grounding: SearchError) -> SearchError {
+    if !super::billed_failure(web.category()) && super::billed_failure(grounding.category()) {
+        grounding
+    } else {
+        web
     }
 }
 
@@ -417,6 +427,23 @@ mod tests {
         assert_eq!(billed_half(&ok) + billed_half(&timed_out), 2);
         assert_eq!(billed_half(&parse), 1);
         assert_eq!(billed_half(&limited), 0);
+    }
+
+    /// A 429 on the web half and a timeout on LLM Context: Brave billed the
+    /// timed-out half, so the error the engine prices must be the billed one.
+    #[test]
+    fn both_halves_failing_report_the_billed_one() {
+        let limited = || SearchError::Upstream {
+            provider: "brave",
+            status: 429,
+            category: FailureCategory::RateLimit,
+            message: "slow down".into(),
+        };
+        let timed_out = || super::super::timeout_error("brave");
+        let e = both_failed(limited(), timed_out());
+        assert!(super::super::billed_failure(e.category()));
+        let e = both_failed(timed_out(), limited());
+        assert!(super::super::billed_failure(e.category()));
     }
 
     fn query(req: &reqwest::Request) -> Vec<(String, String)> {
