@@ -47,6 +47,10 @@ jobs:
       - name: Test (no stealth)
         run: cargo test --locked --no-default-features
 
+      # The search-cli plugin ships a byte copy of SKILL.md.
+      - name: Plugin skill matches SKILL.md
+        run: diff SKILL.md plugins/search-cli/skills/search/SKILL.md
+
   # Linux build WITH default features (stealth: wreq + BoringSSL). Allowed to
   # fail for now: when it is green, release.yml's LINUX_FLAGS can drop
   # --no-default-features and Linux binaries ship with the stealth step.
