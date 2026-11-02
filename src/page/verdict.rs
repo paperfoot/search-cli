@@ -1,6 +1,10 @@
-//! Is a response content, or junk? The same rules as the hosted service's
-//! `page.ts` (PLAN.md §3.8), so a page rejected by one is rejected by both
-//! and junk is never billed as success.
+//! Is a response content, or junk? A port of the hosted service's
+//! `page.ts` (PLAN.md §3.8), rule for rule, so a page rejected by one is
+//! rejected by both and junk is never billed as success. Both repos test
+//! against the same vectors (`fixtures/verdict-vectors.json`).
+//!
+//! One addition the server does not have yet: a non-2xx status without a
+//! challenge body is [`Verdict::HttpError`], never content.
 
 use super::mime_essence;
 use reqwest::header::HeaderMap;
@@ -18,271 +22,494 @@ pub enum Verdict {
     JsShell,
     /// Under 200 characters of text.
     Thin,
-    /// HTTP 402, with Cloudflare's `crawler-price` when sent. Never escalate
-    /// around a paywall.
+    /// HTTP 402 with Cloudflare's `crawler-price` (always `Some`). Never
+    /// escalate around a paywall.
     PaymentRequired { price: Option<String> },
+    /// Any other status outside 2xx: an error page, not content.
+    HttpError(u16),
 }
 
-/// Under this many visible non-space characters a page is thin.
-const THIN_CHARS: usize = 200;
-/// An empty mount node or a noscript plea only means "JS shell" when the
-/// page around it is short too: server-rendered sites keep both.
-const SHELL_CONTEXT_CHARS: usize = 1000;
-/// Challenge pages are short; an article about Cloudflare is not.
-const CHALLENGE_MAX_CHARS: usize = 4000;
-/// How much of the body the binary sniff reads.
-const SNIFF_BYTES: usize = 2048;
+impl Verdict {
+    /// The rejection code shared with the server (`page.ts` `Rejection`),
+    /// `ok` for content. `http_error` is the CLI's addition.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Verdict::Ok => "ok",
+            Verdict::Binary => "binary",
+            Verdict::Challenge => "challenge",
+            Verdict::JsShell => "js_shell",
+            Verdict::Thin => "thin",
+            Verdict::PaymentRequired { .. } => "payment_required",
+            Verdict::HttpError(_) => "http_error",
+        }
+    }
+}
 
-/// Judge `body` (raw HTML, markdown or text). `headers` matter only for a
-/// 402's `crawler-price`. Other non-2xx statuses are judged on their body;
-/// treating them as failures is the caller's call.
+/// Under this many characters of text, a page has nothing worth returning.
+pub const MIN_TEXT_CHARS: usize = 200;
+/// Challenge markers only count on short pages: an article about Cloudflare
+/// is not a challenge.
+const CHALLENGE_MAX_TEXT: usize = 4000;
+/// An empty mount node or a noscript plea only means "shell" when the page
+/// has little else.
+const SHELL_MAX_TEXT: usize = 1000;
+/// A captcha widget only counts this close after a `<form`.
+const CAPTCHA_FORM_SPAN: usize = 4000;
+/// Marker checks only read the head of a page: interstitials are small,
+/// attackers are not.
+const INSPECT_BYTES: usize = 256 * 1024;
+/// How much of the body the binary sniff reads.
+const SNIFF_CHARS: usize = 2048;
+/// Elements whose content is never visible text.
+const RAW_TEXT: &[&str] = &["script", "style", "noscript", "template", "svg", "head"];
+
+/// Judge `body` (raw HTML, markdown or text). `content_type` is the
+/// response's media type; `headers` supply `crawler-price` and
+/// `cf-mitigated`. Every scan here is linear in the body.
 pub fn verdict(
     body: &str,
     content_type: Option<&str>,
     status: u16,
     headers: Option<&HeaderMap>,
 ) -> Verdict {
-    if status == 402 {
-        let price = headers
-            .and_then(|h| h.get("crawler-price"))
+    let header = |name: &str| {
+        headers
+            .and_then(|h| h.get(name))
             .and_then(|v| v.to_str().ok())
-            .map(|v| v.trim().to_string());
-        return Verdict::PaymentRequired { price };
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+
+    if status == 402 {
+        if let Some(price) = header("crawler-price") {
+            return Verdict::PaymentRequired {
+                price: Some(price.to_string()),
+            };
+        }
     }
 
-    let essence = content_type.map(mime_essence).filter(|e| !e.is_empty());
-    if essence.as_deref().is_some_and(|e| !is_textual(e)) || looks_binary(body) {
+    let media = content_type.map(mime_essence).filter(|e| !e.is_empty());
+    if media.as_deref().is_some_and(|m| !is_textual(m)) || looks_binary(body) {
         return Verdict::Binary;
     }
 
-    let is_html = match essence.as_deref() {
-        Some(e) => e == "text/html" || e == "application/xhtml+xml",
+    let html = match media.as_deref() {
+        Some(m) => m.contains("html"),
         None => sniff_html(body),
     };
+    let text = if html {
+        visible_text(body)
+    } else {
+        collapse_whitespace(body)
+    };
+    let text_len = text.chars().count();
+    let text_chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let head = prefix(body, INSPECT_BYTES).to_ascii_lowercase();
 
-    if !is_html {
-        let chars = non_space_chars(body);
-        if chars < CHALLENGE_MAX_CHARS && is_challenge(&body.to_ascii_lowercase(), false) {
-            return Verdict::Challenge;
-        }
-        return if chars < THIN_CHARS {
-            Verdict::Thin
-        } else {
-            Verdict::Ok
-        };
-    }
-
-    let scan = scan_html(body);
-    if scan.visible_chars < CHALLENGE_MAX_CHARS && is_challenge(&body.to_ascii_lowercase(), true) {
+    if header("cf-mitigated").is_some_and(|v| v.eq_ignore_ascii_case("challenge")) {
         return Verdict::Challenge;
     }
-    let shell_signal = scan.empty_mount || scan.noscript_wants_js;
-    if (scan.has_script && scan.visible_chars < THIN_CHARS)
-        || (shell_signal && scan.visible_chars < SHELL_CONTEXT_CHARS)
+    if text_len < CHALLENGE_MAX_TEXT
+        && (has_challenge_marker(&head)
+            || (html && text_chars < SHELL_MAX_TEXT && has_captcha_form(&head)))
     {
-        return Verdict::JsShell;
+        return Verdict::Challenge;
     }
-    if scan.visible_chars < THIN_CHARS {
+
+    if !(200..300).contains(&status) {
+        return Verdict::HttpError(status);
+    }
+
+    if html && text_chars < SHELL_MAX_TEXT {
+        if text_chars < MIN_TEXT_CHARS && has_open_tag(&body.to_ascii_lowercase(), "script") {
+            return Verdict::JsShell;
+        }
+        if has_empty_mount(&head) || noscript_wants_js(&head) {
+            return Verdict::JsShell;
+        }
+    }
+
+    if text_len < MIN_TEXT_CHARS {
         return Verdict::Thin;
     }
     Verdict::Ok
 }
 
-fn is_textual(essence: &str) -> bool {
-    matches!(
-        essence,
-        "text/markdown"
-            | "text/x-markdown"
-            | "text/html"
-            | "text/plain"
-            | "text/xml"
-            | "application/xhtml+xml"
-            | "application/json"
-            | "application/xml"
-    ) || essence.ends_with("+json")
-        || essence.ends_with("+xml")
+/// The server's `TEXTUAL` regex, `^(text/(markdown|x-markdown|html|plain|xml)
+/// |application/(json|xml|xhtml+xml|[\w.+-]+\+(json|xml)))\b`: a prefix
+/// followed by a word boundary, not a whole-string match.
+fn is_textual(media: &str) -> bool {
+    let bytes = media.as_bytes();
+    let bounded = |end: usize| bytes.get(end).is_none_or(|b| !is_word_byte(*b));
+    let fixed = [
+        "text/markdown",
+        "text/x-markdown",
+        "text/html",
+        "text/plain",
+        "text/xml",
+        "application/json",
+        "application/xml",
+        "application/xhtml+xml",
+    ];
+    if fixed
+        .iter()
+        .any(|p| media.starts_with(p) && bounded(p.len()))
+    {
+        return true;
+    }
+    let Some(sub) = media.strip_prefix("application/") else {
+        return false;
+    };
+    let base = "application/".len();
+    let class = |b: u8| is_word_byte(b) || matches!(b, b'.' | b'+' | b'-');
+    for suffix in ["+json", "+xml"] {
+        for (k, _) in sub.match_indices(suffix) {
+            if k > 0
+                && sub.as_bytes()[..k].iter().all(|b| class(*b))
+                && bounded(base + k + suffix.len())
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
-/// NUL bytes, or more than 10% control or replacement characters in the
-/// first 2 KB (a binary decoded as text turns into U+FFFD).
+/// `%PDF-`, a NUL, or more than 10% control characters (C0 other than tab,
+/// LF and CR; DEL; U+FFFD from bytes that failed to decode) in the first
+/// 2048 characters.
 fn looks_binary(body: &str) -> bool {
+    if body.starts_with("%PDF-") {
+        return true;
+    }
     let mut total = 0usize;
-    let mut bad = 0usize;
-    for (i, c) in body.char_indices() {
-        if i >= SNIFF_BYTES {
-            break;
-        }
+    let mut control = 0usize;
+    for c in body.chars().take(SNIFF_CHARS) {
         if c == '\0' {
             return true;
         }
         total += 1;
-        if c == '\u{FFFD}' || (c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0c')) {
-            bad += 1;
+        let n = c as u32;
+        if (n < 32 && !matches!(c, '\t' | '\n' | '\r')) || n == 127 || c == '\u{FFFD}' {
+            control += 1;
         }
     }
-    bad * 10 > total
+    total > 0 && control * 10 > total
 }
 
 fn sniff_html(body: &str) -> bool {
-    let head: String = body.trim_start().chars().take(512).collect();
-    let lower = head.to_ascii_lowercase();
-    lower.starts_with("<!doctype html")
-        || lower.starts_with("<html")
-        || lower.contains("<head")
-        || lower.contains("<body")
+    let start = prefix(body.trim_start(), 64).to_ascii_lowercase();
+    ["<!doctype html", "<html", "<head", "<body"]
+        .iter()
+        .any(|p| start.starts_with(p))
 }
 
-fn non_space_chars(text: &str) -> usize {
-    text.chars().filter(|c| !c.is_whitespace()).count()
+/// The longest prefix of `s` within `max` bytes that ends on a char boundary.
+fn prefix(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
-/// Markers of anti-bot interstitials, matched on the lowercased body. Raw
-/// HTML carries structural markers (script URLs, class names) that a
-/// markdown rendering of the same page does not.
-fn is_challenge(lower: &str, html: bool) -> bool {
-    const TEXT: &[&str] = &[
-        "just a moment...",                       // Cloudflare
-        "checking your browser before accessing", // Cloudflare (old)
-        "attention required! | cloudflare",
-        "enable javascript and cookies to continue",
-        "verify you are human",
-        "verifying you are human",
-        "please verify you are a human",       // PerimeterX
-        "access to this page has been denied", // PerimeterX
-    ];
-    const HTML: &[&str] = &[
-        "cf-chl", // Cloudflare challenge scripts and forms
-        "cf_chl_opt",
-        "/cdn-cgi/challenge-platform/",
-        "captcha-delivery.com", // DataDome
-        "px-captcha",           // PerimeterX
-        "<title>attention required!",
-    ];
-    if TEXT.iter().any(|m| lower.contains(m)) {
-        return true;
-    }
-    // Akamai: "Access Denied ... Reference #18.xxxx".
-    if lower.contains("access denied")
-        && (lower.contains("reference #") || lower.contains("you don't have permission to access"))
-    {
-        return true;
-    }
-    if !html {
-        return false;
-    }
-    if HTML.iter().any(|m| lower.contains(m)) {
-        return true;
-    }
-    // A short page whose form is a captcha widget.
-    lower.contains("<form")
-        && ["g-recaptcha", "h-captcha", "cf-turnstile", "datadome"]
-            .iter()
-            .any(|m| lower.contains(m))
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-#[derive(Debug, Default)]
-struct HtmlScan {
-    /// Non-space characters outside tags, scripts, styles, templates and
-    /// noscript.
-    visible_chars: usize,
-    has_script: bool,
-    /// `<div id="root|app|__next|__nuxt">` with nothing inside.
-    empty_mount: bool,
-    /// `<noscript>` asking the reader to enable JavaScript.
-    noscript_wants_js: bool,
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// One pass over raw HTML, cheap enough to run on every page (no DOM).
-fn scan_html(html: &str) -> HtmlScan {
-    const MOUNT_IDS: &[&str] = &["root", "app", "__next", "__nuxt"];
+/// `s[at..]` starts with `word` followed by a word boundary (regex `\b`).
+fn word_at(s: &[u8], at: usize, word: &str) -> bool {
+    s[at..].starts_with(word.as_bytes()) && s.get(at + word.len()).is_none_or(|b| !is_word_byte(*b))
+}
+
+/// `<name\b` anywhere in lowercased `s`.
+fn has_open_tag(s: &str, name: &str) -> bool {
+    let bytes = s.as_bytes();
+    let open = format!("<{name}");
+    let mut from = 0;
+    while let Some(i) = s[from..].find(&open).map(|i| i + from) {
+        if word_at(bytes, i + 1, name) {
+            return true;
+        }
+        from = i + 1;
+    }
+    false
+}
+
+/// Visible text of an HTML document: comments and raw-text elements
+/// removed (an unterminated one hides the rest, as in a browser), tags
+/// replaced by spaces, entities counted as one character, whitespace
+/// collapsed. Linear: forward searches only.
+pub(crate) fn visible_text(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let bytes = lower.as_bytes();
-    let mut scan = HtmlScan::default();
+    let mut stripped = String::with_capacity(html.len() / 2);
+    let mut from = 0;
+    let mut i = 0;
+    'scan: while let Some(lt) = lower[i..].find('<').map(|n| n + i) {
+        let end = if lower[lt..].starts_with("<!--") {
+            lower[lt + 4..].find("-->").map(|n| lt + 4 + n + 3)
+        } else if let Some(tag) = RAW_TEXT.iter().find(|t| word_at(bytes, lt + 1, t)) {
+            find_closer(&lower, lt + 1 + tag.len(), tag)
+        } else {
+            i = lt + 1;
+            continue 'scan;
+        };
+        stripped.push_str(&html[from..lt]);
+        stripped.push(' ');
+        match end {
+            Some(e) => {
+                from = e;
+                i = e;
+            }
+            None => {
+                from = html.len();
+                break 'scan;
+            }
+        }
+    }
+    stripped.push_str(&html[from..]);
+
+    // Tags (`<` then no `<` or `>` up to a `>`) become spaces.
+    let mut text = String::with_capacity(stripped.len());
+    let mut rest = stripped.as_str();
+    while let Some(lt) = rest.find('<') {
+        text.push_str(&rest[..lt]);
+        let after = &rest[lt + 1..];
+        match after.find(['<', '>']) {
+            Some(n) if after.as_bytes()[n] == b'>' => {
+                text.push(' ');
+                rest = &after[n + 1..];
+            }
+            _ => {
+                text.push('<');
+                rest = after;
+            }
+        }
+    }
+    text.push_str(rest);
+    collapse_whitespace(&replace_entities(&text))
+}
+
+/// The end of the first `</tag\s*>` at or after `from` in lowercased `s`.
+fn find_closer(s: &str, from: usize, tag: &str) -> Option<usize> {
+    let close = format!("</{tag}");
+    let mut at = from;
+    while let Some(i) = s[at..].find(&close).map(|i| i + at) {
+        let after = &s[i + close.len()..];
+        let trimmed = after.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        if trimmed.starts_with('>') {
+            return Some(s.len() - trimmed.len() + 1);
+        }
+        at = i + 1;
+    }
+    None
+}
+
+/// `&nbsp;` and `&#160;` become spaces; any other `&name;` or `&#123;`
+/// counts as one character.
+fn replace_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let (numeric, body) = match after.strip_prefix('#') {
+            Some(b) => (true, b),
+            None => (false, after),
+        };
+        let len = body
+            .bytes()
+            .take_while(|b| {
+                if numeric {
+                    b.is_ascii_digit()
+                } else {
+                    b.is_ascii_alphabetic()
+                }
+            })
+            .count();
+        if len > 0 && body.as_bytes().get(len) == Some(&b';') {
+            let name = &body[..len];
+            let nbsp = if numeric {
+                name == "160"
+            } else {
+                name.eq_ignore_ascii_case("nbsp")
+            };
+            out.push(if nbsp { ' ' } else { 'x' });
+            rest = &body[len + 1..];
+        } else {
+            out.push('&');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Challenge markers, matched on the lowercased head of the body (HTML,
+/// markdown or text alike).
+fn has_challenge_marker(lower: &str) -> bool {
+    const PLAIN: &[&str] = &[
+        "just a moment...", // Cloudflare interstitial title
+        "cf-chl",           // Cloudflare challenge form and options
+        "cf_chl",
+        "checking your browser before accessing",
+        "enable javascript and cookies to continue",
+        "captcha-delivery.com", // DataDome
+        "px-captcha",           // PerimeterX / HUMAN
+    ];
+    if PLAIN.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    // verify(ing)? (that )?you are (a )?human
+    for verb in ["verify ", "verifying "] {
+        for that in ["", "that "] {
+            for a in ["", "a "] {
+                if lower.contains(&format!("{verb}{that}you are {a}human")) {
+                    return true;
+                }
+            }
+        }
+    }
+    // attention required!?\s*\|\s*cloudflare
+    for (i, _) in lower.match_indices("attention required") {
+        let rest = &lower[i + "attention required".len()..];
+        let rest = rest.strip_prefix('!').unwrap_or(rest).trim_start();
+        if let Some(rest) = rest.strip_prefix('|') {
+            if rest.trim_start().starts_with("cloudflare") {
+                return true;
+            }
+        }
+    }
+    // Akamai: <title>\s*access denied\s*</title>, or "access denied" with
+    // "you don't have permission to access" or "reference #" within 400.
+    for (i, _) in lower.match_indices("access denied") {
+        let before = lower[..i].trim_end();
+        let after = lower[i + "access denied".len()..].trim_start();
+        if before.ends_with("<title>") && after.starts_with("</title>") {
+            return true;
+        }
+        let window = prefix(&lower[i + "access denied".len()..], 400 + 40);
+        let near = |needle: &str| window.find(needle).is_some_and(|n| n <= 400);
+        if near("you don't have permission to access") || near("you dont have permission to access")
+        {
+            return true;
+        }
+        for (r, _) in window.match_indices("reference") {
+            if r <= 400
+                && window[r + "reference".len()..]
+                    .trim_start()
+                    .starts_with('#')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A `captcha` or `cf-turnstile` within 4000 bytes after a `<form`.
+fn has_captcha_form(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut form: Option<usize> = None;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] != b'<' {
-            let next = lower[i..].find('<').map_or(lower.len(), |n| i + n);
-            scan.visible_chars += non_space_chars(&html[i..next]);
-            i = next;
-            continue;
-        }
-        let rest = &lower[i..];
-        if rest.starts_with("<!--") {
-            i = rest.find("-->").map_or(lower.len(), |n| i + n + 3);
-            continue;
-        }
-        let tag_end = tag_end(rest).map_or(lower.len(), |n| i + n + 1);
-        let tag = &lower[i..tag_end];
-        let name: String = tag[1..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-            .collect();
-        match name.as_str() {
-            "script" | "style" | "template" | "noscript" => {
-                let close = format!("</{name}");
-                let body_end = lower[tag_end..]
-                    .find(&close)
-                    .map_or(lower.len(), |n| tag_end + n);
-                match name.as_str() {
-                    "script" => scan.has_script = true,
-                    "noscript" if lower[tag_end..body_end].contains("enable javascript") => {
-                        scan.noscript_wants_js = true;
-                    }
-                    _ => {}
-                }
-                i = lower[body_end..]
-                    .find('>')
-                    .map_or(lower.len(), |n| body_end + n + 1);
-                continue;
+        if word_at(bytes, i, "<form") {
+            form = Some(i);
+            i += 5;
+        } else if bytes[i..].starts_with(b"captcha") || bytes[i..].starts_with(b"cf-turnstile") {
+            if form.is_some_and(|f| i - f <= CAPTCHA_FORM_SPAN) {
+                return true;
             }
-            _ => {}
-        }
-        if !scan.empty_mount
-            && attr(tag, "id").is_some_and(|id| MOUNT_IDS.contains(&id))
-            && lower[tag_end..].trim_start().starts_with("</")
-        {
-            scan.empty_mount = true;
-        }
-        i = tag_end;
-    }
-    scan
-}
-
-/// Index of the `>` closing the tag at the start of `tag`, skipping quoted
-/// attribute values.
-fn tag_end(tag: &str) -> Option<usize> {
-    let mut quote: Option<u8> = None;
-    for (i, b) in tag.bytes().enumerate() {
-        match (quote, b) {
-            (Some(q), _) if b == q => quote = None,
-            (Some(_), _) => {}
-            (None, b'"' | b'\'') => quote = Some(b),
-            (None, b'>') => return Some(i),
-            _ => {}
+            i += 7;
+        } else {
+            i += 1;
         }
     }
-    None
+    false
 }
 
-/// The value of attribute `name` in a lowercased start tag.
-fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+/// `<div …id=root|app|__next|__nuxt…>` followed by nothing but whitespace
+/// and `</div>`.
+fn has_empty_mount(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
     let mut from = 0;
-    while let Some(pos) = tag[from..].find(name).map(|p| p + from) {
-        let before = tag[..pos].chars().next_back();
-        let after = tag[pos + name.len()..].trim_start();
-        if before.is_some_and(char::is_whitespace) && after.starts_with('=') {
-            let value = after[1..].trim_start();
-            return Some(match value.chars().next() {
-                Some(q @ ('"' | '\'')) => value[1..].split(q).next().unwrap_or(""),
-                _ => value
-                    .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
-                    .next()
-                    .unwrap_or(""),
-            });
+    while let Some(i) = lower[from..].find("<div").map(|n| n + from) {
+        from = i + 1;
+        if !word_at(bytes, i + 1, "div") {
+            continue;
         }
-        from = pos + name.len();
+        let attrs_start = i + 4;
+        let Some(len) = lower[attrs_start..].find(['<', '>']) else {
+            return false;
+        };
+        if len > 400 || bytes[attrs_start + len] != b'>' {
+            continue;
+        }
+        let after = lower[attrs_start + len + 1..].trim_start();
+        if after.starts_with("</div>") && mount_id(&lower[attrs_start..attrs_start + len]) {
+            return true;
+        }
     }
-    None
+    false
+}
+
+/// `\bid=["']?(root|app|__next|__nuxt)(["'\s/]|$)` in an attribute run.
+fn mount_id(attrs: &str) -> bool {
+    let bytes = attrs.as_bytes();
+    for (i, _) in attrs.match_indices("id=") {
+        if i > 0 && is_word_byte(bytes[i - 1]) {
+            continue;
+        }
+        let value = &attrs[i + 3..];
+        let value = value.strip_prefix(['"', '\'']).unwrap_or(value);
+        for id in ["root", "app", "__next", "__nuxt"] {
+            if let Some(rest) = value.strip_prefix(id) {
+                if rest
+                    .chars()
+                    .next()
+                    .is_none_or(|c| matches!(c, '"' | '\'' | '/') || c.is_whitespace())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// `<noscript …>` with "enable javascript" within 500 bytes.
+fn noscript_wants_js(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find("<noscript").map(|n| n + from) {
+        from = i + 1;
+        if !word_at(bytes, i + 1, "noscript") {
+            continue;
+        }
+        let attrs_start = i + 9;
+        let Some(len) = lower[attrs_start..].find(['<', '>']) else {
+            return false;
+        };
+        if len > 400 || bytes[attrs_start + len] != b'>' {
+            continue;
+        }
+        let inner = prefix(
+            &lower[attrs_start + len + 1..],
+            500 + "enable javascript".len(),
+        );
+        if inner.contains("enable javascript") {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -396,16 +623,137 @@ mod tests {
                 price: Some("USD 0.01".into())
             }
         );
+        // Without a price a 402 is an error page like any other (as on the
+        // server, which does not treat it as a paywall either).
+        assert_eq!(verdict("", None, 402, None), Verdict::HttpError(402));
+    }
+
+    /// Error pages are not content (review R2): a 503 page with ordinary
+    /// text used to come back Ok, and would have been extracted and billed.
+    #[test]
+    fn http_error_pages_are_not_ok() {
+        let body = format!(
+            "<html><head><title>503 Service Unavailable</title></head><body><h1>Service Unavailable</h1><p>{}</p></body></html>",
+            "The server is temporarily unable to service your request. ".repeat(6)
+        );
+        for status in [400u16, 403, 404, 410, 429, 500, 502, 503, 304] {
+            assert_eq!(
+                verdict(&body, Some("text/html"), status, None),
+                Verdict::HttpError(status)
+            );
+        }
+        assert_eq!(verdict(&body, Some("text/html"), 203, None), Verdict::Ok);
+    }
+
+    /// Cloudflare injects `/cdn-cgi/challenge-platform/scripts/jsd/main.js`
+    /// into ordinary pages; that path used to mark them Challenge, so a free
+    /// page escalated to paid renderers (live on discord.com, 2 Nov 2026).
+    #[test]
+    fn cloudflare_javascript_detections_is_not_a_challenge() {
+        let page = include_str!("fixtures/cloudflare-jsd-page.html");
+        assert!(page.contains("/cdn-cgi/challenge-platform/scripts/jsd/main.js"));
+        assert_eq!(html(page), Verdict::Ok);
+    }
+
+    /// A DataDome tag and an ordinary form used to read as a captcha form.
+    #[test]
+    fn captcha_forms_follow_the_server_rule() {
         assert_eq!(
-            verdict("", None, 402, None),
-            Verdict::PaymentRequired { price: None }
+            html(include_str!("fixtures/datadome-tag-page.html")),
+            Verdict::Ok
+        );
+        let short = "<html><body><h1>One more step</h1><form action=\"/verify\"><div class=\"h-captcha\"></div></form></body></html>";
+        assert_eq!(html(short), Verdict::Challenge);
+        // The widget must sit within 4000 characters after the form.
+        let far = format!(
+            "<html><body><form action=\"/q\"></form><!--{}--><div class=\"g-recaptcha\"></div><p>{}</p></body></html>",
+            " ".repeat(4100),
+            "word ".repeat(60)
+        );
+        assert_eq!(html(&far), Verdict::Ok);
+    }
+
+    #[test]
+    fn cf_mitigated_header_is_a_challenge() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-mitigated", HeaderValue::from_static("challenge"));
+        assert_eq!(
+            verdict(ARTICLE, Some("text/html"), 403, Some(&headers)),
+            Verdict::Challenge
         );
     }
 
     #[test]
-    fn attributes_are_read_from_lowercased_tags() {
-        assert_eq!(attr("<div id=\"root\" class=\"x\">", "id"), Some("root"));
-        assert_eq!(attr("<div data-id='x' id=app>", "id"), Some("app"));
-        assert_eq!(attr("<div grid=\"1\">", "id"), None);
+    fn head_and_svg_text_are_not_visible() {
+        assert_eq!(
+            visible_text("<html><head><title>T</title></head><body><svg><text>x</text></svg><p>Hi &amp; bye&nbsp;now</p><!-- c --></body></html>"),
+            "Hi x bye now"
+        );
+        // An unterminated raw-text element hides the rest.
+        assert_eq!(visible_text("<p>a</p><script>var x = 1;"), "a");
+        assert_eq!(visible_text("1 < 2 and <b>bold</b>"), "1 < 2 and bold");
+        // `<header>` is not `<head>`.
+        assert_eq!(visible_text("<header>Top</header>"), "Top");
+    }
+
+    #[test]
+    fn media_types_follow_the_server_regex() {
+        for t in [
+            "text/html",
+            "text/markdown",
+            "application/ld+json",
+            "application/vnd.api+json",
+            "application/xhtml+xml",
+            "text/plain-x",
+        ] {
+            assert!(is_textual(t), "{t}");
+        }
+        for t in [
+            "application/pdf",
+            "image/png",
+            "application/jsonl",
+            "text/csv",
+            "application/+json",
+            "text/htmlx",
+        ] {
+            assert!(!is_textual(t), "{t}");
+        }
+    }
+
+    /// The vectors shared with the server's `page.ts`: same input, same code.
+    #[test]
+    fn shared_vectors_match_the_server() {
+        let raw = include_str!("fixtures/verdict-vectors.json");
+        let doc: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/page/fixtures");
+        let mut failures = vec![];
+        let vectors = doc["vectors"].as_array().unwrap();
+        for v in vectors {
+            let body = match v["body_file"].as_str() {
+                Some(f) => std::fs::read_to_string(dir.join(f)).unwrap(),
+                None => v["body"].as_str().unwrap().to_string(),
+            };
+            let mut headers = HeaderMap::new();
+            for (k, val) in v["headers"].as_object().unwrap() {
+                headers.insert(
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(val.as_str().unwrap()).unwrap(),
+                );
+            }
+            let got = verdict(
+                &body,
+                v["content_type"].as_str(),
+                v["status"].as_u64().unwrap() as u16,
+                Some(&headers),
+            );
+            if got.code() != v["expect"].as_str().unwrap() {
+                failures.push(format!(
+                    "{}: expected {}, got {got:?}",
+                    v["name"], v["expect"]
+                ));
+            }
+        }
+        assert!(vectors.len() >= 20);
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }
