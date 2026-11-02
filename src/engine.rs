@@ -12,7 +12,7 @@
 use crate::context::AppContext;
 use crate::errors::{redact_secrets, SearchError};
 use crate::hosted::{HostedAdapter, MetasearchClient, RerankItem, V1Manifest, RERANK_MAX};
-use crate::providers::{self, Adapter, Call, Output, ProviderSpec};
+use crate::providers::{self, Adapter, Call, FilterSupport, Output, ProviderSpec};
 use crate::registry::{self, MergeKind};
 use crate::types::{
     Answer, CostSummary, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus,
@@ -222,6 +222,11 @@ pub(crate) async fn execute_with(
     }
 
     let names: Vec<&'static str> = plan.iter().map(|a| a.name()).collect();
+    // The filters each call really sends (a hosted call: the manifest's list).
+    let applied: HashMap<&'static str, FilterSupport> = plan
+        .iter()
+        .map(|a| (a.name(), a.applied_filters(req.opts)))
+        .collect();
     // What a sent-but-unanswered call costs in this mode: billed providers
     // bill on send. Taken now, before the adapters move into their tasks.
     let sent_costs: HashMap<&'static str, u64> = plan
@@ -368,7 +373,7 @@ pub(crate) async fn execute_with(
             elapsed_ms: start.elapsed().as_millis(),
             result_count: results.len(),
             warnings: {
-                warnings.extend(filter_warnings(mode, &queried, req.opts));
+                warnings.extend(filter_warnings(mode, &queried, &applied, req.opts));
                 warnings
             },
             providers_queried: queried,
@@ -741,7 +746,12 @@ fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
 /// Honesty notes for filtered searches: one per queried provider that drops
 /// a requested filter, so filtered results stay auditable. Never excludes a
 /// provider — the caller decides whether unfiltered results are acceptable.
-fn filter_warnings(mode: Mode, queried: &[String], opts: &SearchOpts) -> Vec<String> {
+fn filter_warnings(
+    mode: Mode,
+    queried: &[String],
+    applied: &HashMap<&'static str, FilterSupport>,
+    opts: &SearchOpts,
+) -> Vec<String> {
     let wants_freshness = opts.freshness.is_some();
     let wants_domains = !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty();
     let wants_country = opts.country.is_some();
@@ -756,7 +766,7 @@ fn filter_warnings(mode: Mode, queried: &[String], opts: &SearchOpts) -> Vec<Str
     }
     let mut warnings = Vec::new();
     for name in queried {
-        let Some(f) = providers::find(name).map(|s| s.filters) else {
+        let Some(f) = applied.get(name.as_str()).copied() else {
             continue;
         };
         let missing: Vec<&str> = [
@@ -774,7 +784,8 @@ fn filter_warnings(mode: Mode, queried: &[String], opts: &SearchOpts) -> Vec<Str
                 missing.join(" or ")
             ));
         }
-        if wants_domains {
+        // The caveat describes what happens to domains that were sent.
+        if wants_domains && f.domains {
             if let Some(note) = registry::filter_support(name).note {
                 warnings.push(note.to_string());
             }
@@ -1415,13 +1426,48 @@ mod tests {
             country: Some("gb".into()),
             ..SearchOpts::default()
         };
-        let w = filter_warnings(Mode::General, &["jina".into(), "serper".into()], &opts);
+        let specs: HashMap<&'static str, FilterSupport> = providers::all()
+            .iter()
+            .map(|s| (s.name, s.filters))
+            .collect();
+        let w = filter_warnings(
+            Mode::General,
+            &["jina".into(), "serper".into()],
+            &specs,
+            &opts,
+        );
         assert_eq!(w.len(), 1);
         assert!(w[0].starts_with("jina does not apply -f freshness or --country"));
-        let w = filter_warnings(Mode::Places, &["serper".into()], &opts);
+        let w = filter_warnings(Mode::Places, &["serper".into()], &specs, &opts);
         assert!(w[0].contains("mode 'places' does not apply"));
-        assert!(
-            filter_warnings(Mode::General, &["jina".into()], &SearchOpts::default()).is_empty()
+        assert!(filter_warnings(
+            Mode::General,
+            &["jina".into()],
+            &specs,
+            &SearchOpts::default()
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn filter_warnings_follow_what_was_sent_not_the_spec() {
+        // xai deep through metasearch.sh: the manifest lists freshness only,
+        // so -d is dropped and the X-handle caveat would be false.
+        let opts = SearchOpts {
+            include_domains: vec!["nature.com".into()],
+            ..SearchOpts::default()
+        };
+        let sent = FilterSupport {
+            freshness: true,
+            domains: false,
+            country: false,
+            lang: false,
+        };
+        let applied = HashMap::from([("xai", sent)]);
+        let w = filter_warnings(Mode::Deep, &["xai".into()], &applied, &opts);
+        assert_eq!(
+            w,
+            vec!["xai does not apply -d/--exclude-domain; its results are unfiltered".to_string()]
         );
     }
 }

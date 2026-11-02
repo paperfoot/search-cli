@@ -10,7 +10,7 @@
 use crate::auth;
 use crate::context::AppContext;
 use crate::errors::{redact_secrets, SearchError};
-use crate::providers::{self, Adapter, Call, Output, ProviderSpec};
+use crate::providers::{self, Adapter, Call, FilterSupport, Output, ProviderSpec};
 use crate::types::{
     Answer, AutoDecision, FailureCategory, Mode, SearchOpts, SearchResult, Transport,
 };
@@ -640,6 +640,18 @@ impl Adapter for HostedAdapter {
     /// timed out costs the account nothing.
     fn sent_cost(&self, _mode: Mode) -> u64 {
         0
+    }
+    /// Exactly what `search_body` sends: the filters the manifest lists for
+    /// this provider in this mode.
+    fn applied_filters(&self, opts: &SearchOpts) -> FilterSupport {
+        let listed = |f: &str| self.filters.iter().any(|a| a == f);
+        FilterSupport {
+            freshness: listed("freshness"),
+            domains: (opts.include_domains.is_empty() || listed("include_domains"))
+                && (opts.exclude_domains.is_empty() || listed("exclude_domains")),
+            country: listed("country"),
+            lang: listed("language"),
+        }
     }
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
         // Fresh per call, reused by that call's own retries.

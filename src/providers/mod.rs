@@ -15,7 +15,7 @@ pub mod stealth;
 pub mod tavily;
 pub mod xai;
 
-pub use spec::{Adapter, Call, Output, ProviderSpec};
+pub use spec::{Adapter, Call, FilterSupport, Output, ProviderSpec};
 
 use crate::config::AppConfig;
 use crate::context::AppContext;

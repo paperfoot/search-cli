@@ -97,6 +97,12 @@ pub trait Adapter: Send + Sync {
             Transport::Direct
         }
     }
+    /// Which of the caller's filters this adapter actually sends for `opts`;
+    /// the engine warns about every requested filter left out. Direct calls
+    /// follow the spec; the hosted adapter follows metasearch.sh's manifest.
+    fn applied_filters(&self, _opts: &SearchOpts) -> FilterSupport {
+        self.spec().filters
+    }
     fn name(&self) -> &'static str {
         self.spec().name
     }

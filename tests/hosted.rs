@@ -290,8 +290,13 @@ fn request_shape_headers_and_listed_filters_only() {
     assert_eq!(r.body["mode"], "general");
     assert_eq!(r.body["providers"], json!(["exa"]));
     assert_eq!(r.body["count"], 10);
-    // exa lists only domain filters: freshness and country stay local warnings.
+    // exa lists only domain filters: freshness and country are not sent, and
+    // the envelope says so.
     assert_eq!(r.body["filters"], json!({ "include_domains": ["a.com"] }));
+    assert_eq!(
+        v["metadata"]["warnings"],
+        json!(["exa does not apply -f freshness or --country; its results are unfiltered"])
+    );
     assert_eq!(r.headers["authorization"], format!("Bearer {TOKEN}"));
     assert!(r.headers["user-agent"].starts_with("search-cli/"));
     let key = &r.headers["idempotency-key"];
