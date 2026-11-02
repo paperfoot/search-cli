@@ -246,8 +246,23 @@ fn nesting(html: &str, max: usize, mut out: Option<&mut String>) -> Nesting {
 fn tidy(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
     let mut blank = 0;
-    for line in markdown.lines() {
-        let line = line.trim_end();
+    // Inside a fenced code block every line is kept as is (review P10).
+    let mut fence: Option<&str> = None;
+    for raw in markdown.lines() {
+        let marker = raw.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| marker.starts_with(m));
+        if let Some(open) = fence {
+            out.push_str(raw);
+            out.push('\n');
+            if marker == Some(open) {
+                fence = None;
+            }
+            continue;
+        }
+        if marker.is_some() {
+            fence = marker;
+        }
+        let line = raw.trim_end();
         if line.is_empty() {
             blank += 1;
             if blank > 1 {
@@ -268,6 +283,15 @@ mod tests {
 
     const ARTICLE: &str = include_str!("fixtures/article.html");
     const DOCS_TABLE: &str = include_str!("fixtures/docs-table.html");
+
+    #[test]
+    fn tidy_leaves_fenced_code_alone() {
+        let md = "# T\n\n\n\ntext  \n\n```rust\nfn a() {}  \n\n\n\nfn b() {}\n```\n\n\nafter";
+        assert_eq!(
+            tidy(md),
+            "# T\n\ntext\n\n```rust\nfn a() {}  \n\n\n\nfn b() {}\n```\n\nafter"
+        );
+    }
 
     #[test]
     fn an_article_keeps_headings_and_links() {

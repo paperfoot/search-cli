@@ -221,7 +221,23 @@ fn send_error(e: reqwest::Error) -> PageError {
         }
         source = err.source();
     }
-    PageError::Network(e.without_url().to_string())
+    PageError::Network(error_chain(&e.without_url()))
+}
+
+/// An error and its causes on one line: "error sending request" alone does
+/// not tell a refused connection from a bad certificate (review P9).
+pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    out
 }
 
 async fn fetch_inner(client: &PageClient, url: &str) -> Result<Page, PageError> {
@@ -303,7 +319,7 @@ fn parse_http_url(raw: &str) -> Result<Url, PageError> {
 
 /// Decode with the BOM, else the Content-Type charset, else a `<meta>`
 /// charset in the first 4 KB, else UTF-8 (the WHATWG order, simplified).
-fn decode(raw: &[u8], content_type: Option<&str>) -> String {
+pub(crate) fn decode(raw: &[u8], content_type: Option<&str>) -> String {
     let declared = content_type
         .and_then(charset_param)
         .and_then(|l| Encoding::for_label(l.as_bytes()));
@@ -452,6 +468,21 @@ mod tests {
             &[("Content-Type", "text/plain")],
             b"internal secrets",
         )
+    }
+
+    /// Review P9: a refused connection says so, not only "error sending
+    /// request".
+    #[tokio::test]
+    async fn a_network_error_carries_its_cause() {
+        let client = client_allow_private().unwrap();
+        // Port 9 on loopback: nothing listens there.
+        let err = fetch_direct(&client, "http://127.0.0.1:9/", Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let PageError::Network(msg) = err else {
+            panic!("expected a network error, got {err:?}");
+        };
+        assert!(msg.to_lowercase().contains("refused"), "{msg}");
     }
 
     #[tokio::test]
