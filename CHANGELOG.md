@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.10.0 (unreleased)
+
+### Search without your own keys
+- After `search login`, engines you have no key for run through metasearch.sh
+  and are charged to your balance; engines you have a key for still go direct.
+  A new account starts with $1 of credit, so a machine with no keys gets
+  results on the first try. A fused search sends at most 3 hosted engines
+  (6 for `deep`) and names the rest in a warning; `-p` or
+  `metasearch.max_providers` changes that.
+- Every result envelope reports what the search cost in `metadata.cost`
+  (micro-USD, per engine, and whether the figure is an estimate or the
+  amount charged) and how each engine was reached in `metadata.transport`.
+  `search stats` now prices spend from these figures.
+
+### Auto mode
+- With no `-m`, the mode is `auto`: fixed rules for URLs, X, patents and
+  images, then JEV when logged in, else keyword rules, else `general`. The
+  decision and its reason are in `metadata.routing.auto`. Auto never picks
+  `deep`, and picks `social` only on an X cue. An explicit `-m` or `-p` is
+  always obeyed.
+- Logged in, results in general, news, academic, scholar, people and deep
+  are reranked by relevance (`extra.relevance`); `--no-rerank` turns it off.
+
+### Paid calls are not wasted
+- A fused search no longer cancels engines after 1.5 s. An engine that has
+  received the query bills for it, so the search now waits for every engine
+  until the mode's deadline and lists late ones in
+  `metadata.providers_timed_out` (`providers_cancelled` stays empty).
+- A request that timed out on an engine that bills on receipt is not sent
+  again. Retries happen only for connection failures, and for 429 or 503
+  answers that carry a Retry-After within the deadline and are not quota
+  messages.
+- Errors read the response body: an exhausted balance is `billing_quota`, a
+  bad key is `auth`, a provider's own error code is honoured, so you know
+  whether to top up, fix a key or retry.
+
+### Current provider APIs
+- Perplexity uses its Search API (the Sonar chat endpoint used before was
+  retired), xAI uses the Responses API with X search, Parallel uses
+  `/v1/search`, and Exa returns highlights and uses its research-paper
+  category for `academic`. Costs follow what each provider reports where it
+  reports one.
+
+### Reading pages
+- `extract` starts with a direct fetch that asks for markdown first, follows
+  up to 5 redirects and checks every hop against private addresses, then
+  converts HTML to markdown locally. It is free and needs no key.
+- Bot challenges, JavaScript shells, binary files, error pages and empty
+  pages are rejected before they count, so the chain moves on and junk is
+  not billed.
+
+### Output
+- In JSON mode stdout carries exactly one JSON document, errors included, so
+  a pipe into `jq` never breaks on a failure. An unknown `-p` name exits 3.
+
+### Install
+- Prebuilt binaries for Linux arm64 (aarch64). `curl -fsSL
+  https://metasearch.sh/install | sh` works on macOS and Linux, x86_64 and
+  arm64, and checks the download against `SHA256SUMS`.
+- A Claude Code plugin marketplace in this repo: `search-cli` installs the
+  skill, `metasearch` adds the metasearch.sh MCP server.
+
 ## 0.9.0 — 2026-07-25
 
 ### Terminal login
