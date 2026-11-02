@@ -602,10 +602,18 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             };
             let mut auto = auto;
             // Freshness from explicit words ("today", "latest"), only when the
-            // caller set none and the mode applies it.
+            // caller set none and auto chose news or social. The CLI decides
+            // this itself, so routing.auto reports only the filter it sent:
+            // whatever /route suggested is dropped first.
             if let Some(decision) = auto.as_mut() {
-                if opts.freshness.is_none() && registry::mode_applies_filters(mode) {
-                    if let Some((value, word)) = router::freshness(&query) {
+                if decision.filters_applied.take().is_some() {
+                    for f in ["day", "week", "month", "year"] {
+                        decision.reason =
+                            decision.reason.replace(&format!(" with freshness {f}"), "");
+                    }
+                }
+                if opts.freshness.is_none() {
+                    if let Some((value, word)) = router::freshness_for(&query, mode) {
                         opts.freshness = Some(value.to_string());
                         let mut applied = serde_json::Map::new();
                         applied.insert("freshness".into(), value.into());

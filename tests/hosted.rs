@@ -527,6 +527,53 @@ fn route_failure_falls_back_to_local_signal_rules() {
     assert_eq!(mock.requests("/api/v1/route").len(), 1);
 }
 
+/// routing.auto reports only the filter the CLI sent: a freshness /route
+/// suggested is dropped (the caller's -f, or a mode that takes no freshness
+/// word, wins), and the reason no longer names it.
+#[test]
+fn routing_auto_reports_only_the_freshness_that_was_sent() {
+    let mock = start(
+        "routefresh",
+        Arc::new(|req: &Req, i| match req.path.as_str() {
+            "/api/v1/route" => Reply::Json(
+                200,
+                json!({ "auto": { "mode": "general", "source": "jev",
+                                  "reason": "Anything else (p 0.9); used general with freshness week.",
+                                  "filters_applied": { "freshness": "week" } } }),
+            ),
+            _ => handler(|r, _| search_ok(r))(req, i),
+        }),
+    );
+    for (extra, sent) in [(None, Value::Null), (Some("month"), json!("month"))] {
+        let mut cmd = mock.cmd();
+        cmd.args([
+            "search",
+            "-q",
+            "latest rust release",
+            "-p",
+            "serper",
+            "--json",
+            "--no-rerank",
+        ]);
+        if let Some(f) = extra {
+            cmd.args(["-f", f]);
+        }
+        let (code, v) = run_json(&mut cmd);
+        assert_eq!(code, 0, "{v}");
+        let auto = &v["metadata"]["routing"]["auto"];
+        assert!(
+            auto.get("filters_applied").is_none_or(Value::is_null),
+            "{auto}"
+        );
+        assert!(
+            !auto["reason"].as_str().unwrap().contains("freshness"),
+            "{auto}"
+        );
+        let body = mock.requests("/api/v1/search").last().unwrap().body.clone();
+        assert_eq!(body["filters"]["freshness"], sent, "{body}");
+    }
+}
+
 #[test]
 fn auto_never_picks_a_mode_the_pinned_provider_cannot_serve() {
     // /route says news; exa serves no news, so auto falls back to general

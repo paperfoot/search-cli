@@ -57,7 +57,7 @@ pub fn decisive(query: &str) -> Option<Hit> {
     if is_absolute_url(q) {
         return Some(hit(1, Mode::Extract, "a URL"));
     }
-    if let Some(cue) = x_cue(&lower) {
+    if let Some(cue) = x_cue(q) {
         return Some(hit(2, Mode::Social, &cue));
     }
     if let Some(url) = similar_url(q) {
@@ -160,6 +160,19 @@ pub fn signals(query: &str) -> Vec<Hit> {
             first_phrase(&lower, phrases).map(|cue| hit(*rule, *mode, &cue))
         })
         .collect()
+}
+
+/// Modes where a freshness word becomes a filter (ROUTING.md, amended 2 Nov):
+/// only those whose point is recency. In general or academic, "today",
+/// "latest" and "breaking" are usually names or versions.
+pub fn freshness_applies(mode: Mode) -> bool {
+    matches!(mode, Mode::News | Mode::Social)
+}
+
+/// The freshness auto applies for `mode` (server `freshnessFor`): the
+/// explicit word's value in news or social, else none.
+pub fn freshness_for(query: &str, mode: Mode) -> Option<(&'static str, String)> {
+    freshness_applies(mode).then(|| freshness(query)).flatten()
 }
 
 /// Freshness from explicit words only (ROUTING.md), as (value, word).
@@ -280,38 +293,289 @@ fn is_absolute_url(q: &str) -> bool {
         && url::Url::parse(q).is_ok_and(|u| u.host_str().is_some_and(|h| !h.is_empty()))
 }
 
-/// Rule 2: `\b(tweets?|twitter|on x)\b`, `\bx\.com/`, or a lone `@handle`.
-fn x_cue(lower: &str) -> Option<String> {
-    if let Some(p) = first_phrase(lower, &["tweet", "tweets", "twitter", "on x"]) {
-        return Some(p);
+/// At-words that are code, not X handles: decorators, annotations, CSS
+/// at-rules, doc tags, chat mentions and bare npm scopes. Copied from the
+/// server's `CODE_AT_WORDS` (metasearch `src/lib/engine/judge.ts`); a wrong
+/// social route costs about 45x a general search and returns posts, not docs.
+const CODE_AT_WORDS: &[&str] = &[
+    // Python, Java, Kotlin, Swift, TypeScript decorators and annotations
+    "property",
+    "staticmethod",
+    "classmethod",
+    "abstractmethod",
+    "cached_property",
+    "dataclass",
+    "wraps",
+    "override",
+    "deprecated",
+    "functionalinterface",
+    "suppresswarnings",
+    "transactional",
+    "autowired",
+    "bean",
+    "component",
+    "service",
+    "controller",
+    "restcontroller",
+    "configuration",
+    "entity",
+    "table",
+    "column",
+    "id",
+    "value",
+    "getmapping",
+    "postmapping",
+    "requestmapping",
+    "nullable",
+    "nonnull",
+    "notnull",
+    "data",
+    "builder",
+    "getter",
+    "setter",
+    "slf4j",
+    "test",
+    "before",
+    "after",
+    "beforeeach",
+    "aftereach",
+    "beforeall",
+    "afterall",
+    "fixture",
+    "pytest",
+    "mark",
+    "inject",
+    "injectable",
+    "input",
+    "output",
+    "published",
+    "state",
+    "binding",
+    "observable",
+    "observedobject",
+    "stateobject",
+    "environmentobject",
+    "main",
+    "mainactor",
+    "objc",
+    "escaping",
+    "available",
+    "discardableresult",
+    "testable",
+    "jsonproperty",
+    "jsonignore",
+    "async",
+    "app",
+    "route",
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+    // CSS, Sass, Tailwind at-rules
+    "media",
+    "import",
+    "keyframes",
+    "font",
+    "supports",
+    "layer",
+    "container",
+    "apply",
+    "tailwind",
+    "extend",
+    "mixin",
+    "include",
+    "use",
+    "forward",
+    "page",
+    "charset",
+    "namespace",
+    "each",
+    "if",
+    "else",
+    "for",
+    "function",
+    // JSDoc, Javadoc, Objective-C, Blade
+    "param",
+    "params",
+    "returns",
+    "return",
+    "throws",
+    "type",
+    "types",
+    "typedef",
+    "template",
+    "see",
+    "link",
+    "since",
+    "author",
+    "version",
+    "example",
+    "interface",
+    "implementation",
+    "protocol",
+    "end",
+    "synthesize",
+    "section",
+    "yield",
+    "csrf",
+    "extends",
+    "foreach",
+    // chat mentions
+    "here",
+    "channel",
+    "everyone",
+    "mention",
+    // bare npm scopes that read as words in developer questions
+    "angular",
+    "nestjs",
+    "tanstack",
+    "babel",
+    "emotion",
+    "mui",
+    "storybook",
+    "prisma",
+    "sveltejs",
+    "reduxjs",
+    "trpc",
+    "nuxt",
+    "nuxtjs",
+    "octokit",
+    "fortawesome",
+    "fontsource",
+    "heroicons",
+    "headlessui",
+    "vitejs",
+    "rollup",
+    "swc",
+];
+
+/// Rule 2, as amended in ROUTING.md (source of truth: the server's
+/// `socialCue()`): (a) `tweet(s)`/`twitter`, except as a web-dev word;
+/// (b) `on X`, case-sensitive, never before `axis`; (c) `x.com/`; (d) a lone
+/// `@handle` that is not a code at-word. Returns the cue for the reason.
+fn x_cue(q: &str) -> Option<String> {
+    let lower = q.to_lowercase();
+    if let Some(w) = x_word(&lower) {
+        return Some(w);
+    }
+    if on_x(q) {
+        return Some("on X".to_string());
     }
     if lower
         .match_indices("x.com/")
-        .any(|(i, _)| boundary_before(lower, i))
+        .any(|(i, _)| boundary_before(&lower, i))
     {
         return Some("x.com/".to_string());
     }
-    // (^|\s)@[A-Za-z0-9_]{2,15}\b(?![.@][A-Za-z0-9]) — an @ at the start or
-    // after whitespace, not followed by a domain or another @, so an email
-    // address or "@gmail.com" never counts.
-    for (i, _) in lower.match_indices('@') {
-        if !lower[..i]
-            .chars()
-            .next_back()
-            .is_none_or(char::is_whitespace)
-        {
+    lone_handle(q)
+}
+
+/// (a) `(?<!\bembed(?:ded|ding)?\s+(?:an?\s+)?)\b(tweets?|twitter)\b(?!\s+(cards?|bootstrap|pixel|api|oauth|embeds?|widgets?|clone|share button)\b)`
+fn x_word(lower: &str) -> Option<String> {
+    const WEB_DEV: &[&str] = &[
+        "cards",
+        "card",
+        "bootstrap",
+        "pixel",
+        "api",
+        "oauth",
+        "embeds",
+        "embed",
+        "widgets",
+        "widget",
+        "clone",
+        "share button",
+    ];
+    for word in ["tweets", "tweet", "twitter"] {
+        for (i, _) in lower.match_indices(word) {
+            let j = i + word.len();
+            if !boundary_before(lower, i) || !boundary_after(lower, j) {
+                continue;
+            }
+            let after = &lower[j..];
+            let next = after.trim_start();
+            if next.len() < after.len()
+                && WEB_DEV
+                    .iter()
+                    .any(|w| next.starts_with(w) && boundary_after(next, w.len()))
+            {
+                continue;
+            }
+            if after_embed(&lower[..i]) {
+                continue;
+            }
+            return Some(word.to_string());
+        }
+    }
+    None
+}
+
+/// The lookbehind of (a): `before` ends with `\bembed(ded|ding)?\s+(an?\s+)?`.
+fn after_embed(before: &str) -> bool {
+    fn ends_with_word(s: &str, words: &[&str]) -> Option<usize> {
+        words
+            .iter()
+            .find(|w| s.ends_with(*w) && boundary_before(s, s.len() - w.len()))
+            .map(|w| s.len() - w.len())
+    }
+    const EMBED: &[&str] = &["embedded", "embedding", "embed"];
+    let b = before.trim_end();
+    if b.len() == before.len() {
+        return false; // \s+ needs at least one space
+    }
+    if ends_with_word(b, EMBED).is_some() {
+        return true;
+    }
+    match ends_with_word(b, &["an", "a"]) {
+        Some(at) => {
+            let head = &b[..at];
+            let h = head.trim_end();
+            h.len() < head.len() && ends_with_word(h, EMBED).is_some()
+        }
+        None => false,
+    }
+}
+
+/// (b) `\bon X\b(?!\s*-?\s*axis)`, case-sensitive.
+fn on_x(q: &str) -> bool {
+    q.match_indices("on X").any(|(i, m)| {
+        let j = i + m.len();
+        if !boundary_before(q, i) || !boundary_after(q, j) {
+            return false;
+        }
+        let rest = q[j..].trim_start();
+        let rest = rest.strip_prefix('-').unwrap_or(rest).trim_start();
+        !rest.starts_with("axis")
+    })
+}
+
+/// (d) `(?:^|\s)@([A-Za-z0-9_]{2,15})(?=$|[\s,!?;:)]|\.(?:\s|$))`, minus the
+/// code at-words. Never an email, an npm scope (`@types/node`) or a dotted
+/// call (`@app.route`).
+fn lone_handle(q: &str) -> Option<String> {
+    for (i, _) in q.match_indices('@') {
+        if !q[..i].chars().next_back().is_none_or(char::is_whitespace) {
             continue;
         }
-        let rest = &lower[i + 1..];
+        let rest = &q[i + 1..];
         let n = rest
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .count();
+        if !(2..=15).contains(&n) {
+            continue;
+        }
         let mut after = rest[n..].chars();
-        let looks_like_address = matches!(after.next(), Some('.' | '@'))
-            && after.next().is_some_and(|c| c.is_ascii_alphanumeric());
-        if (2..=15).contains(&n) && boundary_after(rest, n) && !looks_like_address {
-            return Some(format!("@{}", &rest[..n]));
+        let ends = match after.next() {
+            None => true,
+            Some(c) if c.is_whitespace() || ",!?;:)".contains(c) => true,
+            Some('.') => after.next().is_none_or(char::is_whitespace),
+            Some(_) => false,
+        };
+        let word = &rest[..n];
+        if ends && !CODE_AT_WORDS.contains(&word.to_ascii_lowercase().as_str()) {
+            return Some(format!("@{word}"));
         }
     }
     None
@@ -479,6 +743,80 @@ mod tests {
                 (mode.to_string(), source.to_string()),
                 "query {q:?}"
             );
+        }
+    }
+
+    /// The server's judge.test.ts vectors for amended rule 2: developer
+    /// at-words, npm scopes, plot axes and Twitter as a web-dev word are not
+    /// social (a wrong social route costs about 45x a general search).
+    #[test]
+    fn rule_2_ignores_code_at_words_axes_and_web_dev_twitter() {
+        for q in [
+            "how to install @types/node in a pnpm workspace",
+            "@tanstack/react-query invalidateQueries example",
+            "@aws-sdk/client-s3 presigned url",
+            "python @property decorator setter",
+            "css @media query for dark mode",
+            "java @Override annotation meaning",
+            "flask @app.route methods post",
+            "matplotlib rotate tick labels on x axis",
+            "seaborn barplot labels on x-axis overlapping",
+            "plot y on X axis log scale",
+            "twitter card meta tags for nextjs",
+            "twitter bootstrap 3 grid",
+            "how to embed a tweet in react",
+            "angular @Input vs @Output",
+            "email me at jane@example.com",
+            "contact support@stripe.com",
+            "linux x86 assembly",
+            "write to @stripe.com",
+        ] {
+            assert_ne!(local(q).0, "social", "query {q:?}");
+        }
+        for q in [
+            "twitter reactions to the debate",
+            "what are people saying on X about it",
+            "@elonmusk recent posts",
+            "x.com/naval posts",
+            "latest tweets from nasa",
+            "what did @sama say about gpt-5",
+            "posts from @nasa.",
+            "trending on X today",
+            "@vercel outage?",
+        ] {
+            assert_eq!(local(q), ("social".into(), "rule".into()), "query {q:?}");
+        }
+    }
+
+    /// The server's judge.test.ts freshness vectors, through the local rules.
+    #[test]
+    fn freshness_vectors_match_the_server() {
+        let f = |q: &str| {
+            let (d, _) = resolve_local(q);
+            freshness_for(q, auto_mode(&d.mode).unwrap()).map(|f| f.0)
+        };
+        assert_eq!(f("stock market today"), Some("day"));
+        assert_eq!(f("what happened yesterday news"), Some("day"));
+        assert_eq!(f("breaking news japan"), Some("week"));
+        assert_eq!(f("tweets this month about rust"), Some("month"));
+        assert_eq!(f("photos of fireworks this year"), None);
+        assert_eq!(f("restaurants in soho open today"), None);
+        // A freshness word in a general or academic search sets no filter.
+        assert_eq!(
+            freshness_for("latest stable version of python", Mode::General),
+            None
+        );
+        assert_eq!(
+            freshness_for("latest meta-analysis on fasting", Mode::Academic),
+            None
+        );
+    }
+
+    #[test]
+    fn freshness_words_apply_only_in_news_and_social() {
+        assert!(freshness_applies(Mode::News) && freshness_applies(Mode::Social));
+        for m in [Mode::General, Mode::Academic, Mode::Places, Mode::Images] {
+            assert!(!freshness_applies(m), "{m}");
         }
     }
 
