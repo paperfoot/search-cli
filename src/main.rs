@@ -757,7 +757,6 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             "status": "success",
                             "config_path": config::config_path().to_string_lossy(),
                             "settings": {
-                                "timeout": app.config.settings.timeout,
                                 "count": app.config.settings.count,
                             },
                             "providers_configured": configured,
@@ -765,6 +764,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                 "logged_in": !auth::resolve_token(&app.config).is_empty(),
                                 "email": app.config.metasearch.email,
                                 "url": auth::resolve_base_url(&app.config),
+                                "max_providers": app.config.metasearch.max_providers,
                             },
                         });
                         output::json::render_value(&info);

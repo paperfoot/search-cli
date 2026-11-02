@@ -118,10 +118,17 @@ fn test_agent_info_json() {
     assert!(json["exit_codes"].is_object());
     assert!(json["routing"].as_str().unwrap().contains("auto"));
     for p in json["providers"].as_array().unwrap() {
-        assert!(p["transport"].is_string() && p["usd_per_call"].is_number(), "{p}");
+        assert!(
+            p["transport"].is_string() && p["usd_per_call"].is_number(),
+            "{p}"
+        );
     }
     // About half of the 0.9 manifest (21 KB): agents pay for every byte.
-    assert!(output.stdout.len() < 13_000, "{} bytes", output.stdout.len());
+    assert!(
+        output.stdout.len() < 13_000,
+        "{} bytes",
+        output.stdout.len()
+    );
 }
 
 #[test]
