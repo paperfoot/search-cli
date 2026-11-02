@@ -1,0 +1,19 @@
+{
+  "grounding": {
+    "generic": [
+      {
+        "url": "https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion",
+        "title": "Reciprocal rank fusion | Elasticsearch Reference",
+        "snippets": ["RRF score = sum of 1 / (k + rank).", "k is 60 by default."]
+      },
+      {
+        "url": "https://en.wikipedia.org/wiki/Rank_fusion",
+        "title": "Rank fusion - Wikipedia",
+        "snippets": ["Rank fusion combines ranked lists from several retrieval systems."]
+      }
+    ]
+  },
+  "sources": {
+    "https://en.wikipedia.org/wiki/Rank_fusion": { "title": "Rank fusion - Wikipedia", "hostname": "en.wikipedia.org" }
+  }
+}
