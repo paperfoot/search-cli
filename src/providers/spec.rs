@@ -2,7 +2,6 @@
 //! `Adapter`; routing, agent-info, config, doctor, usage, stats and hosted transport all read these records.
 //! A provider is called per (provider, mode), exactly like the hosted API, so a hosted call is the same call
 //! sent to metasearch.sh instead of the upstream.
-#![allow(dead_code)]
 
 use crate::errors::SearchError;
 use crate::types::{Answer, FailureCategory, Mode, SearchOpts, SearchResult};

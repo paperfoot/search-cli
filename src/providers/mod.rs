@@ -1,5 +1,6 @@
 pub mod brave;
 pub mod browserless;
+pub mod direct;
 pub mod exa;
 pub mod firecrawl;
 pub mod jina;
@@ -14,37 +15,63 @@ pub mod stealth;
 pub mod tavily;
 pub mod xai;
 
-use crate::context::AppContext;
-use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
-use async_trait::async_trait;
-use backon::{ExponentialBuilder, Retryable};
-use std::sync::Arc;
-use std::time::Duration;
+pub use spec::{Adapter, Call, Output, ProviderSpec};
 
-pub async fn retry_request<F, Fut, T>(f: F) -> Result<T, SearchError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, SearchError>>,
-{
-    // Retry only TRANSIENT failures — rate limits, timeouts, network errors,
-    // and 5xx (SearchError::is_retryable). The old predicate matched only
-    // Http(_) transport errors, so 429/503 (mapped to RateLimited/Api before
-    // the predicate saw them) were never retried — backoff was effectively
-    // dead for the cases it exists for. Permanent 4xx (401/402/400) are NOT
-    // retried; that would just burn the budget.
-    //
-    // Budget invariant: worst-case backoff (~0.2s + ~0.4s, jittered) plus one
-    // full attempt must fit inside the smallest provider timeout (10s).
-    f.retry(
-        ExponentialBuilder::default()
-            .with_jitter()
-            .with_min_delay(Duration::from_millis(200))
-            .with_max_delay(Duration::from_millis(800))
-            .with_max_times(2),
-    )
-    .when(|e| e.is_retryable())
-    .await
+use crate::config::AppConfig;
+use crate::context::AppContext;
+use crate::errors::{classify_http, SearchError};
+use crate::types::FailureCategory;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Every provider the binary knows, in display order. The one provider list
+/// in the crate: routing, config, doctor, usage and stats derive from it.
+static ALL: &[&ProviderSpec] = &[
+    &serper::SPEC,
+    &exa::SPEC,
+    &jina::SPEC,
+    &brave::SPEC,
+    &linkup::SPEC,
+    &parallel::SPEC,
+    &tavily::SPEC,
+    &perplexity::SPEC,
+    &serpapi::SPEC,
+    &xai::SPEC,
+    &firecrawl::SPEC,
+    &browserless::SPEC,
+    #[cfg(feature = "stealth")]
+    &stealth::SPEC,
+    &direct::SPEC,
+];
+
+pub fn all() -> &'static [&'static ProviderSpec] {
+    ALL
+}
+
+pub fn find(name: &str) -> Option<&'static ProviderSpec> {
+    ALL.iter()
+        .copied()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+}
+
+pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Adapter>> {
+    vec![
+        Box::new(serper::Serper::new(ctx.clone())),
+        Box::new(exa::Exa::new(ctx.clone())),
+        Box::new(jina::Jina::new(ctx.clone())),
+        Box::new(brave::Brave::new(ctx.clone())),
+        Box::new(linkup::Linkup::new(ctx.clone())),
+        Box::new(parallel::Parallel::new(ctx.clone())),
+        Box::new(tavily::Tavily::new(ctx.clone())),
+        Box::new(perplexity::Perplexity::new(ctx.clone())),
+        Box::new(serpapi::SerpApi::new(ctx.clone())),
+        Box::new(xai::Xai::new(ctx.clone())),
+        Box::new(firecrawl::Firecrawl::new(ctx.clone())),
+        Box::new(browserless::Browserless::new(ctx.clone())),
+        #[cfg(feature = "stealth")]
+        Box::new(stealth::Stealth::new(ctx.clone())),
+        Box::new(direct::Direct::new(ctx.clone())),
+    ]
 }
 
 /// Resolve a provider API key. **Environment variable wins over the config
@@ -63,44 +90,129 @@ pub fn resolve_key(config_value: &str, env_var: &str) -> String {
     config_value.to_string()
 }
 
-/// Turn a non-2xx reqwest response into a categorized [`SearchError`], preserving
-/// a short, sanitized body excerpt so "HTTP 422" becomes
-/// "HTTP 422: The provided subscription token is invalid." Returns the response
-/// unchanged on 2xx. Centralizing this here keeps status/body/429 handling
-/// identical across every provider (previously copy-pasted and drift-prone).
-pub async fn ok_or_api_error(
-    resp: reqwest::Response,
-    provider: &'static str,
-) -> Result<reqwest::Response, SearchError> {
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(resp);
+/// The effective key for a provider (empty when unset or keyless).
+pub fn key_for(config: &AppConfig, spec: &ProviderSpec) -> String {
+    match (spec.env_keys.first(), config.keys.get(spec.name)) {
+        (Some(env), Some(file)) => resolve_key(file, env),
+        (Some(env), None) => resolve_key("", env),
+        _ => String::new(),
     }
-    let code = status.as_u16();
-    if code == 429 {
-        // Honor Retry-After (seconds form) up to 2s before surfacing the
-        // error, so the backon retry that follows lands after the window the
-        // provider asked for instead of blind-hammering a throttled API.
-        // Capped so it always fits inside the provider timeout budget.
-        let wait = resp
+}
+
+/// How many times a request may be re-sent, and the backoff between tries.
+const MAX_RETRIES: u32 = 2;
+const BACKOFF_MIN: Duration = Duration::from_millis(200);
+const BACKOFF_MAX: Duration = Duration::from_millis(800);
+/// Non-2xx bodies are read up to this size for classification.
+const ERROR_BODY_CAP: usize = 64 * 1024;
+
+/// Send one provider request with the shared retry policy and return the 2xx
+/// response; every non-2xx becomes a classified [`SearchError::Upstream`].
+///
+/// `timeout` is the whole budget for this call (the engine passes
+/// `min(spec.timeout, deadline left)`); each attempt gets what is left of it.
+/// A request is re-sent only when it can't have been billed or the provider
+/// asked for it:
+/// - connection errors (the request never left);
+/// - 429/503 carrying a `Retry-After` that fits in the budget, whose body is
+///   not a quota message.
+///
+/// A read timeout is never re-sent: the provider got the request and bills it.
+pub async fn send<F>(
+    adapter: &dyn Adapter,
+    timeout: Duration,
+    build: F,
+) -> Result<reqwest::Response, SearchError>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let provider = adapter.name();
+    let deadline = Instant::now() + timeout;
+    let mut attempt = 0u32;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(timeout_error(provider));
+        }
+        let resp = match build().timeout(left).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                if e.is_connect() && attempt < MAX_RETRIES {
+                    let pause = backoff(attempt);
+                    if pause < deadline.saturating_duration_since(Instant::now()) {
+                        tokio::time::sleep(pause).await;
+                        attempt += 1;
+                        continue;
+                    }
+                }
+                // Strip the URL: SerpApi authenticates with `?api_key=`.
+                return Err(SearchError::Http(e.without_url()));
+            }
+        };
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp);
+        }
+        let code = status.as_u16();
+        let retry_after = resp
             .headers()
-            .get("retry-after")
+            .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .map(|s| s.min(2));
-        if let Some(secs) = wait {
-            tokio::time::sleep(Duration::from_secs(secs)).await;
+            .map(Duration::from_secs);
+        let body = read_capped(resp, ERROR_BODY_CAP).await;
+        let category = classify_http(adapter.classify(code, &body), code, &body);
+
+        // A quota or auth body is classified as such, so it never retries.
+        let transient = matches!(code, 429 | 503)
+            && matches!(
+                category,
+                FailureCategory::RateLimit | FailureCategory::Server
+            );
+        if transient && attempt < MAX_RETRIES {
+            if let Some(wait) = retry_after {
+                let pause = wait.max(backoff(attempt));
+                // Leave room for the retried request itself.
+                if pause + BACKOFF_MAX < deadline.saturating_duration_since(Instant::now()) {
+                    tokio::time::sleep(pause).await;
+                    attempt += 1;
+                    continue;
+                }
+            }
         }
-        return Err(SearchError::RateLimited { provider });
+        return Err(SearchError::Upstream {
+            provider,
+            status: code,
+            category,
+            message: http_error_message(code, &body),
+        });
     }
-    // Body is only read on the error path; the success path stays zero-copy.
-    let body = resp.text().await.unwrap_or_default();
-    Err(SearchError::Api {
+}
+
+fn backoff(attempt: u32) -> Duration {
+    (BACKOFF_MIN * 2u32.pow(attempt)).min(BACKOFF_MAX)
+}
+
+/// The call's time budget ran out before an answer arrived.
+pub fn timeout_error(provider: &'static str) -> SearchError {
+    SearchError::Upstream {
         provider,
-        code: "api_error",
-        message: http_error_message(code, &body),
-        status: Some(code),
-    })
+        status: 408,
+        category: FailureCategory::Timeout,
+        message: "timed out before the provider answered".to_string(),
+    }
+}
+
+async fn read_capped(mut resp: reqwest::Response, cap: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < cap {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    buf.truncate(cap);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Format `HTTP <status>` with a sanitized one-line body excerpt when present.
@@ -111,6 +223,30 @@ pub fn http_error_message(status: u16, body: &str) -> String {
     } else {
         format!("HTTP {status}: {excerpt}")
     }
+}
+
+/// Options for calls that apply no filters (vertical endpoints).
+pub static NO_FILTERS: crate::types::SearchOpts = crate::types::SearchOpts {
+    include_domains: Vec::new(),
+    exclude_domains: Vec::new(),
+    freshness: None,
+    country: None,
+    lang: None,
+};
+
+/// Append `site:` / `-site:` operators for providers without native domain filters.
+pub fn augment_query(query: &str, opts: &crate::types::SearchOpts) -> String {
+    let mut q = String::with_capacity(query.len() + 16 * opts.include_domains.len());
+    q.push_str(query);
+    for d in &opts.include_domains {
+        q.push_str(" site:");
+        q.push_str(d);
+    }
+    for d in &opts.exclude_domains {
+        q.push_str(" -site:");
+        q.push_str(d);
+    }
+    q
 }
 
 /// UTC date `days` ago as `YYYY-MM-DD`, without a date-crate dependency.
@@ -156,53 +292,11 @@ fn sanitize_excerpt(body: &str, max: usize) -> String {
     out
 }
 
-#[async_trait]
-pub trait Provider: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn capabilities(&self) -> &[&'static str];
-    fn is_configured(&self) -> bool;
-    /// Standard env var names accepted by this provider (e.g. BRAVE_API_KEY).
-    fn env_keys(&self) -> &[&'static str];
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(10)
-    }
-
-    async fn search(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError>;
-    async fn search_news(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError>;
-}
-
-pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Provider>> {
-    vec![
-        Box::new(parallel::Parallel::new(ctx.clone())),
-        Box::new(brave::Brave::new(ctx.clone())),
-        Box::new(serper::Serper::new(ctx.clone())),
-        Box::new(exa::Exa::new(ctx.clone())),
-        Box::new(jina::Jina::new(ctx.clone())),
-        Box::new(linkup::Linkup::new(ctx.clone())),
-        #[cfg(feature = "stealth")]
-        Box::new(stealth::Stealth::new(ctx.clone())),
-        Box::new(firecrawl::Firecrawl::new(ctx.clone())),
-        Box::new(tavily::Tavily::new(ctx.clone())),
-        Box::new(browserless::Browserless::new(ctx.clone())),
-        Box::new(perplexity::Perplexity::new(ctx.clone())),
-        Box::new(serpapi::SerpApi::new(ctx.clone())),
-        Box::new(xai::Xai::new(ctx.clone())),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
-    use super::resolve_key;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Uses uniquely-named env vars so parallel tests don't race on shared state.
     #[test]
@@ -233,5 +327,138 @@ mod tests {
         let var = "SEARCH_TEST_KEY_NONE";
         std::env::remove_var(var);
         assert_eq!(resolve_key("", var), "");
+    }
+
+    #[test]
+    fn one_spec_per_provider_and_every_adapter_listed() {
+        let names: Vec<&str> = all().iter().map(|s| s.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "duplicate provider spec");
+        let ctx = Arc::new(AppContext::new(AppConfig::default()));
+        let built: Vec<&str> = build_providers(&ctx).iter().map(|a| a.name()).collect();
+        assert_eq!(built, names, "build_providers and all() disagree");
+        for s in all() {
+            assert!(!s.modes.is_empty(), "{} serves no mode", s.name);
+            assert!(!s.modes.contains(&crate::types::Mode::Scrape));
+            assert!(s.max_count >= 1);
+            if s.env_keys.is_empty() {
+                assert!(!s.billed_on_send, "{} is keyless but billed", s.name);
+            }
+        }
+    }
+
+    /// A stub adapter around a real spec, for driving `send` directly.
+    struct Probe(&'static ProviderSpec);
+
+    #[async_trait::async_trait]
+    impl Adapter for Probe {
+        fn spec(&self) -> &'static ProviderSpec {
+            self.0
+        }
+        fn is_configured(&self) -> bool {
+            true
+        }
+        async fn call(&self, _call: &Call<'_>) -> Result<Output, SearchError> {
+            Ok(Output::default())
+        }
+    }
+
+    /// A local server that counts connections and answers each with `reply`
+    /// (or never answers when `reply` is None). Every reply closes the
+    /// connection, so connections == requests.
+    async fn server(reply: Option<&'static str>) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    match reply {
+                        Some(r) => {
+                            let _ = sock.write_all(r.as_bytes()).await;
+                            let _ = sock.shutdown().await;
+                        }
+                        // Hold the socket open and never answer.
+                        None => tokio::time::sleep(Duration::from_secs(30)).await,
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}/"), hits)
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn billed_read_timeout_is_sent_exactly_once() {
+        let (url, hits) = server(None).await;
+        let probe = Probe(&exa::SPEC);
+        assert!(probe.spec().billed_on_send);
+        let c = client();
+        let err = send(&probe, Duration::from_millis(600), || c.get(&url))
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), FailureCategory::Timeout);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a billed timeout was re-sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_429_is_billing_and_not_retried() {
+        let (url, hits) = server(Some(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 63\r\n\r\n{\"code\":\"INSUFFICIENT_FUNDS_CREDITS\",\"msg\":\"Remaining funds: 0\"}",
+        ))
+        .await;
+        let probe = Probe(&linkup::SPEC);
+        let c = client();
+        let err = send(&probe, Duration::from_secs(5), || c.get(&url))
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), FailureCategory::BillingQuota);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_with_retry_after_is_retried_twice() {
+        let (url, hits) = server(Some(
+            "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 4\r\n\r\nbusy",
+        ))
+        .await;
+        let probe = Probe(&serper::SPEC);
+        let c = client();
+        let err = send(&probe, Duration::from_secs(5), || c.get(&url))
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), FailureCategory::Server);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_without_retry_after_is_not_retried() {
+        let (url, hits) = server(Some(
+            "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 9\r\n\r\nslow down",
+        ))
+        .await;
+        let probe = Probe(&serper::SPEC);
+        let c = client();
+        let err = send(&probe, Duration::from_secs(5), || c.get(&url))
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), FailureCategory::RateLimit);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

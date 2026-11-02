@@ -5,8 +5,9 @@
 //! (minimal) request; scrape-only providers are probed against example.com.
 
 use crate::context::AppContext;
-use crate::providers;
-use crate::types::SearchOpts;
+use crate::errors::redact_secrets;
+use crate::providers::{self, Call};
+use crate::types::{Mode, SearchOpts};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,6 +32,16 @@ pub struct Check {
     pub category: Option<String>,
 }
 
+/// The cheapest mode that exercises the provider: general search where it
+/// has one, else its first mode (extract-only providers fetch example.com).
+fn probe_mode(modes: &[Mode]) -> Mode {
+    if modes.contains(&Mode::General) {
+        Mode::General
+    } else {
+        modes.first().copied().unwrap_or(Mode::General)
+    }
+}
+
 pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
     let mut set: JoinSet<Check> = JoinSet::new();
     let mut out = Vec::new();
@@ -38,8 +49,7 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
     for provider in providers::build_providers(&ctx) {
         let name = provider.name();
         if !provider.is_configured() {
-            // Unconfigured is healthy-by-absence: nothing to check, and the
-            // engine will never route to it.
+            // Nothing to check, and the engine will never route to it.
             out.push(Check {
                 provider: name.to_string(),
                 configured: false,
@@ -51,50 +61,33 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
             });
             continue;
         }
-        let ctx2 = ctx.clone();
         set.spawn(async move {
-            let start = Instant::now();
-            let outcome = match name {
-                // Scrape-only providers: probe with a fetch of example.com.
-                #[cfg(feature = "stealth")]
-                "stealth" => {
-                    timeout(
-                        Duration::from_secs(20),
-                        providers::stealth::Stealth::new(ctx2).scrape_url(PROBE_URL),
-                    )
-                    .await
-                }
-                "browserless" => {
-                    timeout(
-                        Duration::from_secs(20),
-                        providers::browserless::Browserless::new(ctx2).scrape_url(PROBE_URL),
-                    )
-                    .await
-                }
-                "firecrawl" => {
-                    timeout(
-                        Duration::from_secs(20),
-                        providers::firecrawl::Firecrawl::new(ctx2).scrape_url(PROBE_URL),
-                    )
-                    .await
-                }
-                // Everyone else: minimal 1-result search.
-                _ => {
-                    timeout(
-                        provider.timeout(),
-                        provider.search(PROBE_QUERY, 1, &SearchOpts::default()),
-                    )
-                    .await
-                }
+            let spec = provider.spec();
+            let mode = probe_mode(spec.modes);
+            let query = if registry_input_is_url(mode) {
+                PROBE_URL
+            } else {
+                PROBE_QUERY
             };
+            let opts = SearchOpts::default();
+            let call = Call {
+                mode,
+                query,
+                count: 1,
+                opts: &opts,
+                timeout: spec.timeout,
+            };
+            let start = Instant::now();
+            let outcome =
+                timeout(spec.timeout + Duration::from_secs(1), provider.call(&call)).await;
             let latency = start.elapsed().as_millis();
             match outcome {
-                Ok(Ok(results)) => Check {
+                Ok(Ok(output)) => Check {
                     provider: name.to_string(),
                     configured: true,
                     ok: true,
                     latency_ms: Some(latency),
-                    results: Some(results.len()),
+                    results: Some(output.results.len()),
                     error: None,
                     category: None,
                 },
@@ -104,8 +97,8 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
                     ok: false,
                     latency_ms: Some(latency),
                     results: None,
-                    category: Some(e.to_provider_failure(name).category.as_str().to_string()),
-                    error: Some(truncate(&e.to_string(), 160)),
+                    category: Some(e.category().as_str().to_string()),
+                    error: Some(truncate(&redact_secrets(&e.to_string()), 160)),
                 },
                 Err(_) => Check {
                     provider: name.to_string(),
@@ -120,11 +113,18 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
         });
     }
 
-    while let Some(Ok(check)) = set.join_next().await {
-        out.push(check);
+    // A panicked probe is skipped, not the end of the report.
+    while let Some(joined) = set.join_next().await {
+        if let Ok(check) = joined {
+            out.push(check);
+        }
     }
     out.sort_by(|a, b| a.provider.cmp(&b.provider));
     out
+}
+
+fn registry_input_is_url(mode: Mode) -> bool {
+    crate::registry::spec(mode).input == crate::registry::InputKind::Url
 }
 
 fn truncate(s: &str, max: usize) -> String {

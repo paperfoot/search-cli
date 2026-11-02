@@ -1,12 +1,34 @@
+use super::spec::{FilterSupport, Price};
+use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::types::{Mode, SearchResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 use wreq::header::{HeaderMap, HeaderValue};
 use wreq_util::Emulation;
+
+pub static SPEC: ProviderSpec = ProviderSpec {
+    name: "stealth",
+    env_keys: &[],
+    modes: &[Mode::Extract],
+    filters: FilterSupport {
+        freshness: false,
+        domains: false,
+        country: false,
+        lang: false,
+    },
+    max_count: 1,
+    timeout: Duration::from_secs(15),
+    billed_on_send: false,
+    price: Price {
+        per_call: 0,
+        per_extra_result: 0,
+        included_results: 0,
+    },
+};
 
 pub struct Stealth {
     _ctx: Arc<AppContext>,
@@ -55,7 +77,7 @@ impl Stealth {
         wreq::Client::builder()
             .emulation(Emulation::Chrome136)
             .default_headers(headers)
-            .timeout(Duration::from_secs(30))
+            .timeout(SPEC.timeout)
             .build()
             .map_err(|e| SearchError::Config(format!("Failed to build stealth client: {e}")))
     }
@@ -68,7 +90,7 @@ impl Stealth {
         })
     }
 
-    pub async fn scrape_url(&self, url_str: &str) -> Result<Vec<SearchResult>, SearchError> {
+    async fn scrape_url(&self, url_str: &str) -> Result<Vec<SearchResult>, SearchError> {
         let client = Self::build_client()?;
         let url =
             Url::parse(url_str).map_err(|e| SearchError::Config(format!("Invalid URL: {e}")))?;
@@ -183,42 +205,22 @@ fn extract_text_fallback(html: &str) -> String {
 }
 
 #[async_trait]
-impl super::Provider for Stealth {
-    fn name(&self) -> &'static str {
-        "stealth"
-    }
-
-    fn capabilities(&self) -> &[&'static str] {
-        &["scrape", "extract"]
-    }
-
-    fn env_keys(&self) -> &[&'static str] {
-        &[] // No API key needed
+impl Adapter for Stealth {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
     }
 
     fn is_configured(&self) -> bool {
-        true // No API key needed — local scraper
+        true // keyless, runs locally
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(30)
-    }
-
-    async fn search(
-        &self,
-        _query: &str,
-        _count: usize,
-        _opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        Ok(vec![])
-    }
-
-    async fn search_news(
-        &self,
-        _query: &str,
-        _count: usize,
-        _opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        Ok(vec![])
+    async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+        let results = tokio::time::timeout(call.timeout, self.scrape_url(call.query))
+            .await
+            .map_err(|_| super::timeout_error("stealth"))??;
+        Ok(Output {
+            results,
+            ..Output::default()
+        })
     }
 }

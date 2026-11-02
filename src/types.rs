@@ -113,6 +113,9 @@ pub enum FailureCategory {
     Parse,
     /// Local configuration or usage error.
     Config,
+    /// The provider answered, but with content the mode does not accept
+    /// (a challenge page, binary bytes); the chain moved on.
+    Rejected,
     /// Anything else.
     Other,
 }
@@ -129,6 +132,7 @@ impl FailureCategory {
             Self::Server => "server",
             Self::Parse => "parse",
             Self::Config => "config",
+            Self::Rejected => "rejected",
             Self::Other => "other",
         }
     }
@@ -192,10 +196,22 @@ pub struct ResponseMetadata {
     /// Names of providers that failed. Kept for backward compatibility; see
     /// `provider_failures` for the reason behind each.
     pub providers_failed: Vec<String>,
-    /// Providers cancelled by the early-stop grace window after enough unique
-    /// results had already arrived. They neither failed nor contributed.
+    /// Always empty since 0.10: a call that was sent is paid for, so the
+    /// engine never cancels one before the mode deadline. Kept so old
+    /// consumers and log readers keep parsing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers_cancelled: Vec<String>,
+    /// Providers still running when the mode deadline passed. Each also has a
+    /// `timeout` entry in `provider_failures`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers_timed_out: Vec<String>,
+    /// How each queried provider was reached: "direct" (own key) or "local"
+    /// (keyless, runs on this machine).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub transport: std::collections::BTreeMap<String, String>,
+    /// What this search cost upstream, per provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostSummary>,
     /// Results each provider actually contributed (pre-dedup), so the fused
     /// list is auditable: absent name = returned nothing or was cancelled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -212,6 +228,30 @@ pub struct ResponseMetadata {
     /// Per-provider failure detail (category, HTTP status, reason, retryable).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_failures: Vec<ProviderFailure>,
+}
+
+/// Cost of one search in micro-USD (1 USD = 1,000,000).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CostSummary {
+    pub micros: u64,
+    pub usd: f64,
+    /// "estimate" (list price, or the upstream's own figure, for calls made
+    /// with your keys), "charged" (billed by metasearch.sh), or "mixed".
+    pub basis: String,
+    pub by_provider: std::collections::BTreeMap<String, u64>,
+}
+
+impl CostSummary {
+    /// Estimated cost from per-provider micro-USD amounts.
+    pub fn estimate(by_provider: std::collections::BTreeMap<String, u64>) -> Self {
+        let micros = by_provider.values().sum();
+        Self {
+            micros,
+            usd: micros as f64 / 1_000_000.0,
+            basis: "estimate".to_string(),
+            by_provider,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

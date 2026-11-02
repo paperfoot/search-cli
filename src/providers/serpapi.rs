@@ -1,9 +1,32 @@
+use super::spec::{FilterSupport, Price};
+use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::types::{Mode, SearchOpts, SearchResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub static SPEC: ProviderSpec = ProviderSpec {
+    name: "serpapi",
+    env_keys: &["SERPAPI_API_KEY"],
+    modes: &[Mode::Scholar],
+    // Scholar sends no filters today (the engine warns).
+    filters: FilterSupport {
+        freshness: false,
+        domains: false,
+        country: false,
+        lang: false,
+    },
+    max_count: 20,
+    timeout: Duration::from_secs(15),
+    billed_on_send: true,
+    price: Price {
+        per_call: 25_000,
+        per_extra_result: 0,
+        included_results: 0,
+    },
+};
 
 pub struct SerpApi {
     ctx: Arc<AppContext>,
@@ -15,37 +38,22 @@ impl SerpApi {
     }
 
     fn api_key(&self) -> String {
-        super::resolve_key(&self.ctx.config.keys.serpapi, "SERPAPI_API_KEY")
-    }
-
-    pub fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        super::key_for(&self.ctx.config, &SPEC)
     }
 
     async fn query_endpoint(
         &self,
         engine: &str,
-        query: &str,
-        count: usize,
+        call: &Call<'_>,
         opts: &SearchOpts,
     ) -> Result<serde_json::Value, SearchError> {
-        if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing {
-                provider: "serpapi",
-            });
-        }
-
-        let q = augment_query(query, opts);
         let client = &self.ctx.client;
-        let api_key = self.api_key().to_string();
-
         let mut params = vec![
-            ("engine".to_string(), engine.to_string()),
-            ("q".to_string(), q),
-            ("num".to_string(), count.to_string()),
-            ("api_key".to_string(), api_key),
+            ("engine", engine.to_string()),
+            ("q", super::augment_query(call.query, opts)),
+            ("num", call.count.to_string()),
+            ("api_key", self.api_key()),
         ];
-
         if let Some(f) = &opts.freshness {
             let tbs = match f.as_str() {
                 "day" => "qdr:d",
@@ -54,39 +62,21 @@ impl SerpApi {
                 "year" => "qdr:y",
                 other => other,
             };
-            params.push(("tbs".to_string(), tbs.to_string()));
+            params.push(("tbs", tbs.to_string()));
         }
         if let Some(country) = &opts.country {
-            params.push(("gl".to_string(), country.to_lowercase()));
+            params.push(("gl", country.to_lowercase()));
         }
         if let Some(lang) = &opts.lang {
-            params.push(("hl".to_string(), lang.to_lowercase()));
+            params.push(("hl", lang.to_lowercase()));
         }
 
-        super::retry_request(|| async {
-            let resp = client
-                .get("https://serpapi.com/search")
-                .query(&params)
-                .send()
-                .await?;
-
-            let resp = super::ok_or_api_error(resp, "serpapi").await?;
-
-            Ok(resp.json().await?)
+        let resp = super::send(self, call.timeout, || {
+            client.get("https://serpapi.com/search").query(&params)
         })
-        .await
+        .await?;
+        Ok(resp.json().await?)
     }
-}
-
-fn augment_query(query: &str, opts: &SearchOpts) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
-    q
 }
 
 fn parse_results(body: &serde_json::Value, key: &str, source: &str) -> Vec<SearchResult> {
@@ -95,50 +85,22 @@ fn parse_results(body: &serde_json::Value, key: &str, source: &str) -> Vec<Searc
         .map(|arr| {
             arr.iter()
                 .map(|item| {
-                    let title = item
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let url = item
-                        .get("link")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let snippet = item
-                        .get("snippet")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let published = item.get("date").and_then(|v| v.as_str()).map(String::from);
-                    let image_url = None;
-
-                    // For scholar results, attach citation info as extra
-                    let extra = if source == "serpapi_scholar" {
-                        let mut map = serde_json::Map::new();
-                        if let Some(pub_info) = item.get("publication_info") {
-                            map.insert("publication_info".to_string(), pub_info.clone());
+                    let str_of = |k: &str| item.get(k).and_then(|v| v.as_str()).map(String::from);
+                    // Scholar results carry citation info in extra.
+                    let mut map = serde_json::Map::new();
+                    for k in ["publication_info", "cited_by"] {
+                        if let Some(v) = item.get(k) {
+                            map.insert(k.to_string(), v.clone());
                         }
-                        if let Some(cited) = item.get("cited_by") {
-                            map.insert("cited_by".to_string(), cited.clone());
-                        }
-                        if map.is_empty() {
-                            None
-                        } else {
-                            Some(serde_json::Value::Object(map))
-                        }
-                    } else {
-                        None
-                    };
-
+                    }
                     SearchResult {
-                        title,
-                        url,
-                        snippet,
+                        title: str_of("title").unwrap_or_default(),
+                        url: str_of("link").unwrap_or_default(),
+                        snippet: str_of("snippet").unwrap_or_default(),
                         source: source.to_string(),
-                        published,
-                        image_url,
-                        extra,
+                        published: str_of("date"),
+                        image_url: None,
+                        extra: (!map.is_empty()).then_some(serde_json::Value::Object(map)),
                     }
                 })
                 .collect()
@@ -147,55 +109,27 @@ fn parse_results(body: &serde_json::Value, key: &str, source: &str) -> Vec<Searc
 }
 
 #[async_trait]
-impl super::Provider for SerpApi {
-    fn name(&self) -> &'static str {
-        "serpapi"
+impl Adapter for SerpApi {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
     }
-    fn env_keys(&self) -> &[&'static str] {
-        &["SERPAPI_API_KEY", "SEARCH_KEYS_SERPAPI"]
-    }
-    fn capabilities(&self) -> &[&'static str] {
-        &["general", "news", "scholar", "images"]
-    }
+
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
     }
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(10)
-    }
 
-    async fn search(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        let body = self.query_endpoint("google", query, count, opts).await?;
-        Ok(parse_results(&body, "organic_results", "serpapi"))
-    }
-
-    async fn search_news(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
+    async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+        if !self.is_configured() {
+            return Err(SearchError::AuthMissing {
+                provider: "serpapi",
+            });
+        }
         let body = self
-            .query_endpoint("google_news", query, count, opts)
+            .query_endpoint("google_scholar", call, &super::NO_FILTERS)
             .await?;
-        Ok(parse_results(&body, "news_results", "serpapi_news"))
-    }
-}
-
-impl SerpApi {
-    pub async fn search_scholar(
-        &self,
-        query: &str,
-        count: usize,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        let body = self
-            .query_endpoint("google_scholar", query, count, &SearchOpts::default())
-            .await?;
-        Ok(parse_results(&body, "organic_results", "serpapi_scholar"))
+        Ok(Output {
+            results: parse_results(&body, "organic_results", "serpapi_scholar"),
+            ..Output::default()
+        })
     }
 }

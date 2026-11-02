@@ -61,6 +61,29 @@ pub struct ApiKeys {
     pub xai: String,
 }
 
+impl ApiKeys {
+    /// The file/`SEARCH_KEYS_*` value for a provider, or None when the
+    /// provider takes no key.
+    pub fn get(&self, provider: &str) -> Option<&str> {
+        let v = match provider {
+            "parallel" => &self.parallel,
+            "brave" => &self.brave,
+            "serper" => &self.serper,
+            "exa" => &self.exa,
+            "jina" => &self.jina,
+            "linkup" => &self.linkup,
+            "firecrawl" => &self.firecrawl,
+            "tavily" => &self.tavily,
+            "serpapi" => &self.serpapi,
+            "perplexity" => &self.perplexity,
+            "browserless" => &self.browserless,
+            "xai" => &self.xai,
+            _ => return None,
+        };
+        Some(v.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_timeout")]

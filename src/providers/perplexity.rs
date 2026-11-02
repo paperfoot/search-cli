@@ -1,11 +1,35 @@
+use super::spec::{FilterSupport, Price};
+use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::types::{Answer, Mode, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub static SPEC: ProviderSpec = ProviderSpec {
+    name: "perplexity",
+    env_keys: &["PERPLEXITY_API_KEY"],
+    modes: &[Mode::General, Mode::News, Mode::Academic, Mode::Deep],
+    filters: FilterSupport {
+        freshness: true,
+        domains: true,
+        country: false,
+        lang: false,
+    },
+    max_count: 20,
+    timeout: Duration::from_secs(15),
+    billed_on_send: true,
+    price: Price {
+        per_call: 5_000,
+        per_extra_result: 0,
+        included_results: 0,
+    },
+};
+
+const MODEL: &str = "sonar-pro";
 
 pub struct Perplexity {
     ctx: Arc<AppContext>,
@@ -17,138 +41,7 @@ impl Perplexity {
     }
 
     fn api_key(&self) -> String {
-        super::resolve_key(&self.ctx.config.keys.perplexity, "PERPLEXITY_API_KEY")
-    }
-
-    async fn do_search(
-        &self,
-        query: &str,
-        opts: &SearchOpts,
-        model: &str,
-        recency_filter: Option<&str>,
-        search_mode: Option<&str>,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing {
-                provider: "perplexity",
-            });
-        }
-
-        let mut body = json!({
-            "model": model,
-            "messages": [{"role": "user", "content": query}],
-            "return_related_questions": false,
-            "return_images": false,
-            "web_search_options": {
-                "search_context_size": "high"
-            },
-        });
-
-        // Search mode: academic, sec, or web (default)
-        if let Some(sm) = search_mode {
-            body["search_mode"] = json!(sm);
-        }
-
-        // Apply domain filters from opts. Perplexity's search_domain_filter
-        // takes one array; exclusions are entries prefixed with '-'.
-        if !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty() {
-            let domains: Vec<String> = opts
-                .include_domains
-                .iter()
-                .cloned()
-                .chain(opts.exclude_domains.iter().map(|d| format!("-{d}")))
-                .collect();
-            body["search_domain_filter"] = json!(domains);
-        }
-
-        // Apply recency filter: explicit param first, then opts.freshness
-        let recency = recency_filter.or(opts.freshness.as_deref());
-        if let Some(r) = recency {
-            body["search_recency_filter"] = json!(r);
-        }
-
-        // Perplexity needs a longer timeout than the global 10s client
-        let pplx_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(45))
-            .build()
-            .unwrap_or_else(|_| self.ctx.client.clone());
-        let key = self.api_key().to_string();
-        let resp = super::retry_request(|| {
-            let body = body.clone();
-            let key = key.clone();
-            let pplx_client = pplx_client.clone();
-            async move {
-                let r = pplx_client
-                    .post("https://api.perplexity.ai/chat/completions")
-                    .header("Authorization", format!("Bearer {key}"))
-                    .json(&body)
-                    .send()
-                    .await?;
-                if r.status() == 429 {
-                    return Err(SearchError::RateLimited {
-                        provider: "perplexity",
-                    });
-                }
-                let r = super::ok_or_api_error(r, "perplexity").await?;
-                Ok(r.json::<PerplexityResponse>().await?)
-            }
-        })
-        .await?;
-
-        let mut results = Vec::new();
-        let source_label = format!("perplexity_{model}");
-
-        // Extract the AI answer from the first choice
-        let answer = resp
-            .choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .unwrap_or_default();
-
-        results.push(SearchResult {
-            title: "AI Answer".to_string(),
-            url: "perplexity://answer".to_string(),
-            snippet: answer,
-            source: source_label.clone(),
-            published: None,
-            image_url: None,
-            extra: None,
-        });
-
-        // Use structured search_results if available (sonar-pro returns these)
-        if let Some(search_results) = resp.search_results {
-            for sr in search_results {
-                results.push(SearchResult {
-                    title: sr.title.unwrap_or_default(),
-                    url: sr.url.unwrap_or_default(),
-                    snippet: sr.snippet.unwrap_or_else(|| "[Search result]".to_string()),
-                    source: format!("{source_label}_result"),
-                    published: sr.date,
-                    image_url: None,
-                    extra: None,
-                });
-            }
-        } else if let Some(citations) = resp.citations {
-            // Fallback: one result per citation URL
-            for cite_url in citations {
-                let hostname = url::Url::parse(&cite_url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(|h| h.to_string()))
-                    .unwrap_or_else(|| cite_url.clone());
-
-                results.push(SearchResult {
-                    title: hostname,
-                    url: cite_url,
-                    snippet: "[Citation]".to_string(),
-                    source: "perplexity_citation".to_string(),
-                    published: None,
-                    image_url: None,
-                    extra: None,
-                });
-            }
-        }
-
-        Ok(results)
+        super::key_for(&self.ctx.config, &SPEC)
     }
 }
 
@@ -178,42 +71,114 @@ struct PerplexitySearchResult {
 }
 
 #[async_trait]
-impl super::Provider for Perplexity {
-    fn name(&self) -> &'static str {
-        "perplexity"
+impl Adapter for Perplexity {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
     }
-    fn env_keys(&self) -> &[&'static str] {
-        &["PERPLEXITY_API_KEY", "SEARCH_KEYS_PERPLEXITY"]
-    }
-    fn capabilities(&self) -> &[&'static str] {
-        &["general", "news", "academic", "deep"]
-    }
+
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
     }
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(30)
-    }
 
-    async fn search(
-        &self,
-        query: &str,
-        _count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        // Use sonar-pro for better results with structured search_results
-        self.do_search(query, opts, "sonar-pro", None, None).await
-    }
+    async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+        if !self.is_configured() {
+            return Err(SearchError::AuthMissing {
+                provider: "perplexity",
+            });
+        }
+        let opts = call.opts;
+        let mut body = json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": call.query}],
+            "return_related_questions": false,
+            "return_images": false,
+            "web_search_options": {
+                "search_context_size": "high"
+            },
+        });
 
-    async fn search_news(
-        &self,
-        query: &str,
-        _count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        // Default to "day" recency for news if no freshness specified
-        let recency = opts.freshness.as_deref().unwrap_or("day");
-        self.do_search(query, opts, "sonar-pro", Some(recency), None)
-            .await
+        // Perplexity's search_domain_filter takes one array; exclusions are
+        // entries prefixed with '-'.
+        if !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty() {
+            let domains: Vec<String> = opts
+                .include_domains
+                .iter()
+                .cloned()
+                .chain(opts.exclude_domains.iter().map(|d| format!("-{d}")))
+                .collect();
+            body["search_domain_filter"] = json!(domains);
+        }
+
+        // News without an explicit -f defaults to the last day.
+        let recency = opts
+            .freshness
+            .as_deref()
+            .or((call.mode == Mode::News).then_some("day"));
+        if let Some(r) = recency {
+            body["search_recency_filter"] = json!(r);
+        }
+
+        let client = &self.ctx.client;
+        let key = self.api_key();
+        let resp = super::send(self, call.timeout, || {
+            client
+                .post("https://api.perplexity.ai/chat/completions")
+                .bearer_auth(&key)
+                .json(&body)
+        })
+        .await?;
+        let resp: PerplexityResponse = resp.json().await?;
+
+        let source_label = format!("perplexity_{MODEL}");
+        let answers = resp
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| Answer {
+                provider: "perplexity".to_string(),
+                text,
+            })
+            .into_iter()
+            .collect();
+
+        let mut results = Vec::new();
+        if let Some(search_results) = resp.search_results {
+            for sr in search_results {
+                results.push(SearchResult {
+                    title: sr.title.unwrap_or_default(),
+                    url: sr.url.unwrap_or_default(),
+                    snippet: sr.snippet.unwrap_or_else(|| "[Search result]".to_string()),
+                    source: format!("{source_label}_result"),
+                    published: sr.date,
+                    image_url: None,
+                    extra: None,
+                });
+            }
+        } else if let Some(citations) = resp.citations {
+            // Fallback: one result per citation URL
+            for cite_url in citations {
+                let hostname = url::Url::parse(&cite_url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_string()))
+                    .unwrap_or_else(|| cite_url.clone());
+                results.push(SearchResult {
+                    title: hostname,
+                    url: cite_url,
+                    snippet: "[Citation]".to_string(),
+                    source: "perplexity_citation".to_string(),
+                    published: None,
+                    image_url: None,
+                    extra: None,
+                });
+            }
+        }
+
+        Ok(Output {
+            results,
+            answers,
+            cost_micros: None,
+        })
     }
 }

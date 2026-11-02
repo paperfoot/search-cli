@@ -14,11 +14,18 @@ pub enum SearchError {
         status: Option<u16>,
     },
 
+    /// A non-2xx answer from a provider, classified from its body as well as
+    /// its status (see [`classify_http`]).
+    #[error("API error from {provider}: {message}")]
+    Upstream {
+        provider: &'static str,
+        status: u16,
+        category: FailureCategory,
+        message: String,
+    },
+
     #[error("Authentication missing for {provider}")]
     AuthMissing { provider: &'static str },
-
-    #[error("Rate limited by {provider}")]
-    RateLimited { provider: &'static str },
 
     #[error("Configuration error: {0}")]
     Config(String),
@@ -54,11 +61,10 @@ impl SearchError {
         match self {
             Self::Config(_) | Self::NoProviders(_) | Self::AuthMissing { .. } => 2,
             Self::InvalidInput { .. } => 3,
-            Self::RateLimited { .. } => 4,
             Self::AllProvidersFailed { failed } => exit_code_for_failures(failed),
             #[cfg(feature = "stealth")]
             Self::Wreq(_) => 1,
-            Self::Api { .. } | Self::Http(_) | Self::Resolver(_) => 1,
+            Self::Api { .. } | Self::Upstream { .. } | Self::Http(_) | Self::Resolver(_) => 1,
             Self::Json(_) | Self::Io(_) => 1,
         }
     }
@@ -66,8 +72,8 @@ impl SearchError {
     pub fn error_code(&self) -> &'static str {
         match self {
             Self::Api { code, .. } => code,
+            Self::Upstream { .. } => "api_error",
             Self::AuthMissing { .. } => "auth_missing",
-            Self::RateLimited { .. } => "rate_limited",
             Self::Config(_) => "config_error",
             Self::NoProviders(_) => "no_providers",
             Self::InvalidInput { .. } => "invalid_input",
@@ -86,24 +92,21 @@ impl SearchError {
         use FailureCategory as C;
         match self {
             Self::AuthMissing { .. } => C::Auth,
-            Self::RateLimited { .. } => C::RateLimit,
+            Self::Upstream { category, .. } => *category,
             Self::Api { status, code, .. } => {
                 if *code == "json_error" {
                     return C::Parse;
                 }
                 match status {
-                    Some(401) | Some(403) => C::Auth,
-                    Some(402) => C::BillingQuota,
-                    Some(429) => C::RateLimit,
-                    Some(408) => C::Timeout,
-                    Some(s) if *s >= 500 => C::Server,
-                    Some(s) if *s >= 400 => C::BadRequest,
-                    _ => C::Other,
+                    Some(s) => category_for_status(*s),
+                    None => C::Other,
                 }
             }
             Self::Http(e) => {
                 if e.is_timeout() {
                     C::Timeout
+                } else if e.is_decode() {
+                    C::Parse
                 } else {
                     C::Network
                 }
@@ -121,6 +124,7 @@ impl SearchError {
     pub fn http_status(&self) -> Option<u16> {
         match self {
             Self::Api { status, .. } => *status,
+            Self::Upstream { status, .. } => Some(*status),
             Self::Http(e) => e.status().map(|s| s.as_u16()),
             _ => None,
         }
@@ -155,10 +159,6 @@ impl SearchError {
                 "No providers configured for mode '{}'. Run: search config check",
                 mode
             )),
-            Self::RateLimited { provider } => Some(format!(
-                "Rate limited by {}. Wait and retry, or use a different provider: search -p <other>",
-                provider
-            )),
             Self::InvalidInput { .. } => Some("Check arguments with: search --help".to_string()),
             Self::AllProvidersFailed { failed } => Some(suggestion_for_failures(failed)),
             Self::Resolver(_) => Some(
@@ -184,6 +184,74 @@ impl SearchError {
                 provider_failures,
             },
         }
+    }
+}
+
+/// Category of a non-2xx response: the adapter's own reading of the body
+/// first, then generic body rules, then the status alone. Status alone gets
+/// live providers wrong: Linkup reports an empty balance as 429, Perplexity
+/// an exhausted quota as 401, Brave a dead key as 422.
+pub fn classify_http(
+    adapter_says: Option<FailureCategory>,
+    status: u16,
+    body: &str,
+) -> FailureCategory {
+    adapter_says
+        .or_else(|| classify_body(status, body))
+        .unwrap_or_else(|| category_for_status(status))
+}
+
+/// Generic body rules for 4xx answers (a 5xx body describes the provider's
+/// trouble, not the caller's account).
+pub fn classify_body(status: u16, body: &str) -> Option<FailureCategory> {
+    if !(400..500).contains(&status) {
+        return None;
+    }
+    let b = body.to_ascii_lowercase();
+    const BILLING: &[&str] = &["quota", "credits", "funds", "insufficient", "balance"];
+    if BILLING.iter().any(|w| b.contains(w)) {
+        return Some(FailureCategory::BillingQuota);
+    }
+    if b.contains("unauthorized") || b.contains("unauthenticated") || invalid_credential(&b) {
+        return Some(FailureCategory::Auth);
+    }
+    None
+}
+
+/// "invalid … key/token" or "key/token … invalid", within a short window so
+/// an unrelated "invalid" elsewhere in a long body doesn't count.
+fn invalid_credential(b: &str) -> bool {
+    const WINDOW: usize = 40;
+    let near = |from: usize, to: usize| -> &str {
+        let lo = (0..=from)
+            .rev()
+            .find(|i| b.is_char_boundary(*i))
+            .unwrap_or(0);
+        let hi = (to.min(b.len())..=b.len())
+            .find(|i| b.is_char_boundary(*i))
+            .unwrap_or(b.len());
+        &b[lo..hi]
+    };
+    b.match_indices("invalid").any(|(i, _)| {
+        let after = near(i, i + 7 + WINDOW);
+        let before = near(i.saturating_sub(WINDOW), i);
+        ["key", "token"]
+            .iter()
+            .any(|w| after.contains(w) || before.contains(w))
+    })
+}
+
+/// Status-only fallback.
+pub fn category_for_status(status: u16) -> FailureCategory {
+    use FailureCategory as C;
+    match status {
+        401 | 403 => C::Auth,
+        402 => C::BillingQuota,
+        429 => C::RateLimit,
+        408 => C::Timeout,
+        s if s >= 500 => C::Server,
+        s if s >= 400 => C::BadRequest,
+        _ => C::Other,
     }
 }
 
@@ -300,7 +368,7 @@ mod tests {
             SearchError::AllProvidersFailed { failed: auth }.exit_code(),
             2
         );
-        let rate = vec![SearchError::RateLimited { provider: "a" }.to_provider_failure("a")];
+        let rate = vec![api(429).to_provider_failure("a")];
         assert_eq!(
             SearchError::AllProvidersFailed { failed: rate }.exit_code(),
             4
@@ -313,6 +381,31 @@ mod tests {
             SearchError::AllProvidersFailed { failed: mixed }.exit_code(),
             1
         );
+    }
+
+    #[test]
+    fn body_rules_fix_status_only_categories() {
+        use FailureCategory as C;
+        // Linkup: an empty balance comes back as 429.
+        let linkup =
+            r#"{"error":{"code":"INSUFFICIENT_FUNDS_CREDITS","message":"Remaining funds: 0"}}"#;
+        assert_eq!(classify_http(None, 429, linkup), C::BillingQuota);
+        // Perplexity: an exhausted quota comes back as 401.
+        let pplx = "You exceeded your current quota, please add credits";
+        assert_eq!(classify_http(None, 401, pplx), C::BillingQuota);
+        // Brave: a dead key comes back as 422.
+        let brave = r#"{"error":{"detail":"The provided API key is invalid."}}"#;
+        assert_eq!(classify_http(None, 422, brave), C::Auth);
+        assert_eq!(classify_http(None, 400, "token invalid"), C::Auth);
+        // An unrelated "invalid" stays a bad request.
+        assert_eq!(
+            classify_http(None, 400, "invalid count parameter"),
+            C::BadRequest
+        );
+        // The adapter's own reading wins; 5xx bodies don't move the category.
+        assert_eq!(classify_http(Some(C::Auth), 429, linkup), C::Auth);
+        assert_eq!(classify_http(None, 503, "balance service down"), C::Server);
+        assert_eq!(classify_http(None, 429, "slow down"), C::RateLimit);
     }
 
     #[test]

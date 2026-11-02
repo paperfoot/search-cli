@@ -1,10 +1,32 @@
+use super::spec::{FilterSupport, Price};
+use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::types::{Mode, SearchOpts, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub static SPEC: ProviderSpec = ProviderSpec {
+    name: "brave",
+    env_keys: &["BRAVE_API_KEY"],
+    modes: &[Mode::General, Mode::News, Mode::Deep],
+    filters: FilterSupport {
+        freshness: true,
+        domains: true,
+        country: true,
+        lang: true,
+    },
+    max_count: 20,
+    timeout: Duration::from_secs(15),
+    billed_on_send: true,
+    price: Price {
+        per_call: 5_000,
+        per_extra_result: 0,
+        included_results: 0,
+    },
+};
 
 pub struct Brave {
     ctx: Arc<AppContext>,
@@ -16,7 +38,7 @@ impl Brave {
     }
 
     fn api_key(&self) -> String {
-        super::resolve_key(&self.ctx.config.keys.brave, "BRAVE_API_KEY")
+        super::key_for(&self.ctx.config, &SPEC)
     }
 }
 
@@ -63,265 +85,228 @@ fn map_freshness(f: &str) -> &str {
     }
 }
 
-/// Append site: operators for domain filtering
-fn augment_query(query: &str, opts: &SearchOpts) -> String {
-    let mut q = query.to_string();
-    for d in &opts.include_domains {
-        q = format!("{q} site:{d}");
-    }
-    for d in &opts.exclude_domains {
-        q = format!("{q} -site:{d}");
-    }
-    q
-}
-
 #[async_trait]
-impl super::Provider for Brave {
-    fn name(&self) -> &'static str {
-        "brave"
-    }
-
-    fn capabilities(&self) -> &[&'static str] {
-        &["general", "news", "deep"]
-    }
-
-    fn env_keys(&self) -> &[&'static str] {
-        &["BRAVE_API_KEY", "SEARCH_KEYS_BRAVE"]
+impl Adapter for Brave {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
     }
 
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(10)
-    }
-
-    async fn search(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
+    async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "brave" });
         }
+        let per_call = SPEC.price.per_call as u64;
+        match call.mode {
+            Mode::News => Ok(Output {
+                results: self.search_news(call).await?,
+                ..Output::default()
+            }),
+            // Deep = web search plus LLM Context, concurrently, inside one
+            // provider call, so `-p` governs both and the cost is one line.
+            Mode::Deep => {
+                let (web, grounding) = tokio::join!(self.search(call), self.llm_context(call));
+                let calls_ok = web.is_ok() as u64 + grounding.is_ok() as u64;
+                let results = match (web, grounding) {
+                    (Ok(w), Ok(g)) => merge(w, g),
+                    (Ok(w), Err(e)) => {
+                        tracing::warn!("brave llm context: {e}");
+                        w
+                    }
+                    (Err(e), Ok(g)) => {
+                        tracing::warn!("brave web: {e}");
+                        g
+                    }
+                    (Err(e), Err(_)) => return Err(e),
+                };
+                Ok(Output {
+                    results,
+                    answers: Vec::new(),
+                    cost_micros: Some(per_call * calls_ok),
+                })
+            }
+            _ => Ok(Output {
+                results: self.search(call).await?,
+                ..Output::default()
+            }),
+        }
+    }
+}
 
+/// Web results first, then grounding results for URLs web search missed.
+fn merge(web: Vec<SearchResult>, grounding: Vec<SearchResult>) -> Vec<SearchResult> {
+    let seen: std::collections::HashSet<String> = web
+        .iter()
+        .map(|r| r.url.trim_end_matches('/').to_string())
+        .collect();
+    let mut out = web;
+    out.extend(
+        grounding
+            .into_iter()
+            .filter(|r| !seen.contains(r.url.trim_end_matches('/'))),
+    );
+    out
+}
+
+fn common_params(
+    mut req: reqwest::RequestBuilder,
+    opts: &SearchOpts,
+    with_locale: bool,
+) -> reqwest::RequestBuilder {
+    if let Some(f) = opts.freshness.as_deref().map(map_freshness) {
+        req = req.query(&[("freshness", f)]);
+    }
+    if with_locale {
+        if let Some(country) = &opts.country {
+            req = req.query(&[("country", country.to_uppercase())]);
+        }
+        if let Some(lang) = &opts.lang {
+            req = req.query(&[("search_lang", lang.to_lowercase())]);
+        }
+    }
+    req
+}
+
+impl Brave {
+    async fn search(&self, call: &Call<'_>) -> Result<Vec<SearchResult>, SearchError> {
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        let count_str = count.to_string();
-        let q = augment_query(query, opts);
-        let freshness = opts.freshness.as_deref().map(map_freshness);
+        let count = call.count.to_string();
+        let q = super::augment_query(call.query, call.opts);
 
-        super::retry_request(|| async {
-            let mut req = client
+        let resp = super::send(self, call.timeout, || {
+            let req = client
                 .get("https://api.search.brave.com/res/v1/web/search")
                 .header("X-Subscription-Token", api_key.as_str())
                 .header("Accept", "application/json")
                 .query(&[
                     ("q", q.as_str()),
-                    ("count", &count_str),
+                    ("count", count.as_str()),
                     ("extra_snippets", "true"),
                 ]);
-
-            if let Some(f) = freshness {
-                req = req.query(&[("freshness", f)]);
-            }
-            if let Some(country) = &opts.country {
-                req = req.query(&[("country", country.to_uppercase())]);
-            }
-            if let Some(lang) = &opts.lang {
-                req = req.query(&[("search_lang", lang.to_lowercase())]);
-            }
-
-            let resp = req.send().await?;
-
-            let resp = super::ok_or_api_error(resp, "brave").await?;
-
-            let body_bytes = resp.bytes().await?;
-            let mut body_vec = body_bytes.to_vec();
-            let body: BraveResponse =
-                simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
-                    provider: "brave",
-                    code: "json_error",
-                    status: None,
-                    message: e.to_string(),
-                })?;
-            let results = body
-                .web
-                .map(|w| w.results)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| {
-                    // Combine description with extra snippets for richer context
-                    let mut snippet = r.description.unwrap_or_default();
-                    if let Some(extras) = r.extra_snippets {
-                        for extra in extras {
-                            snippet = format!("{snippet}\n{extra}");
-                        }
-                    }
-                    SearchResult {
-                        title: r.title.unwrap_or_default(),
-                        url: r.url.unwrap_or_default(),
-                        snippet,
-                        source: "brave".to_string(),
-                        published: None,
-                        image_url: None,
-                        extra: None,
-                    }
-                })
-                .collect();
-
-            Ok(results)
+            common_params(req, call.opts, true)
         })
-        .await
+        .await?;
+
+        let body: BraveResponse = resp.json().await?;
+        Ok(body
+            .web
+            .map(|w| w.results)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| {
+                // Description plus extra snippets for richer context.
+                let mut snippet = r.description.unwrap_or_default();
+                for extra in r.extra_snippets.unwrap_or_default() {
+                    snippet.push('\n');
+                    snippet.push_str(&extra);
+                }
+                SearchResult {
+                    title: r.title.unwrap_or_default(),
+                    url: r.url.unwrap_or_default(),
+                    snippet,
+                    source: "brave".to_string(),
+                    published: None,
+                    image_url: None,
+                    extra: None,
+                }
+            })
+            .collect())
     }
 
-    async fn search_news(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        if !self.is_configured() {
-            return Err(SearchError::AuthMissing { provider: "brave" });
-        }
-
+    async fn search_news(&self, call: &Call<'_>) -> Result<Vec<SearchResult>, SearchError> {
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        let count_str = count.to_string();
-        let q = augment_query(query, opts);
-        let freshness = opts.freshness.as_deref().map(map_freshness);
+        let count = call.count.to_string();
+        let q = super::augment_query(call.query, call.opts);
 
-        super::retry_request(|| async {
-            let mut req = client
+        let resp = super::send(self, call.timeout, || {
+            let req = client
                 .get("https://api.search.brave.com/res/v1/news/search")
                 .header("X-Subscription-Token", api_key.as_str())
                 .header("Accept", "application/json")
-                .query(&[("q", q.as_str()), ("count", &count_str)]);
-
-            if let Some(f) = freshness {
-                req = req.query(&[("freshness", f)]);
-            }
-            if let Some(country) = &opts.country {
-                req = req.query(&[("country", country.to_uppercase())]);
-            }
-            if let Some(lang) = &opts.lang {
-                req = req.query(&[("search_lang", lang.to_lowercase())]);
-            }
-
-            let resp = req.send().await?;
-
-            let resp = super::ok_or_api_error(resp, "brave").await?;
-
-            let body_bytes = resp.bytes().await?;
-            let mut body_vec = body_bytes.to_vec();
-            let body: BraveResponse =
-                simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
-                    provider: "brave",
-                    code: "json_error",
-                    status: None,
-                    message: e.to_string(),
-                })?;
-            let results = body
-                .news
-                .map(|n| n.results)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| SearchResult {
-                    title: r.title.unwrap_or_default(),
-                    url: r.url.unwrap_or_default(),
-                    snippet: r.description.unwrap_or_default(),
-                    source: "brave_news".to_string(),
-                    published: r.age,
-                    image_url: None,
-                    extra: None,
-                })
-                .collect();
-
-            Ok(results)
+                .query(&[("q", q.as_str()), ("count", count.as_str())]);
+            common_params(req, call.opts, true)
         })
-        .await
+        .await?;
+
+        let body: BraveResponse = resp.json().await?;
+        Ok(body
+            .news
+            .map(|n| n.results)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| SearchResult {
+                title: r.title.unwrap_or_default(),
+                url: r.url.unwrap_or_default(),
+                snippet: r.description.unwrap_or_default(),
+                source: "brave_news".to_string(),
+                published: r.age,
+                image_url: None,
+                extra: None,
+            })
+            .collect())
     }
-}
 
-impl Brave {
-    /// LLM Context API — returns pre-extracted, relevance-scored content for RAG/grounding
-    pub async fn search_llm_context(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing { provider: "brave" });
-        }
-
+    /// LLM Context API — pre-extracted, relevance-scored content for grounding.
+    async fn llm_context(&self, call: &Call<'_>) -> Result<Vec<SearchResult>, SearchError> {
         let client = &self.ctx.client;
         let api_key = self.api_key();
-        let q = augment_query(query, opts);
-        let count_str = count.to_string();
-        let freshness = opts.freshness.as_deref().map(map_freshness);
+        let q = super::augment_query(call.query, call.opts);
+        let count = call.count.to_string();
 
-        super::retry_request(|| async {
-            let mut req = client
+        let resp = super::send(self, call.timeout, || {
+            let req = client
                 .get("https://api.search.brave.com/res/v1/llm/context")
                 .header("X-Subscription-Token", api_key.as_str())
                 .header("Accept", "application/json")
                 .query(&[
                     ("q", q.as_str()),
-                    ("count", &count_str),
+                    ("count", count.as_str()),
                     ("maximum_number_of_tokens", "16384"),
                     ("context_threshold_mode", "balanced"),
                 ]);
-
-            if let Some(f) = freshness {
-                req = req.query(&[("freshness", f)]);
-            }
-
-            let resp = req.send().await?;
-
-            let resp = super::ok_or_api_error(resp, "brave").await?;
-
-            let body: serde_json::Value = resp.json().await?;
-            let mut results = Vec::new();
-
-            // Parse grounding.generic array
-            if let Some(generic) = body
-                .pointer("/grounding/generic")
-                .and_then(|v| v.as_array())
-            {
-                for item in generic {
-                    let url = item.get("url").and_then(|v| v.as_str()).unwrap_or_default();
-                    let title = item
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let snippets = item
-                        .get("snippets")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        })
-                        .unwrap_or_default();
-
-                    results.push(SearchResult {
-                        title: title.to_string(),
-                        url: url.to_string(),
-                        snippet: snippets,
-                        source: "brave_llm_context".to_string(),
-                        published: None,
-                        image_url: None,
-                        extra: None,
-                    });
-                }
-            }
-
-            Ok(results)
+            common_params(req, call.opts, false)
         })
-        .await
+        .await?;
+
+        let body: serde_json::Value = resp.json().await?;
+        let mut results = Vec::new();
+        if let Some(generic) = body
+            .pointer("/grounding/generic")
+            .and_then(|v| v.as_array())
+        {
+            for item in generic {
+                let str_of = |k: &str| {
+                    item.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let snippets = item
+                    .get("snippets")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                results.push(SearchResult {
+                    title: str_of("title"),
+                    url: str_of("url"),
+                    snippet: snippets,
+                    source: "brave_llm_context".to_string(),
+                    published: None,
+                    image_url: None,
+                    extra: None,
+                });
+            }
+        }
+        Ok(results)
     }
 }
