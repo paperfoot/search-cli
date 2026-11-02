@@ -350,6 +350,23 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
                 "transport": transport,
                 "usd_per_call": spec.price.estimate(0) as f64 / 1e6,
             });
+            // Modes where one sent call costs something else (deep and
+            // advanced depths cost more than the headline price).
+            let headline = spec.price.estimate(0);
+            let other: serde_json::Map<String, serde_json::Value> = spec
+                .modes
+                .iter()
+                .filter(|m| p.sent_cost(**m) != headline)
+                .map(|m| {
+                    (
+                        providers::spec::mode_str(*m).to_string(),
+                        json!(p.sent_cost(*m) as f64 / 1e6),
+                    )
+                })
+                .collect();
+            if !other.is_empty() {
+                entry["usd_per_call_where_different"] = json!(other);
+            }
             if let Some(price) = manifest.as_ref().and_then(|m| m.price_from(spec.name)) {
                 entry["hosted_usd_per_call"] = json!(price);
             }

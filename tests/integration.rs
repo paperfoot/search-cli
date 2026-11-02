@@ -615,4 +615,16 @@ fn agent_info_lists_auto_first() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["modes"][0]["name"], "auto", "{}", v["modes"]);
+    // Per-mode prices: Tavily's advanced depth (academic) costs twice general.
+    let tavily = v["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "tavily")
+        .unwrap();
+    let other = &tavily["usd_per_call_where_different"];
+    assert!(
+        other["academic"].as_f64() > tavily["usd_per_call"].as_f64(),
+        "{tavily}"
+    );
 }
