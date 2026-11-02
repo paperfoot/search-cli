@@ -304,29 +304,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             // Validate provider names early
             if let Some(ref providers) = args.providers {
-                const KNOWN: &[&str] = &[
-                    "parallel",
-                    "brave",
-                    "serper",
-                    "exa",
-                    "jina",
-                    "linkup",
-                    "firecrawl",
-                    "tavily",
-                    "serpapi",
-                    "perplexity",
-                    "browserless",
-                    "stealth",
-                    "xai",
-                ];
+                let provider_names: Vec<&str> = providers::all().iter().map(|s| s.name).collect();
                 for p in providers {
-                    if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
+                    if providers::find(p).is_none() {
                         // A misspelt -p is bad input (exit 3), not broken setup.
                         let err = errors::SearchError::InvalidInput {
                             message: format!(
                                 "Unknown provider '{}'. Valid: {}",
                                 p,
-                                KNOWN.join(", ")
+                                provider_names.join(", ")
                             ),
                         };
                         if ctx.is_json() {
@@ -650,6 +636,8 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             // Modes come straight from the routing registry, so this manifest
             // cannot drift from what the engine actually does.
+            let provider_names: Vec<&str> = providers::all().iter().map(|s| s.name).collect();
+
             let modes_info: Vec<serde_json::Value> = registry::MODES
                 .iter()
                 .map(|s| {
@@ -681,7 +669,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                              "description": "Search mode — chosen explicitly by the caller; the CLI does NOT infer intent from the query"},
                             {"name": "-c/--count", "type": "integer", "required": false, "description": "Number of results"},
                             {"name": "-p/--providers", "type": "string[]", "required": false,
-                             "values": ["parallel","brave","serper","exa","jina","linkup","firecrawl","tavily","serpapi","perplexity","browserless","stealth","xai"],
+                             "values": provider_names,
                              "description": "Comma-separated provider list"},
                             {"name": "-d/--domain", "type": "string[]", "required": false, "description": "Include only these domains"},
                             {"name": "--exclude-domain", "type": "string[]", "required": false, "description": "Exclude these domains"},
@@ -770,18 +758,18 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 },
                 "envelope": {
                     "version": "1",
-                    "success": "{ version, status, query, mode, results, answers?, metadata: { elapsed_ms, result_count, providers_queried, providers_failed, providers_cancelled?, provider_results?, warnings?, cached?, cache_age_secs?, provider_failures? } }",
+                    "success": "{ version, status, query, mode, results, answers?, metadata: { elapsed_ms, result_count, providers_queried, providers_failed, providers_timed_out?, provider_results?, warnings?, cached?, cache_age_secs?, provider_failures?, transport?, cost? } }",
                     "error": "{ version, status, error: { code, message, suggestion, provider_failures } }",
                     "statuses": ["success", "partial_success", "no_results"],
                     "provider_failure": "{ provider, category, http_status, code, reason, retryable }",
                     "failure_categories": ["auth", "billing_quota", "rate_limit", "timeout", "network", "bad_request", "server", "parse", "config", "other"],
                     "answers": "AI-synthesized answers (e.g. Perplexity/Tavily) as { provider, text } — kept out of results so every results[].url is a fetchable web URL",
-                    "metadata_notes": "provider_results maps provider -> result count contributed (auditability); providers_cancelled were cut off by the early-stop grace window and neither failed nor contributed; warnings flag filters a provider didn't apply; cached=true marks a replay from the local 5-minute cache",
+                    "metadata_notes": "provider_results maps provider -> result count contributed (auditability); providers_timed_out were still running at the mode deadline (a billed provider is still counted in cost, since it charges once the request is sent); cost is { micros, usd, basis, by_provider } in micro-USD, basis \"estimate\" for calls made with your own keys; warnings flag filters a provider didn't apply; cached=true marks a replay from the local 5-minute cache",
                 },
                 "providers": providers_info,
                 "modes": modes_info,
                 "routing": "explicit — the caller picks -m/--mode and/or -p/--providers. There is no automatic intent detection; an unspecified mode is a plain general multi-provider web search. -p overrides the mode's provider set entirely.",
-                "merge_semantics": "fused modes rank results with reciprocal rank fusion: URLs found by multiple providers score higher, ties broken by per-provider rank. Ordering is deterministic and independent of provider speed. Once enough unique results arrive, still-running providers get a 1.5s grace window and are then cancelled (reported in metadata.providers_cancelled) — except deep mode, which always waits for every provider.",
+                "merge_semantics": "fused modes query every provider at once and rank results with reciprocal rank fusion: URLs found by multiple providers score higher, ties broken by per-provider rank. Ordering is deterministic and independent of provider speed. Nothing is cancelled early, because a sent call is paid for: the run waits until every provider answers or the mode deadline passes, and providers still running then are reported in metadata.providers_timed_out. Chain modes (extract, scrape) try providers in order and stop at the first page the mode accepts; single-provider modes return that provider's rows in its order.",
                 "config": {
                     "path": config::config_path().to_string_lossy(),
                     "env_prefix": "SEARCH_",
