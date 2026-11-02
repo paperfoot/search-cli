@@ -100,9 +100,6 @@ pub trait Adapter: Send + Sync {
     fn name(&self) -> &'static str {
         self.spec().name
     }
-    fn env_keys(&self) -> &'static [&'static str] {
-        self.spec().env_keys
-    }
     fn capabilities(&self) -> Vec<&'static str> {
         self.spec().modes.iter().map(|m| mode_str(*m)).collect()
     }

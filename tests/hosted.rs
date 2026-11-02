@@ -615,3 +615,15 @@ fn whoami_and_revoke_go_through_the_client() {
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["revoked"], true);
 }
+
+#[test]
+fn usage_shows_the_account_and_each_transport() {
+    let mock = start("usage", handler(|r, _| search_ok(r)));
+    let (code, v) = run_json(mock.cmd().args(["usage", "--json"]));
+    assert_eq!(code, 0, "{v}");
+    let rows = v["providers"].as_array().unwrap();
+    let row = |name: &str| rows.iter().find(|r| r["provider"] == name).unwrap().clone();
+    assert_eq!(row("metasearch")["data"]["credits_remaining"], 4.2);
+    assert_eq!(row("serper")["transport"], "hosted");
+    assert_eq!(row("exa")["transport"], "hosted");
+}

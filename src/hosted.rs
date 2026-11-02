@@ -85,6 +85,25 @@ impl V1Manifest {
     }
 }
 
+impl V1Manifest {
+    /// The lowest price the provider is offered at, in USD per call.
+    pub fn price_from(&self, provider: &str) -> Option<f64> {
+        self.modes
+            .iter()
+            .flat_map(|m| m.providers.iter())
+            .filter(|p| p.name.eq_ignore_ascii_case(provider) && p.available)
+            .filter_map(|p| p.price_usd)
+            .min_by(|a, b| a.total_cmp(b))
+    }
+}
+
+/// The manifest last fetched from `base`, however old (no network).
+pub fn cached_manifest(base: &str) -> Option<V1Manifest> {
+    read_manifest_cache()
+        .filter(|c| c.base == base.trim_end_matches('/'))
+        .map(|c| c.manifest)
+}
+
 #[derive(Serialize, Deserialize)]
 struct CachedManifest {
     fetched_at: u64,

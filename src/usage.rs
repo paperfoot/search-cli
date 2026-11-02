@@ -21,6 +21,8 @@ pub struct ProviderUsage {
     pub supported: bool,
     /// Whether the provider is configured locally (has a key).
     pub configured: bool,
+    /// direct | local | hosted | none: how a search would reach it.
+    pub transport: String,
     /// Provider-reported usage figures, normalized where possible. Keys vary
     /// by provider (each bills differently); `credits_remaining` is populated
     /// whenever the provider reports a spendable balance.
@@ -30,14 +32,50 @@ pub struct ProviderUsage {
     pub error: Option<String>,
 }
 
-fn unsupported(name: &str, configured: bool) -> ProviderUsage {
+fn unsupported(name: &str, configured: bool, transport: &str) -> ProviderUsage {
     ProviderUsage {
         provider: name.to_string(),
         supported: false,
         configured,
+        transport: transport.to_string(),
         data: None,
         error: None,
     }
+}
+
+/// The metasearch.sh account as a usage row: the balance hosted calls draw on.
+async fn metasearch_usage(ctx: &AppContext) -> Option<ProviderUsage> {
+    let row = |data: Option<serde_json::Value>, error: Option<String>| ProviderUsage {
+        provider: "metasearch".to_string(),
+        supported: true,
+        configured: true,
+        transport: "hosted".to_string(),
+        data,
+        error,
+    };
+    let client = match crate::hosted::MetasearchClient::new(ctx) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
+        Err(e) => {
+            return Some(row(
+                None,
+                Some(crate::errors::redact_secrets(&e.to_string())),
+            ))
+        }
+    };
+    Some(match client.me().await {
+        Ok(me) => row(
+            Some(serde_json::json!({
+                "credits_remaining": me.balance_usd,
+                "unit": "USD",
+                "email": me.email,
+                "daily_cap_usd": me.key.daily_cap_usd,
+                "spent_today_usd": me.key.spent_today_usd,
+            })),
+            None,
+        ),
+        Err(e) => row(None, Some(crate::errors::redact_secrets(&e.to_string()))),
+    })
 }
 
 async fn get_json(
@@ -237,23 +275,34 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
     let all = providers::build_providers(&ctx);
     let mut out = Vec::new();
     let mut set: JoinSet<ProviderUsage> = JoinSet::new();
+    let account = metasearch_usage(&ctx).await;
+    let hosted_ok = account.as_ref().is_some_and(|a| a.error.is_none());
 
     for p in &all {
         let name = p.name();
         let configured = p.is_configured();
+        let transport = if configured {
+            p.transport().as_str()
+        } else if hosted_ok && !p.spec().env_keys.is_empty() {
+            "hosted"
+        } else {
+            "none"
+        };
         match fetcher(name) {
-            None => out.push(unsupported(name, configured)),
+            None => out.push(unsupported(name, configured, transport)),
             Some(fetch) => {
                 if !configured {
                     out.push(ProviderUsage {
                         provider: name.to_string(),
                         supported: true,
                         configured: false,
+                        transport: transport.to_string(),
                         data: None,
                         error: None,
                     });
                     continue;
                 }
+                let transport = transport.to_string();
                 let key = resolve_provider_key(&ctx, name);
                 let ctx2 = ctx.clone();
                 let name = name.to_string();
@@ -264,6 +313,7 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
                             provider: name,
                             supported: true,
                             configured: true,
+                            transport,
                             data: Some(data),
                             error: None,
                         },
@@ -271,6 +321,7 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
                             provider: name,
                             supported: true,
                             configured: true,
+                            transport,
                             data: None,
                             error: Some(crate::errors::redact_secrets(&e)),
                         },
@@ -278,6 +329,7 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
                             provider: name,
                             supported: true,
                             configured: true,
+                            transport,
                             data: None,
                             error: Some("timed out".to_string()),
                         },
@@ -293,6 +345,7 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
         }
     }
     out.sort_by(|a, b| a.provider.cmp(&b.provider));
+    out.extend(account);
 
     // Snapshot balances so `search stats` can report measured burn over time.
     let snapshot: serde_json::Map<String, serde_json::Value> = out
