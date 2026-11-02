@@ -136,7 +136,7 @@ fn is_private(ip: IpAddr) -> bool {
 }
 
 fn is_private_v4(v4: Ipv4Addr) -> bool {
-    let [a, b, ..] = v4.octets();
+    let [a, b, c, _] = v4.octets();
     v4.is_loopback()
         || v4.is_private()
         || v4.is_link_local() // includes 169.254.169.254 metadata
@@ -146,6 +146,11 @@ fn is_private_v4(v4: Ipv4Addr) -> bool {
         || a == 100 && (64..128).contains(&b) // CGNAT 100.64/10
         || a == 198 && (b == 18 || b == 19) // benchmarking 198.18/15
         || a >= 240 // reserved 240/4
+        || (a, b, c) == (192, 0, 0) // IETF 192.0.0/24 (Oracle Cloud metadata 192.0.0.192)
+        || (a, b, c) == (192, 0, 2) // TEST-NET-1
+        || (a, b, c) == (198, 51, 100) // TEST-NET-2
+        || (a, b, c) == (203, 0, 113) // TEST-NET-3
+        || (a, b, c) == (192, 88, 99) // 6to4 relay anycast
 }
 
 /// The IPv4 address carried inside an IPv6 one, in the forms a request can
@@ -224,6 +229,17 @@ mod tests {
         assert!(private("198.18.0.1"));
         assert!(private("240.0.0.1"));
         assert!(private("0.1.2.3"));
+        // IETF and documentation ranges; 192.0.0.192 is Oracle Cloud metadata.
+        for ip in [
+            "192.0.0.192",
+            "192.0.2.1",
+            "198.51.100.7",
+            "203.0.113.9",
+            "192.88.99.1",
+        ] {
+            assert!(private(ip), "{ip}");
+        }
+        assert!(!private("192.0.1.1") && !private("192.88.98.1"));
         assert!(!private("64:ff9b::808:808"), "NAT64 of 8.8.8.8 is public");
         assert!(!private("2002:808:808::1"), "6to4 of 8.8.8.8 is public");
         assert!(!private("2606:4700::1111"));
