@@ -7,6 +7,13 @@ on:
 permissions:
   contents: write
 
+env:
+  # Cargo flags for every Linux target. The stealth feature (wreq/BoringSSL)
+  # does not link on Linux runners yet, so Linux ships without it and the
+  # extract chain skips that step. Set to "" once ci.yml's linux-default job
+  # is green.
+  LINUX_FLAGS: "--no-default-features"
+
 jobs:
   build:
     strategy:
@@ -15,15 +22,18 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
-            flags: ""
+            linux: false
           - target: aarch64-apple-darwin
             os: macos-latest
-            flags: ""
-          # Linux ships without the stealth feature (wreq/BoringSSL doesn't
-          # link on Linux runners); the extract chain starts at jina there.
+            linux: false
+          # Linux targets build natively on matching runners and share
+          # LINUX_FLAGS above.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            flags: "--no-default-features"
+            linux: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            linux: true
 
     runs-on: ${{ matrix.os }}
 
@@ -35,9 +45,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install build tools for BoringSSL
+        if: matrix.linux && env.LINUX_FLAGS == ''
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev perl pkg-config
+
       - name: Build
         # --locked: reproducible release builds from the committed Cargo.lock.
-        run: cargo build --release --locked ${{ matrix.flags }} --target ${{ matrix.target }}
+        run: cargo build --release --locked ${{ matrix.linux && env.LINUX_FLAGS || '' }} --target ${{ matrix.target }}
 
       - name: Package
         run: |

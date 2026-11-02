@@ -1,0 +1,32 @@
+{
+  "name": "metasearch",
+  "displayName": "metasearch.sh",
+  "version": "1.0.0",
+  "description": "The metasearch.sh MCP server: search and fetch tools over 13 engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
+  "author": {
+    "name": "Paperfoot AI",
+    "url": "https://paperfoot.si"
+  },
+  "homepage": "https://metasearch.sh",
+  "repository": "https://github.com/paperfoot/search-cli",
+  "license": "MIT",
+  "keywords": [
+    "search",
+    "web-search",
+    "mcp",
+    "scraping",
+    "research"
+  ],
+  "documentationUrl": "https://metasearch.sh/docs/mcp",
+  "supportUrl": "https://github.com/paperfoot/search-cli/issues",
+  "privacyPolicyUrl": "https://metasearch.sh/privacy",
+  "termsOfServiceUrl": "https://metasearch.sh/terms",
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "metasearch.sh API key",
+      "description": "An ms_live_ key from https://metasearch.sh/dashboard. New accounts get $1 of credit.",
+      "sensitive": true
+    }
+  }
+}

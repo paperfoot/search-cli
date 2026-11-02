@@ -1,0 +1,24 @@
+{
+  "name": "search-cli",
+  "displayName": "search CLI",
+  "version": "0.10.0",
+  "description": "Teaches Claude to use the search CLI: auto or explicit modes across a dozen search engines, page extraction, cost in every result. Needs the search binary (brew install paperfoot/tap/search-cli).",
+  "author": {
+    "name": "Paperfoot AI",
+    "url": "https://paperfoot.si"
+  },
+  "homepage": "https://github.com/paperfoot/search-cli",
+  "repository": "https://github.com/paperfoot/search-cli",
+  "license": "MIT",
+  "keywords": [
+    "search",
+    "web-search",
+    "scraping",
+    "research",
+    "cli"
+  ],
+  "documentationUrl": "https://github.com/paperfoot/search-cli#readme",
+  "supportUrl": "https://github.com/paperfoot/search-cli/issues",
+  "privacyPolicyUrl": "https://metasearch.sh/privacy",
+  "termsOfServiceUrl": "https://metasearch.sh/terms"
+}
