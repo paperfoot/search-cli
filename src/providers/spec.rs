@@ -4,7 +4,7 @@
 //! sent to metasearch.sh instead of the upstream.
 
 use crate::errors::SearchError;
-use crate::types::{Answer, FailureCategory, Mode, SearchOpts, SearchResult};
+use crate::types::{Answer, FailureCategory, Mode, SearchOpts, SearchResult, Transport};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -87,6 +87,15 @@ pub trait Adapter: Send + Sync {
     /// deep's two requests). Only counted for `billed_on_send` providers.
     fn sent_cost(&self, _mode: Mode) -> u64 {
         self.spec().price.estimate(0)
+    }
+    /// How this adapter reaches its upstream: own key (direct), keyless on
+    /// this machine (local); the hosted adapter overrides it.
+    fn transport(&self) -> Transport {
+        if self.spec().env_keys.is_empty() {
+            Transport::Local
+        } else {
+            Transport::Direct
+        }
     }
     fn name(&self) -> &'static str {
         self.spec().name

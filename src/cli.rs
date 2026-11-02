@@ -6,9 +6,13 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 13 search providers across 13 explicit search modes.\n\
-        You choose the mode (-m) and/or providers (-p); the CLI does not guess\n\
-        intent. Run `search agent-info` for the machine-readable capability map.\n\
+    long_about = "Aggregates 13 search providers across 13 search modes.\n\
+        With no -m the mode is auto: a URL extracts, an X/Twitter cue searches\n\
+        X, and so on; the decision is reported in metadata.routing.auto. An\n\
+        explicit -m or -p is always obeyed. Auto never picks deep.\n\
+        Engines without your own key run through metasearch.sh after\n\
+        `search login`, charged to your balance; each result's cost is in\n\
+        metadata.cost. Run `search agent-info` for the machine-readable map.\n\
         Outputs colored tables for humans, JSON when piped to other tools.\n\n\
         PROVIDERS:\n  \
           parallel   Agent-native search (Parallel AI): LLM-ready excerpts\n  \
@@ -25,7 +29,7 @@ use clap::{Parser, Subcommand};
           stealth    Local anti-bot scraper (no API key)\n  \
           xai        Only real-time X/Twitter search (Grok agentic)\n\n\
         EXAMPLES:\n  \
-          search \"rust error handling\"                    # general web search\n  \
+          search \"rust error handling\"                    # auto mode\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \
           search search -q \"CEO of Stripe\" -m people      # LinkedIn profiles via Exa\n  \
           search search -q \"AI news\" -m news              # breaking news\n  \
@@ -172,11 +176,18 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub query: String,
 
-    /// Search mode (default: general). Choose explicitly: general, news,
-    /// academic, deep, social, scholar, patents, people, places, images,
-    /// similar, scrape, extract. See `search agent-info` for the full map.
-    #[arg(short, long, value_enum, default_value = "general")]
-    pub mode: Mode,
+    /// Search mode (default: auto). auto picks one of general, news,
+    /// academic, scholar, people, images, places, patents, social (X cue
+    /// only), extract (a URL) or similar, and reports why; never deep. Or
+    /// choose: general, news, academic, deep, social, scholar, patents,
+    /// people, places, images, similar, scrape, extract.
+    #[arg(short, long, default_value = "auto", value_parser = parse_mode_arg)]
+    pub mode: ModeArg,
+
+    /// Keep the fused order: skip the JEV relevance rerank that runs for
+    /// logged-in users in general, news, academic, scholar, people and deep
+    #[arg(long)]
+    pub no_rerank: bool,
 
     /// Number of results to return
     #[arg(short, long)]
@@ -223,13 +234,43 @@ pub struct SearchArgs {
     pub allow_private: bool,
 }
 
+/// `-m`: `auto` (resolved before planning) or a fixed mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeArg {
+    Auto,
+    Fixed(Mode),
+}
+
+impl std::fmt::Display for ModeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Fixed(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+fn parse_mode_arg(s: &str) -> Result<ModeArg, String> {
+    use clap::ValueEnum;
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(ModeArg::Auto);
+    }
+    Mode::from_str(s, true).map(ModeArg::Fixed).map_err(|_| {
+        let names: Vec<String> = Mode::value_variants()
+            .iter()
+            .filter_map(|m| m.to_possible_value().map(|v| v.get_name().to_string()))
+            .collect();
+        format!("invalid mode '{s}'; valid: auto, {}", names.join(", "))
+    })
+}
+
 #[derive(Subcommand)]
 pub enum ConfigAction {
     /// Show current configuration (API keys masked)
     Show,
     /// Set a configuration value (e.g. keys.brave YOUR_KEY)
     Set {
-        /// Config key (e.g. keys.brave, settings.timeout)
+        /// Config key (e.g. keys.brave, settings.count, metasearch.max_providers)
         key: String,
         /// Value to set. Pass "-" to read it from stdin, keeping secrets out
         /// of shell history and process listings

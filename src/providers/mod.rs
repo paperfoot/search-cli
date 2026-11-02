@@ -19,7 +19,7 @@ pub use spec::{Adapter, Call, Output, ProviderSpec};
 
 use crate::config::AppConfig;
 use crate::context::AppContext;
-use crate::errors::{classify_http, SearchError};
+use crate::errors::{classify_http, quota_text, SearchError};
 use crate::types::FailureCategory;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -171,12 +171,15 @@ where
         let body = read_capped(resp, ERROR_BODY_CAP).await;
         let category = classify_http(adapter.classify(code, &body), code, &body);
 
-        // A quota or auth body is classified as such, so it never retries.
+        // A quota or auth body is classified as such, so it never retries;
+        // a 5xx keeps its Server category, but quota text in it still means
+        // a retry would only be refused again.
         let transient = matches!(code, 429 | 503)
             && matches!(
                 category,
                 FailureCategory::RateLimit | FailureCategory::Server
-            );
+            )
+            && !quota_text(&body);
         if transient && attempt < MAX_RETRIES {
             if let Some(wait) = retry_after {
                 let pause = wait.max(backoff(attempt));
@@ -492,7 +495,25 @@ mod tests {
         assert_eq!(err.category(), FailureCategory::RateLimit);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let failed = vec![err.to_provider_failure("brave")];
-        assert_eq!(SearchError::AllProvidersFailed { failed }.exit_code(), 4);
+        assert_eq!(
+            SearchError::AllProvidersFailed { failed, cost: None }.exit_code(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_503_is_not_retried() {
+        let (url, hits) = server(Some(
+            "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 25\r\n\r\nmonthly quota is used up.",
+        ))
+        .await;
+        let probe = Probe(&serper::SPEC);
+        let c = client();
+        let err = send(&probe, Duration::from_secs(5), || c.get(&url))
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), FailureCategory::Server);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

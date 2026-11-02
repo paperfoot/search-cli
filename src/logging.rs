@@ -1,4 +1,4 @@
-use crate::types::{ProviderFailure, SearchResponse};
+use crate::types::{CostSummary, ProviderFailure, SearchResponse};
 use directories::ProjectDirs;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -65,6 +65,7 @@ pub fn log_search(response: &SearchResponse) {
         "provider_results": response.metadata.provider_results,
         // `search stats` prices a line from cost.by_provider when present.
         "cost": response.metadata.cost,
+        "transport": response.metadata.transport,
         "failure_categories": response
             .metadata
             .provider_failures
@@ -85,7 +86,13 @@ pub fn log_search(response: &SearchResponse) {
 /// so `search stats` must see their calls and failures. Failure reasons are
 /// left out on purpose: upstream error text can echo a request URL, and some
 /// providers carry their key in the query string.
-pub fn log_failed_search(query: &str, mode: &str, elapsed_ms: u128, failed: &[ProviderFailure]) {
+pub fn log_failed_search(
+    query: &str,
+    mode: &str,
+    elapsed_ms: u128,
+    failed: &[ProviderFailure],
+    cost: Option<&CostSummary>,
+) {
     if logging_disabled() {
         return;
     }
@@ -106,6 +113,8 @@ pub fn log_failed_search(query: &str, mode: &str, elapsed_ms: u128, failed: &[Pr
         "cached": false,
         "providers_queried": providers,
         "providers_failed": providers,
+        // Billed timeouts and rejected pages still cost money.
+        "cost": cost,
         "failure_categories": failed
             .iter()
             .map(|f| format!("{}:{}", f.provider, f.category.as_str()))

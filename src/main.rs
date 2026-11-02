@@ -13,6 +13,7 @@ mod output;
 mod page;
 mod providers;
 mod registry;
+mod router;
 mod stats;
 mod types;
 mod usage;
@@ -174,6 +175,13 @@ async fn main() {
         }
     };
 
+    // Every key this process holds is scrubbed from any error text.
+    errors::register_secrets(
+        providers::all()
+            .iter()
+            .map(|s| providers::key_for(&config, s))
+            .chain([auth::resolve_token(&config)]),
+    );
     let app = Arc::new(AppContext::new(config));
 
     let exit_code = match run(cli, &ctx, app).await {
@@ -187,7 +195,7 @@ async fn main() {
                     eprintln!("  {s}");
                 }
                 // Give humans the same per-provider detail the JSON envelope carries.
-                if let errors::SearchError::AllProvidersFailed { failed } = &e {
+                if let errors::SearchError::AllProvidersFailed { failed, .. } = &e {
                     for f in failed {
                         eprintln!("  - {} [{}]: {}", f.provider, f.category.as_str(), f.reason);
                     }
@@ -218,11 +226,12 @@ fn apply_max_chars(response: &mut types::SearchResponse, max_chars: Option<usize
     }
 }
 
-/// SearchArgs for the bare `search "query"` shorthand: general mode, defaults.
+/// SearchArgs for the bare `search "query"` shorthand: auto mode, defaults.
 fn default_search_args(query: String) -> cli::SearchArgs {
     cli::SearchArgs {
         query,
-        mode: types::Mode::General,
+        mode: cli::ModeArg::Auto,
+        no_rerank: false,
         count: None,
         providers: None,
         domain: None,
@@ -234,6 +243,51 @@ fn default_search_args(query: String) -> cli::SearchArgs {
         lang: None,
         allow_private: false,
     }
+}
+
+/// A replay from the local cache cost nothing and reached no provider: drop
+/// the original run's cost and transport so neither is counted twice.
+fn mark_replay(response: &mut types::SearchResponse, age: Option<u64>) {
+    response.metadata.cached = true;
+    response.metadata.cache_age_secs = age;
+    response.metadata.cost = None;
+    response.metadata.transport.clear();
+}
+
+/// How each provider would be reached right now (d direct, l local, h
+/// hosted, - none), for the cache key.
+fn transport_signature(app: &Arc<AppContext>, logged_in: bool) -> String {
+    providers::build_providers(app)
+        .iter()
+        .map(|p| match (p.is_configured(), p.transport(), logged_in) {
+            (true, t, _) => t.as_str().chars().next().unwrap_or('d'),
+            (false, types::Transport::Direct, true) => 'h',
+            _ => '-',
+        })
+        .collect()
+}
+
+/// `auto` → one real mode (ROUTING.md): rules 1-5 here; then, logged in,
+/// metasearch.sh's `/route` (1.2 s, fail-open); then signals 6-10; then
+/// general. Returns the decision and, for rule 3, the URL to search.
+async fn resolve_auto(
+    query: &str,
+    client: Option<&hosted::MetasearchClient>,
+) -> (types::AutoDecision, Option<String>) {
+    if let Some(hit) = router::decisive(query) {
+        return (router::decision_for(&hit, "rule"), hit.query);
+    }
+    if let Some(c) = client {
+        let started = std::time::Instant::now();
+        if let Some(mut d) = c.route(query).await {
+            if router::auto_mode(&d.mode).is_some() {
+                d.latency_ms
+                    .get_or_insert(started.elapsed().as_millis() as u64);
+                return (d, None);
+            }
+        }
+    }
+    router::resolve_local(query)
 }
 
 async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::SearchError> {
@@ -275,14 +329,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         Commands::Search(mut args) => {
             // --x flag: force X/Twitter search via xAI Grok
             if cli.x_only {
-                args.mode = types::Mode::Social;
+                args.mode = cli::ModeArg::Fixed(types::Mode::Social);
                 args.providers = Some(vec!["xai".to_string()]);
             }
 
             if cli.last {
                 if let Some(mut cached) = cache::load_last() {
-                    cached.metadata.cached = true;
-                    cached.metadata.cache_age_secs = cache::last_age_secs();
+                    mark_replay(&mut cached, cache::last_age_secs());
                     if ctx.is_json() {
                         output::json::render(&cached);
                     } else if !ctx.suppress_human() {
@@ -363,41 +416,18 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 }
             }
 
-            // URL-input modes (extract/scrape/similar) take a URL, not a
-            // query — fail fast (exit 3) instead of feeding a text query to
-            // paid scrapers as if it were an address.
-            let spec = registry::spec(args.mode);
-            if spec.input == registry::InputKind::Url
-                && !(args.query.starts_with("http://") || args.query.starts_with("https://"))
-            {
-                return bail(
-                    errors::SearchError::InvalidInput {
-                        message: format!(
-                            "mode '{}' takes a URL as -q, not a text query. Example: search search -m {} -q https://example.com/page",
-                            args.mode, args.mode
-                        ),
-                    },
-                    ctx,
-                );
-            }
-
-            // Extract/scrape fetch the URL directly (the stealth rung runs on
-            // THIS machine) — refuse private/internal targets unless
-            // explicitly allowed, so a prompt-injected agent can't be steered
-            // into localhost, the LAN, or cloud metadata.
-            if matches!(args.mode, types::Mode::Extract | types::Mode::Scrape)
-                && !args.allow_private
-            {
-                if let Err(err) = guard::assert_public_url(&args.query).await {
-                    return bail(err, ctx);
-                }
-            }
+            // metasearch.sh: refused outright when the configured host is not
+            // trusted, so a poisoned `metasearch.url` never gets the token.
+            let client = match hosted::MetasearchClient::new(&app) {
+                Ok(c) => c.map(Arc::new),
+                Err(err) => return bail(err, ctx),
+            };
 
             let count = args
                 .count
                 .unwrap_or(app.config.settings.count)
                 .clamp(1, 100);
-            let opts = types::SearchOpts {
+            let mut opts = types::SearchOpts {
                 include_domains: args.domain.unwrap_or_default(),
                 exclude_domains: args.exclude_domain.unwrap_or_default(),
                 freshness: args.freshness,
@@ -409,8 +439,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // -p/filter/locale variant must neither read NOR write the plain
             // entry (an ungated save here used to let a filtered result be
             // replayed for a later unfiltered query). --no-cache skips the
-            // read but still refreshes the entry.
-            let mode_str = args.mode.to_string();
+            // read but still refreshes the entry. The key carries the
+            // requested mode and how each provider would be reached, so a
+            // new key or a login never replays a run that went another way.
+            let cache_mode = format!(
+                "{}|{}",
+                args.mode,
+                transport_signature(&app, client.is_some())
+            );
             let cacheable = args.providers.is_none()
                 && opts.include_domains.is_empty()
                 && opts.exclude_domains.is_empty()
@@ -418,9 +454,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 && opts.country.is_none()
                 && opts.lang.is_none();
             if cacheable && !args.no_cache {
-                if let Some((mut cached, age)) = cache::load_query(&args.query, &mode_str, count) {
-                    cached.metadata.cached = true;
-                    cached.metadata.cache_age_secs = Some(age);
+                if let Some((mut cached, age)) = cache::load_query(&args.query, &cache_mode, count)
+                {
+                    mark_replay(&mut cached, Some(age));
                     logging::log_search(&cached);
                     apply_max_chars(&mut cached, args.max_chars);
                     if ctx.is_json() {
@@ -431,6 +467,74 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     return Ok(0);
                 }
             }
+
+            // auto: decisive rules here, then metasearch.sh's JEV when logged
+            // in, then the local signal rules, then general. An explicit -m
+            // never asks anyone.
+            let mut query = args.query.clone();
+            let (mode, auto) = match args.mode {
+                cli::ModeArg::Fixed(m) => (m, None),
+                cli::ModeArg::Auto => {
+                    let (decision, rewritten) = resolve_auto(&args.query, client.as_deref()).await;
+                    if let Some(q) = rewritten {
+                        query = q;
+                    }
+                    let mode = router::auto_mode(&decision.mode).unwrap_or(types::Mode::General);
+                    (mode, Some(decision))
+                }
+            };
+            let mut auto = auto;
+            // Freshness from explicit words ("today", "latest"), only when the
+            // caller set none and the mode applies it.
+            if let Some(decision) = auto.as_mut() {
+                if opts.freshness.is_none() && registry::mode_applies_filters(mode) {
+                    if let Some((value, word)) = router::freshness(&query) {
+                        opts.freshness = Some(value.to_string());
+                        let mut applied = serde_json::Map::new();
+                        applied.insert("freshness".into(), value.into());
+                        decision.filters_applied = Some(applied);
+                        decision.reason =
+                            format!("{} Freshness {value} from '{word}'.", decision.reason);
+                    }
+                }
+            }
+
+            // URL-input modes (extract/scrape/similar) take a URL, not a
+            // query — fail fast (exit 3) instead of feeding a text query to
+            // paid scrapers as if it were an address.
+            let spec = registry::spec(mode);
+            if spec.input == registry::InputKind::Url
+                && !(query.starts_with("http://") || query.starts_with("https://"))
+            {
+                return bail(
+                    errors::SearchError::InvalidInput {
+                        message: format!(
+                            "mode '{mode}' takes a URL as -q, not a text query. Example: search search -m {mode} -q https://example.com/page"
+                        ),
+                    },
+                    ctx,
+                );
+            }
+
+            // Extract/scrape fetch the URL directly (the stealth rung runs on
+            // THIS machine) — refuse private/internal targets unless
+            // explicitly allowed, so a prompt-injected agent can't be steered
+            // into localhost, the LAN, or cloud metadata.
+            if matches!(mode, types::Mode::Extract | types::Mode::Scrape) && !args.allow_private {
+                if let Err(err) = guard::assert_public_url(&query).await {
+                    return bail(err, ctx);
+                }
+            }
+
+            let hosting = match &client {
+                Some(c) => Some(engine::Hosting {
+                    client: c.clone(),
+                    manifest: c.manifest().await,
+                    max_providers: app.config.metasearch.max_providers,
+                    rerank: !args.no_rerank,
+                }),
+                None => None,
+            };
 
             // Show spinner for human output (suppressed by --quiet)
             let spinner = if !ctx.is_json() && !ctx.quiet {
@@ -446,10 +550,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     .as_ref()
                     .map(|p| format!(" via {}", p.join(", ")))
                     .unwrap_or_default();
-                sp.set_message(format!(
-                    "\"{}\" [{}{}]",
-                    args.query, args.mode, provider_hint
-                ));
+                sp.set_message(format!("\"{query}\" [{mode}{provider_hint}]"));
                 sp.enable_steady_tick(std::time::Duration::from_millis(100));
                 Some(sp)
             } else {
@@ -457,8 +558,16 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             };
 
             let started = std::time::Instant::now();
-            let response =
-                engine::run(app, &args.query, args.mode, count, &args.providers, &opts).await;
+            let response = engine::run(
+                app,
+                &query,
+                mode,
+                count,
+                &args.providers,
+                &opts,
+                hosting.as_ref(),
+            )
+            .await;
 
             if let Some(sp) = spinner {
                 sp.finish_and_clear();
@@ -466,16 +575,30 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             // A run where every provider failed still made (possibly billed)
             // calls; log it so `search stats` counts them.
-            if let Err(errors::SearchError::AllProvidersFailed { failed }) = &response {
+            if let Err(errors::SearchError::AllProvidersFailed { failed, cost }) = &response {
                 logging::log_failed_search(
-                    &args.query,
-                    &mode_str,
+                    &query,
+                    &mode.to_string(),
                     started.elapsed().as_millis(),
                     failed,
+                    cost.as_ref(),
                 );
             }
 
             let mut response = response?;
+            if let Some(decision) = auto {
+                response
+                    .metadata
+                    .routing
+                    .get_or_insert_with(Default::default)
+                    .auto = Some(decision);
+            }
+            if client.is_none() && (args.mode == cli::ModeArg::Auto || engine::reranks(mode)) {
+                response
+                    .metadata
+                    .notes
+                    .push("log in for JEV routing and reranking (free): search login".to_string());
+            }
 
             // Don't cache empty results — a transient no_results shouldn't be
             // replayed for 5 minutes after the cause clears. (Total failure is
@@ -484,7 +607,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             if !response.results.is_empty() {
                 cache::save_last(&response);
                 if cacheable {
-                    cache::save_query(&args.query, &mode_str, count, &response);
+                    cache::save_query(&args.query, &cache_mode, count, &response);
                 }
             }
             logging::log_search(&response);
@@ -502,13 +625,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             Ok(0)
         }
 
-        Commands::Login(args) => {
-            auth::login(&app.config, &app.client, ctx, args.url, args.no_browser).await
-        }
+        Commands::Login(args) => auth::login(&app, ctx, args.url, args.no_browser).await,
 
-        Commands::Logout { revoke } => auth::logout(&app.config, &app.client, ctx, revoke).await,
+        Commands::Logout { revoke } => auth::logout(&app, ctx, revoke).await,
 
-        Commands::Whoami => auth::whoami(&app.config, &app.client, ctx).await,
+        Commands::Whoami => auth::whoami(&app, ctx).await,
 
         Commands::Config { action } => {
             match action {
