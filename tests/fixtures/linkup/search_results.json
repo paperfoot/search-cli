@@ -1,0 +1,27 @@
+{
+  "results": [
+    {
+      "type": "text",
+      "name": "Tutorial | Tokio",
+      "url": "https://tokio.rs/tokio/tutorial",
+      "content": "Tokio is an asynchronous runtime for the Rust programming language. It provides the building blocks needed for writing network applications."
+    },
+    {
+      "type": "image",
+      "name": "Tokio logo",
+      "url": "https://tokio.rs/img/tokio-horizontal.svg"
+    },
+    {
+      "type": "text",
+      "name": "Missing URL",
+      "url": null,
+      "content": "Dropped."
+    },
+    {
+      "type": "text",
+      "name": "smol - Rust",
+      "url": "https://docs.rs/smol/latest/smol/",
+      "content": "A small and fast async runtime."
+    }
+  ]
+}
