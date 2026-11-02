@@ -1,0 +1,48 @@
+{
+  "searchParameters": {
+    "q": "reciprocal rank fusion",
+    "type": "scholar",
+    "num": 10,
+    "page": 1,
+    "engine": "google"
+  },
+  "organic": [
+    {
+      "title": "Reciprocal rank fusion outperforms condorcet and individual rank learning methods",
+      "link": "https://dl.acm.org/doi/abs/10.1145/1571941.1572114",
+      "publicationInfo": "GV Cormack, CLA Clarke, S Buettcher - Proceedings of the 32nd …, 2009 - dl.acm.org",
+      "snippet": "… Reciprocal Rank Fusion (RRF) to serve as a baseline. We found that RRF, when used to combine the results of IR methods (including learning to rank… be ranked and a set of rankings R, …",
+      "year": 2009,
+      "citedBy": 2201,
+      "versions": 7,
+      "pdfUrl": "https://dl.acm.org/doi/pdf/10.1145/1571941.1572114",
+      "id": "4GqZvj5I8a8J",
+      "clusterId": "12677993860347554528"
+    },
+    {
+      "title": "Mmmorrf: Multimodal multilingual modularized reciprocal rank fusion",
+      "link": "https://dl.acm.org/doi/abs/10.1145/3726302.3730157",
+      "publicationInfo": "S Samuel, D DeGenaro, J Guallar-Blasco… - Proceedings of the 48th …, 2025 - dl.acm.org",
+      "snippet": "… reciprocal rank fusion. MMMORRF is both effective and efficient, demonstrating practicality in searching videos based on users' information needs instead of visual descriptive queries. …",
+      "year": 2025,
+      "citedBy": 15,
+      "versions": 3,
+      "pdfUrl": "https://dl.acm.org/doi/pdf/10.1145/3726302.3730157",
+      "id": "lmz-4P3U4pMJ",
+      "clusterId": "10656313855178599574"
+    },
+    {
+      "title": "An analysis of fusion functions for hybrid retrieval",
+      "link": "https://dl.acm.org/doi/abs/10.1145/3596512",
+      "publicationInfo": "S Bruch, S Gai, A Ingber - ACM Transactions on Information Systems, 2023 - dl.acm.org",
+      "snippet": "… We next investigate the properties of Reciprocal Rank Fusion (RRF). We first unpack RRF and examine its sensitivity to its parameters as our second research question (RQ2)—contrary …",
+      "year": 2023,
+      "citedBy": 208,
+      "versions": 3,
+      "pdfUrl": "https://dl.acm.org/doi/pdf/10.1145/3596512",
+      "id": "M4ESxR8i0ucJ",
+      "clusterId": "16704451487716245811"
+    }
+  ],
+  "credits": 1
+}

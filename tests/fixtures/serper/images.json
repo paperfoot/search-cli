@@ -1,0 +1,55 @@
+{
+  "searchParameters": {
+    "q": "golden gate bridge",
+    "type": "images",
+    "num": 10,
+    "engine": "google"
+  },
+  "images": [
+    {
+      "title": "Golden Gate Bridge - Wikipedia",
+      "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/b/bf/Golden_Gate_Bridge_as_seen_from_Battery_East.jpg?utm_source=en.wikipedia.org&utm_campaign=index&utm_content=original",
+      "imageWidth": 5388,
+      "imageHeight": 3368,
+      "thumbnailUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQq3ucZWDdS8tE8Kqr3iIouDO_vp-oGwyyBz4lXvHBytA&s=10",
+      "thumbnailWidth": 565,
+      "thumbnailHeight": 353,
+      "source": "Wikipedia",
+      "domain": "en.wikipedia.org",
+      "link": "https://en.wikipedia.org/wiki/Golden_Gate_Bridge",
+      "googleUrl": "https://www.google.com/imgres?imgurl=https%3A%2F%2Fupload.wikimedia.org%2Fwikipedia%2Fcommons%2Fb%2Fbf%2FGolden_Gate_Bridge_as_seen_from_Battery_East.jpg%3Futm_source%3Den.wikipedia.org%26utm_campaign%3Dindex%26utm_content%3Doriginal&tbnid=bmHVbw23x4BwOM&imgrefurl=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FGolden_Gate_Bridge&docid=lHtHfeJ36XDZAM&w=5388&h=3368",
+      "copyright": "Frank Schulenburg",
+      "creator": "Frank Schulenburg, Frank Schulenburg",
+      "position": 1
+    },
+    {
+      "title": "Golden Gate Bridge | San Francisco Travel",
+      "imageUrl": "https://www.sftravel.com/sites/default/files/styles/hero/public/2024-06/golden-gate-bridge-bay-sunset.jpg.webp?h=e4f440a4&itok=OwHxs5a1",
+      "imageWidth": 1920,
+      "imageHeight": 1080,
+      "thumbnailUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTi3vHH0kQAGl1WP6CLgSHiX_aLhTNEEXCWLzYtiAiykw&s=10",
+      "thumbnailWidth": 597,
+      "thumbnailHeight": 335,
+      "source": "San Francisco Travel",
+      "domain": "www.sftravel.com",
+      "link": "https://www.sftravel.com/things-to-do/attractions/iconic-sf/golden-gate-bridge",
+      "googleUrl": "https://www.google.com/imgres?imgurl=https%3A%2F%2Fwww.sftravel.com%2Fsites%2Fdefault%2Ffiles%2Fstyles%2Fhero%2Fpublic%2F2024-06%2Fgolden-gate-bridge-bay-sunset.jpg.webp%3Fh%3De4f440a4%26itok%3DOwHxs5a1&tbnid=uq1IS-dEzqLaAM&imgrefurl=https%3A%2F%2Fwww.sftravel.com%2Fthings-to-do%2Fattractions%2Ficonic-sf%2Fgolden-gate-bridge&docid=eD7w8kzfJ4HikM&w=1920&h=1080",
+      "position": 2
+    },
+    {
+      "title": "Golden Gate Bridge | History, Construction, Length, Country, City, & Facts  | Britannica",
+      "imageUrl": "https://cdn.britannica.com/72/972-050-24D5F532/Golden-Gate-Bridge-San-Francisco.jpg",
+      "imageWidth": 1600,
+      "imageHeight": 1200,
+      "thumbnailUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSwttl6RaSbudlymtcYjCq4NcsNvGW9ylijhid6f7llkg&s=10",
+      "thumbnailWidth": 638,
+      "thumbnailHeight": 480,
+      "source": "Britannica",
+      "domain": "www.britannica.com",
+      "link": "https://www.britannica.com/topic/Golden-Gate-Bridge",
+      "googleUrl": "https://www.google.com/imgres?imgurl=https%3A%2F%2Fcdn.britannica.com%2F72%2F972-050-24D5F532%2FGolden-Gate-Bridge-San-Francisco.jpg&tbnid=mqgylW80UoWUjM&imgrefurl=https%3A%2F%2Fwww.britannica.com%2Ftopic%2FGolden-Gate-Bridge&docid=sv76gZF_lWJNYM&w=1600&h=1200",
+      "position": 3
+    }
+  ],
+  "credits": 1
+}
