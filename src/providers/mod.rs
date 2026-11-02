@@ -8,6 +8,7 @@ pub mod parallel;
 pub mod perplexity;
 pub mod serpapi;
 pub mod serper;
+pub mod spec;
 #[cfg(feature = "stealth")]
 pub mod stealth;
 pub mod tavily;
