@@ -32,6 +32,10 @@ count = 10            # results per search when -c is not given
 [metasearch]
 # Written by `search login`; METASEARCH_TOKEN or SEARCH_METASEARCH_TOKEN override it.
 token = ""
-# Most engines a fused search sends through metasearch.sh: 3 by default, 6 for deep.
-# Engines you name with -p are always sent.
-max_providers = 3
+# Another host for login and hosted calls (default https://metasearch.sh).
+# METASEARCH_URL overrides it; any other host needs METASEARCH_ALLOW_INSECURE_HOST=1.
+# url = ""
+# Most engines a fused search sends through metasearch.sh. Unset, it is 3, or 6
+# for deep; a value (1-8) is the cap for every fused mode, deep included. Engines
+# you name with -p are always sent. Set it here or with `search config set`; no env var does.
+# max_providers = 3

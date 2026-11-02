@@ -8,26 +8,37 @@
   A new account starts with $1 of credit, so a machine with no keys gets
   results on the first try. A fused search sends at most 3 hosted engines
   (6 for `deep`) and names the rest in a warning; `-p` or
-  `metasearch.max_providers` changes that.
+  `metasearch.max_providers` (1-8, one cap for every fused mode) changes
+  that.
 - Every result envelope reports what the search cost in `metadata.cost`
   (micro-USD, per engine, and whether the figure is an estimate or the
   amount charged) and how each engine was reached in `metadata.transport`.
   `search stats` now prices spend from these figures.
 
 ### Auto mode
-- With no `-m`, the mode is `auto`: fixed rules for URLs, X, patents and
-  images, then JEV when logged in, else keyword rules, else `general`. The
-  decision and its reason are in `metadata.routing.auto`. Auto never picks
-  `deep`, and picks `social` only on an X cue. An explicit `-m` or `-p` is
-  always obeyed.
+- With no `-m`, the mode is `auto`: fixed rules for URLs, X, similar-site
+  requests, patents and images, then JEV when logged in (keyword rules if it
+  does not answer within 1.2 s), else keyword rules, else `general`. The
+  envelope's `mode` is the mode that ran, and `metadata.routing.auto` gives
+  its source and reason. Auto never picks `deep`, and picks `social` only on
+  an X cue; code at-words (`@property`, `@types/node`), "Twitter card" and
+  email addresses are not X cues. An explicit `-m` or `-p` is always obeyed;
+  if the `-p` engines cannot serve the mode auto picked, the search runs as
+  `general`.
+- In `news` and `social`, a time word such as "today", "latest" or "this
+  month" sets the freshness when you gave no `-f`, reported in
+  `metadata.routing.auto.filters_applied`. `-f` accepts only day, week,
+  month and year; anything else exits 3.
 - Logged in, results in general, news, academic, scholar, people and deep
-  are reranked by relevance (`extra.relevance`); `--no-rerank` turns it off.
+  are reranked by relevance (`metadata.routing.reranked`,
+  `extra.relevance`) when there are at least 3 and `-p` does not name a
+  single engine; `--no-rerank` turns it off.
 
 ### Paid calls are not wasted
 - A fused search no longer cancels engines after 1.5 s. An engine that has
   received the query bills for it, so the search now waits for every engine
   until the mode's deadline and lists late ones in
-  `metadata.providers_timed_out` (`providers_cancelled` stays empty).
+  `metadata.providers_timed_out` (`providers_cancelled` no longer appears).
 - A request that timed out on an engine that bills on receipt is not sent
   again. Retries happen only for connection failures, and for 429 or 503
   answers that carry a Retry-After within the deadline and are not quota
@@ -37,23 +48,63 @@
   whether to top up, fix a key or retry.
 
 ### Current provider APIs
-- Perplexity uses its Search API (the Sonar chat endpoint used before was
-  retired), xAI uses the Responses API with X search, Parallel uses
-  `/v1/search`, and Exa returns highlights and uses its research-paper
-  category for `academic`. Costs follow what each provider reports where it
-  reports one.
+- Perplexity uses its Search API, since the Sonar chat endpoint used before
+  was retired; it returns ranked results and no longer writes an answer.
+  xAI uses the Responses API with X search on `grok-4.3`, and its summary of
+  the posts goes to `answers[]`. Parallel uses `/v1/search` (`fast` for
+  general and news, `advanced` for deep). Exa buys highlights instead of
+  full page text and uses its `publication` category for `academic`.
+- Brave news calls were billed and came back empty, because the adapter read
+  the wrong field; they now return results. Tavily runs general and news at
+  the basic depth (one credit, where every mode used to buy two) and sends
+  the key as a Bearer header. A Linkup budget cap or empty balance is
+  `billing_quota` (exit 2) and is sent once, not retried as a rate limit.
+  Several `-d` domains are joined with OR, so Serper, Brave and Jina no
+  longer return nothing for them. `--country` reaches Serper, Brave, Parallel
+  and Perplexity, and `--lang` Serper, Brave and Perplexity; SerpApi sends
+  neither.
+- Costs follow what each provider reports where it reports one (Jina
+  Reader by its token count). Brave `deep` counts the spend when both of its
+  calls fail.
+- Tavily returns publication dates in every mode, not only news. Linkup's
+  "no result" answer is an empty result (exit 0), not a bad request.
+  Perplexity and xAI apply the whole `--exclude-domain` list to the results,
+  past the 20 entries they accept upstream.
 
 ### Reading pages
 - `extract` starts with a direct fetch that asks for markdown first, follows
   up to 5 redirects and checks every hop against private addresses, then
-  converts HTML to markdown locally. It is free and needs no key.
+  converts HTML to markdown locally. It is free and needs no key. The
+  stealth fetch runs only when the site refused direct; paid renderers come
+  last.
 - Bot challenges, JavaScript shells, binary files, error pages and empty
-  pages are rejected before they count, so the chain moves on and junk is
-  not billed.
+  pages are rejected before they count, so the chain moves on and junk never
+  comes back as the page. A pay-per-crawl 402, a 404 or a 410 stops the
+  chain before any paid renderer is called.
+- `--allow-private` now lets direct and stealth fetch private and loopback
+  addresses on your machine. Otherwise the SSRF guard checks the addresses
+  direct and stealth actually connect to, and a URL it refused is never sent
+  to a paid renderer. The guard also refuses 192.0.0.0/24 (Oracle Cloud
+  metadata at 192.0.0.192) and the documentation ranges.
 
 ### Output
 - In JSON mode stdout carries exactly one JSON document, errors included, so
-  a pipe into `jq` never breaks on a failure. An unknown `-p` name exits 3.
+  a pipe into `jq` never breaks on a failure. A `-p` name that is unknown,
+  or that cannot serve the mode, exits 3.
+- A search flag after a shorthand query (`search "q" -p exa`) exits 3 and
+  the error shows the full form, where it used to be searched as text.
+- `search agent-info` lists `auto` first in `modes[]` and gives
+  `usd_per_call_where_different` for the modes an engine prices unlike its
+  `usd_per_call` (deep on Exa, Brave, Linkup and Parallel; academic and
+  deep on Tavily).
+
+- When a refresh of the metasearch.sh manifest fails, the stale copy is
+  used and the refresh is retried after a minute, so an outage no longer
+  adds a 5 s wait to every logged-in search.
+
+### Config
+- `settings.timeout` is gone: every call is bounded by its mode's deadline,
+  and a `timeout` left in an old file is ignored.
 
 ### Install
 - Prebuilt binaries for Linux arm64 (aarch64). `curl -fsSL
