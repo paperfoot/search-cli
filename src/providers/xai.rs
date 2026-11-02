@@ -34,7 +34,9 @@ pub static SPEC: ProviderSpec = ProviderSpec {
     name: "xai",
     env_keys: &["XAI_API_KEY"],
     modes: &[Mode::Social, Mode::Deep],
-    // In social, domains map to X handles (see registry::filter_support's note).
+    // In social, domains map to X handles (see registry::filter_support's
+    // note). Deep sends no domain filter; a filter that rules x.com out skips
+    // the call (see `deep_skip`).
     filters: FilterSupport {
         freshness: true,
         domains: true,
@@ -76,6 +78,37 @@ fn handles(call: &Call<'_>, list: &[String]) -> Vec<String> {
         .filter(|h| !h.is_empty())
         .take(MAX_HANDLES)
         .collect()
+}
+
+/// A bare host from a -d / --exclude-domain value: no scheme, `www.`, path
+/// or case.
+fn bare_host(domain: &str) -> String {
+    let d = domain.trim();
+    let d = d.split_once("://").map_or(d, |(_, rest)| rest);
+    let d = d.split(['/', '?', '#']).next().unwrap_or_default();
+    let d = d.to_ascii_lowercase();
+    d.strip_prefix("www.").map(str::to_string).unwrap_or(d)
+}
+
+fn is_x_domain(domain: &str) -> bool {
+    matches!(bare_host(domain).as_str(), "x.com" | "twitter.com")
+}
+
+/// Deep has no domain filter to send (-d holds web domains, not handles) and
+/// every result is an x.com post, so when the filters rule x.com out (an
+/// allow list without it, or a deny list with it) the call would be billed
+/// only to return rows the user excluded. Skip it: no rows, no answer, and a
+/// cost of `Some(0)` (`None` would make the engine bill the estimate).
+fn deep_skip(call: &Call<'_>) -> Option<Output> {
+    let opts = call.opts;
+    let off_x = (!opts.include_domains.is_empty()
+        && !opts.include_domains.iter().any(|d| is_x_domain(d)))
+        || opts.exclude_domains.iter().any(|d| is_x_domain(d));
+    (call.mode == Mode::Deep && off_x).then(|| Output {
+        results: Vec::new(),
+        answers: Vec::new(),
+        cost_micros: Some(0),
+    })
 }
 
 fn body(call: &Call<'_>) -> Value {
@@ -406,6 +439,9 @@ impl Adapter for Xai {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "xai" });
         }
+        if let Some(out) = deep_skip(call) {
+            return Ok(out);
+        }
         let body = body(call);
         let client = &self.ctx.client;
         let key = self.api_key();
@@ -587,6 +623,37 @@ mod tests {
         let parsed = url::Url::parse(&u).unwrap();
         let q: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
         assert_eq!(q[0], ("q".to_string(), "AT&T #tag".to_string()));
+    }
+
+    /// Deep sends no domain filter (-d holds web domains, not handles), and
+    /// every result is an x.com post. When the filters rule x.com out, the
+    /// call must not be made (and billed) to return rows the user excluded.
+    #[test]
+    fn deep_skips_the_call_when_domain_filters_rule_out_x() {
+        let skipped = |include: &[&str], exclude: &[&str]| {
+            let opts = SearchOpts {
+                include_domains: include.iter().map(|d| d.to_string()).collect(),
+                exclude_domains: exclude.iter().map(|d| d.to_string()).collect(),
+                ..SearchOpts::default()
+            };
+            deep_skip(&call(Mode::Deep, 10, &opts))
+        };
+        let out = skipped(&[], &["x.com"]).expect("excluding x.com skips the call");
+        assert!(out.results.is_empty() && out.answers.is_empty());
+        // Some(0), not None: None would bill the 45,000 µ$ estimate.
+        assert_eq!(out.cost_micros, Some(0));
+        assert!(skipped(&[], &["https://www.Twitter.com/"]).is_some());
+        assert!(skipped(&["docs.rs"], &[]).is_some(), "x.com is outside -d");
+        assert!(skipped(&["docs.rs", "x.com"], &[]).is_none());
+        assert!(skipped(&["twitter.com"], &[]).is_none());
+        assert!(skipped(&[], &["reddit.com"]).is_none());
+        assert!(skipped(&[], &[]).is_none());
+        // Social maps the same flags to handles: never skipped here.
+        let opts = SearchOpts {
+            exclude_domains: vec!["x.com".into()],
+            ..SearchOpts::default()
+        };
+        assert!(deep_skip(&call(Mode::Social, 10, &opts)).is_none());
     }
 
     #[test]
