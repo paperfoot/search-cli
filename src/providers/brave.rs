@@ -164,10 +164,12 @@ impl Adapter for Brave {
                 let results = match (web.map(web_results), grounding.map(context_results)) {
                     (Ok(w), Ok(g)) => merge(w, g),
                     (Ok(w), Err(e)) => {
+                        let e = crate::errors::redact_secrets(&e.to_string());
                         tracing::warn!("brave llm context: {e}");
                         w
                     }
                     (Err(e), Ok(g)) => {
+                        let e = crate::errors::redact_secrets(&e.to_string());
                         tracing::warn!("brave web: {e}");
                         g
                     }
