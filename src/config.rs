@@ -120,21 +120,12 @@ impl ApiKeys {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    /// Unused since 0.10 (every call is bounded by its mode deadline). Still
-    /// parsed so old config files load; no longer settable or shown.
-    #[serde(
-        default = "default_timeout",
-        deserialize_with = "de_num",
-        skip_serializing
-    )]
-    pub timeout: u64,
+    // `timeout` is gone since 0.10 (every call is bounded by its mode
+    // deadline); an old file's `timeout = ...` is ignored, whatever its type.
     #[serde(default = "default_count", deserialize_with = "de_count")]
     pub count: usize,
 }
 
-fn default_timeout() -> u64 {
-    10
-}
 fn default_count() -> usize {
     10
 }
@@ -157,7 +148,6 @@ impl Default for AppConfig {
                 xai: String::new(),
             },
             settings: Settings {
-                timeout: default_timeout(),
                 count: default_count(),
             },
             metasearch: Metasearch::default(),
@@ -411,7 +401,7 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
         }
         _ => {
             return Err(SearchError::Config(format!(
-                "Invalid key '{key}'. Use a dotted form like 'keys.brave' or 'settings.timeout'."
+                "Invalid key '{key}'. Use a dotted form like 'keys.brave' or 'settings.count'."
             )));
         }
     }
@@ -593,7 +583,6 @@ mod tests {
             ))
             .extract()
             .unwrap();
-        assert_eq!(cfg.settings.timeout, 30);
         assert_eq!(cfg.settings.count, 7);
         assert_eq!(cfg.metasearch.max_providers, Some(4));
     }
