@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Choosing an allocator for a Rust CLI | Example Blog</title>
+  <script>window.analytics = window.analytics || []; window.analytics.push("page");</script>
+  <style>body { font-family: serif; }</style>
+</head>
+<body>
+  <nav><a href="/">Home</a> <a href="/archive">Archive</a> <a href="/about">About</a></nav>
+  <article>
+    <h1>Choosing an allocator for a Rust CLI</h1>
+    <p class="byline">By Ada Example, 2 November 2026</p>
+    <p>Command-line tools start, do one job and exit. That shape changes which memory allocator wins, because a tool that lives for two hundred milliseconds never reaches the steady state that server benchmarks measure. This post walks through the numbers we gathered while profiling a search client that fans out to a dozen providers at once.</p>
+    <h2>Why the default allocator</h2>
+    <p>The system allocator is the safe default. It is what every crate is tested against, it costs nothing in binary size, and on macOS it is surprisingly fast for small allocations. On Linux with glibc the story changes once many threads allocate concurrently, which is exactly what an async runtime with a worker per core does when a dozen responses arrive together.</p>
+    <p>We measured a 14 percent reduction in wall time for a fan-out of twelve requests by switching to <a href="https://github.com/microsoft/mimalloc">mimalloc</a>, with most of the gain coming from JSON parsing of the larger responses.</p>
+    <h2>What we shipped</h2>
+    <p>We kept mimalloc behind a single global allocator declaration in main, measured the binary size cost at about 120 KB stripped, and documented how to turn it off. The change took ten minutes and has needed no attention since, which is the best thing one can say about an allocator.</p>
+    <ul>
+      <li>Measure on the platform you ship to.</li>
+      <li>Measure the whole command, not a micro benchmark.</li>
+    </ul>
+  </article>
+  <aside><p>Subscribe to our newsletter for more posts like this one.</p></aside>
+  <footer><p>Subscribe to our newsletter. Copyright 2026 Example Blog. All rights reserved.</p></footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
