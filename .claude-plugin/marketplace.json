@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "paperfoot",
+  "description": "Web search for AI agents: the search CLI skill and the metasearch.sh MCP server.",
+  "owner": {
+    "name": "Paperfoot AI",
+    "url": "https://paperfoot.si"
+  },
+  "plugins": [
+    {
+      "name": "search-cli",
+      "description": "Teaches Claude to use the search CLI: auto or explicit modes across 13 engines, page extraction, cost in every result. Needs the search binary (brew install paperfoot/tap/search-cli).",
+      "source": "./plugins/search-cli",
+      "category": "productivity"
+    },
+    {
+      "name": "metasearch",
+      "description": "The metasearch.sh MCP server: search and fetch tools over 13 engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
+      "source": "./plugins/metasearch",
+      "category": "productivity"
+    }
+  ]
+}
