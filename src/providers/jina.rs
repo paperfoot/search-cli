@@ -29,6 +29,15 @@ pub static SPEC: ProviderSpec = ProviderSpec {
     },
 };
 
+/// Reader (extract) estimate when Jina reports no token count: 250 µ$,
+/// the server's quote (metasearch `providers/jina.ts`). Reader has no
+/// 10k-token minimum, so it costs less than a search (`SPEC.price`).
+const READER: Price = Price {
+    per_call: 250,
+    per_extra_result: 0,
+    included_results: 0,
+};
+
 pub struct Jina {
     ctx: Arc<AppContext>,
 }
@@ -64,6 +73,13 @@ impl Adapter for Jina {
 
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
+    }
+
+    fn sent_cost(&self, mode: Mode) -> u64 {
+        match mode {
+            Mode::Extract | Mode::Scrape => READER.estimate(0),
+            _ => SPEC.price.estimate(0),
+        }
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
@@ -152,16 +168,14 @@ impl Jina {
         if let Some(r) = out.results.first_mut().filter(|_| !title.is_empty()) {
             r.title = title;
         }
-        if let Some(c) = reader_cost(&body) {
-            out.cost_micros = Some(c);
-        }
+        out.cost_micros = Some(reader_cost(&body).unwrap_or(READER.estimate(0)));
         Ok(out)
     }
 }
 
 /// Reader bills by the tokens it reports: $0.05 per million, so
 /// ceil(tokens × 0.05) µ$ (PLAN D4, provider-reported cost wins). `None`
-/// leaves the flat estimate when the field is missing.
+/// when the field is missing, and the reader estimate applies.
 fn reader_cost(body: &serde_json::Value) -> Option<u64> {
     let tokens = body.pointer("/data/usage/tokens")?.as_u64()?;
     Some(tokens.div_ceil(20))
@@ -179,6 +193,15 @@ fn reader_request(client: &reqwest::Client, auth: &str, url: &str) -> reqwest::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reader_is_estimated_below_a_search() {
+        let jina = Jina::new(Arc::new(AppContext::new(
+            crate::config::AppConfig::default(),
+        )));
+        assert_eq!(jina.sent_cost(Mode::Extract), 250);
+        assert_eq!(jina.sent_cost(Mode::General), 500);
+    }
 
     #[test]
     fn reader_cost_comes_from_reported_tokens() {
