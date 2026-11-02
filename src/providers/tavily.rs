@@ -88,6 +88,8 @@ fn request(client: &reqwest::Client, key: &str, call: &Call<'_>) -> reqwest::Req
         "include_answer": "basic",
         "include_raw_content": false,
         "include_usage": true,
+        // Without this Tavily returns dates only for topic news.
+        "include_published_date": true,
     });
     if !opts.include_domains.is_empty() {
         body["include_domains"] = json!(opts.include_domains);
@@ -238,6 +240,7 @@ mod tests {
         assert_eq!(general["topic"], "general");
         assert_eq!(general["max_results"], 20);
         assert_eq!(general["include_usage"], true);
+        assert_eq!(general["include_published_date"], true);
         assert_eq!(general["include_domains"], json!(["fifa.com"]));
         assert_eq!(general["time_range"], "week");
         let (_, news) = sent(Mode::News, &SearchOpts::default());
