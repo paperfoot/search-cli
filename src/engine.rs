@@ -610,6 +610,13 @@ async fn run_chain(
         if Instant::now() >= deadline {
             break; // never sent, so neither a failure nor a cost
         }
+        // Hosted rungs do not run the local adapters' gate, so a URL direct
+        // found blocked, paywalled (402) or gone (404/410) is checked here.
+        // The gate's errors are BadRequest or Rejected: never billed.
+        if let Err(e) = registry::rung_gate(name, req.query) {
+            outcomes.push((name, Outcome::Failed(e.to_provider_failure(name))));
+            continue;
+        }
         match run_one(
             adapter.as_ref(),
             mode,
@@ -1287,6 +1294,29 @@ mod tests {
             r.results[0].extra.as_ref().unwrap()["content_origin"],
             "untrusted_web_content"
         );
+    }
+
+    #[tokio::test]
+    async fn chain_gates_every_rung_on_a_url_direct_saw_blocked() {
+        let url = "https://chain-gate.example/blocked";
+        registry::note_direct(url, registry::DirectSaw::Blocked);
+        let (adapters, log) = fakes(&[
+            (&jina::SPEC, ok(1, 1, "j")),
+            (&firecrawl::SPEC, ok(1, 1, "fc")),
+        ]);
+        let opts = SearchOpts::default();
+        let req = Request {
+            query: url,
+            mode: Mode::Extract,
+            count: 1,
+            only: None,
+            opts: &opts,
+            deadline: Duration::from_millis(2_000),
+            hosted_cap: None,
+            reranker: None,
+        };
+        let _ = execute_with(adapters, &req).await;
+        assert!(called(&log).is_empty(), "a gated rung was sent the URL");
     }
 
     #[tokio::test]
