@@ -157,12 +157,33 @@ impl Adapter for Linkup {
         let body = body(call);
         let client = &self.ctx.client;
         let key = self.api_key();
-        let resp = super::send(self, call.timeout, || {
+        let resp = match super::send(self, call.timeout, || {
             client.post(ENDPOINT).bearer_auth(&key).json(&body)
         })
-        .await?;
+        .await
+        {
+            Ok(resp) => resp,
+            Err(e) => return no_result_is_empty(e),
+        };
         let data: LinkupResponse = resp.json().await?;
         Ok(parse(data, call.mode))
+    }
+}
+
+/// Linkup answers a query with nothing to find with 400
+/// `SEARCH_QUERY_NO_RESULT` and does not bill it. That is an empty result,
+/// not a malformed request (exit 0 `no_results`, not exit 1 `bad_request`).
+fn no_result_is_empty(e: SearchError) -> Result<Output, SearchError> {
+    match e {
+        SearchError::Upstream {
+            status: 400,
+            ref message,
+            ..
+        } if message.contains("SEARCH_QUERY_NO_RESULT") => Ok(Output {
+            cost_micros: Some(0),
+            ..Output::default()
+        }),
+        e => Err(e),
     }
 }
 
@@ -185,6 +206,27 @@ mod tests {
 
     fn adapter() -> Linkup {
         Linkup::new(Arc::new(AppContext::new(AppConfig::default())))
+    }
+
+    #[test]
+    fn no_result_answer_is_an_empty_unbilled_result() {
+        let body = r#"{"statusCode":400,"error":{"code":"SEARCH_QUERY_NO_RESULT","message":"The query did not yield any result","details":[]}}"#;
+        let upstream = |status| SearchError::Upstream {
+            provider: "linkup",
+            status,
+            category: FailureCategory::BadRequest,
+            message: super::super::http_error_message(status, body),
+        };
+        let out = no_result_is_empty(upstream(400)).expect("empty result, not an error");
+        assert!(out.results.is_empty());
+        assert_eq!(out.cost_micros, Some(0));
+        let other = SearchError::Upstream {
+            provider: "linkup",
+            status: 400,
+            category: FailureCategory::BadRequest,
+            message: "HTTP 400: bad depth".into(),
+        };
+        assert!(no_result_is_empty(other).is_err());
     }
 
     #[test]
