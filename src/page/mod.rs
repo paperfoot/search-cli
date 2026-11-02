@@ -14,19 +14,20 @@
 //!
 //! The verdict rules mirror the hosted service's `page.ts` (PLAN.md §3.8).
 
-// Callers arrive with the extract chain (cli-extract); until then only the
-// tests use this module.
-#![allow(dead_code, unused_imports)]
-
 mod fetch;
 mod markdown;
 mod verdict;
 
-pub use fetch::{
-    client, client_allow_private, fetch_direct, PageClient, MAX_BODY_BYTES, MAX_REDIRECTS,
+pub use fetch::{client, client_allow_private, fetch_direct, PageClient, MAX_REDIRECTS};
+// The stealth rung reads the body, follows redirects and resolves names
+// itself, through the same fail-closed guard.
+#[cfg(feature = "stealth")]
+pub(crate) use fetch::{
+    blocked_in, check_literal_host, decode, error_chain, resolve_public, system_lookup,
+    LookupFuture, MAX_BODY_BYTES,
 };
-pub use markdown::{to_markdown, MAX_DEPTH};
-pub use verdict::{verdict, Verdict, MIN_TEXT_CHARS};
+pub use markdown::to_markdown;
+pub use verdict::{verdict, Verdict};
 
 use reqwest::header::HeaderMap;
 use std::time::Duration;

@@ -16,10 +16,11 @@ name = "search"
 path = "src/main.rs"
 
 [features]
-# The stealth provider needs wreq (BoringSSL), which doesn't link on Linux —
-# build with --no-default-features there; the extract chain starts at jina.
+# The stealth rung uses wreq (BoringSSL). On Linux, wreq's prefix-symbols
+# feature (below) keeps BoringSSL's symbols apart from any OpenSSL in the
+# link; --no-default-features drops it, and the chain starts at direct.
 default = ["stealth"]
-stealth = ["dep:wreq", "dep:wreq-util"]
+stealth = ["dep:wreq", "dep:wreq-util", "dep:http-body-util"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -45,17 +46,24 @@ self_update = { version = "0.43", default-features = false, features = ["reqwest
 backon = "1"
 url = "2.5.8"
 mimalloc = "0.1.48"
-simd-json = "0.17.0"
-wreq = { version = "=6.0.0-rc.28", features = ["json", "cookies"], optional = true }
-wreq-util = { version = "=3.0.0-rc.11", optional = true }
+# Chrome advertises gzip, br and zstd; without the decoders a compressed
+# page reads as binary.
+wreq = { version = "=6.0.0-rc.31", features = ["cookies", "gzip", "brotli", "zstd", "deflate"], optional = true }
+wreq-util = { version = "=3.0.0-rc.14", optional = true }
+# Streams the stealth body under the 5 MB cap (already in the tree via wreq).
+http-body-util = { version = "0.1", optional = true }
 hickory-resolver = { version = "0.26", features = ["tokio"] }
-readability = "0.3"
 # Page module: article extraction to markdown (dom_smoothie) and whole-page
 # markdown on the same parser (dom_query), charset decoding (encoding_rs).
 dom_smoothie = "0.19"
 dom_query = { version = "0.29", default-features = false, features = ["markdown"] }
 encoding_rs = "0.8"
 uuid = { version = "1", features = ["v4"] }
+
+# BoringSSL and OpenSSL export the same symbol names; prefixing BoringSSL's
+# avoids the clash on Linux (wreq README, rc.29 onwards).
+[target.'cfg(target_os = "linux")'.dependencies]
+wreq = { version = "=6.0.0-rc.31", features = ["prefix-symbols"], optional = true }
 
 [dev-dependencies]
 assert_cmd = "2"

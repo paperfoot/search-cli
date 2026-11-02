@@ -8,16 +8,10 @@ ignore = [
     # indicatif -> number_prefix: unmaintained formatting helper, no upgrade
     # published; cosmetic dependency (spinner), not on any network path.
     "RUSTSEC-2025-0119",
-    # rustls-pemfile: unmaintained but frozen-format PEM parser; pulled in
-    # transitively, no patched alternative exposed by the parents yet.
-    "RUSTSEC-2025-0134",
     # quick-xml 0.38 inside self_update: only its S3 backend parses XML, and
     # `search update` uses the GitHub backend. Drop once self_update moves.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    # h2 0.3 arrives only through readability -> reqwest 0.11; the extract
-    # lane (wave 2) removes readability. Drop this line with it.
-    "RUSTSEC-2026-0258",
 ]
 
 [licenses]
