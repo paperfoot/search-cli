@@ -155,7 +155,15 @@ pub(crate) async fn execute_with(
         .map(|(name, items)| (name.clone(), items.len()))
         .collect();
 
-    let mut results = fuse_rrf(buckets);
+    // Only fused modes merge across providers. Chain and single keep the
+    // answering provider's rows and order as sent: rows may share a URL
+    // (images from one page) or have none (places).
+    let mut results = match mode_spec.merge {
+        MergeKind::Fused => fuse_rrf(buckets),
+        MergeKind::Chain | MergeKind::Single => {
+            buckets.into_iter().flat_map(|(_, items)| items).collect()
+        }
+    };
     results.truncate(req.count);
 
     // Total failure is an error, not a success-shaped envelope. Zero results
@@ -421,7 +429,8 @@ fn no_providers_error(mode: Mode, only: Option<&[String]>) -> SearchError {
 /// engines agree on outranks any single engine's top hit. Deterministic:
 /// independent of provider completion order. Duplicates keep the first-seen
 /// content (by bucket order), enriched with missing fields and an
-/// `also_found_by` list in `extra`.
+/// `also_found_by` list in `extra`. A row without a URL (a citation or a
+/// place with no link) is its own result: nothing proves two such rows match.
 fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
     struct Fused {
         result: SearchResult,
@@ -432,7 +441,10 @@ fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
     let mut insertion = 0usize;
     for (provider, items) in buckets {
         for (rank, item) in items.into_iter().enumerate() {
-            let key = normalize_url(&item.url);
+            let key = match normalize_url(&item.url) {
+                k if k.is_empty() => format!("\0{insertion}"),
+                k => k,
+            };
             let add = 1.0 / (RRF_K + rank as f64 + 1.0);
             match map.get_mut(&key) {
                 Some(f) => {
@@ -850,6 +862,57 @@ mod tests {
         assert_eq!(cost.micros, 25_000);
         assert!((cost.usd - 0.025).abs() < 1e-9);
         assert_eq!(r.metadata.transport["exa"], "direct");
+    }
+
+    fn urls(urls: &[&str], snippet: &'static str) -> Act {
+        Act::Ok {
+            delay_ms: 1,
+            urls: urls.iter().map(|u| u.to_string()).collect(),
+            answer: None,
+            cost: None,
+            snippet,
+        }
+    }
+
+    /// Serper places rows carry no `link`, so every url is "": a single
+    /// provider's rows come back as sent, never merged into one.
+    #[tokio::test]
+    async fn places_rows_without_url_are_all_kept() {
+        let (adapters, _) = fakes(&[(&serper::SPEC, urls(&[""; 5], "a cafe"))]);
+        let r = search(adapters, Mode::Places, 5, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.results.len(), 5);
+    }
+
+    /// Images from the same source page share a `link`: single mode keeps
+    /// the provider's rows and order.
+    #[tokio::test]
+    async fn single_mode_keeps_rows_that_share_a_url() {
+        let page = "https://site.example/gallery";
+        let (adapters, _) = fakes(&[(&serper::SPEC, urls(&[page, page, page], "img"))]);
+        let r = search(adapters, Mode::Images, 10, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.results.len(), 3);
+    }
+
+    /// Fusion never treats two link-less rows as the same result.
+    #[tokio::test]
+    async fn fused_rows_without_url_are_not_merged() {
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, urls(&["https://a.org/1", "", ""], "paper")),
+            (&serpapi::SPEC, urls(&["", "https://b.org/2"], "paper")),
+        ]);
+        let r = search(adapters, Mode::Scholar, 10, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.results.len(), 5);
+        assert!(r
+            .results
+            .iter()
+            .filter(|x| x.url.is_empty())
+            .all(|x| x.extra.is_none()));
     }
 
     #[tokio::test]
