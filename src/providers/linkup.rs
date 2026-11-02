@@ -1,11 +1,33 @@
+use super::spec::{FilterSupport, Price};
+use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::types::{Mode, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub static SPEC: ProviderSpec = ProviderSpec {
+    name: "linkup",
+    env_keys: &["LINKUP_API_KEY"],
+    modes: &[Mode::General, Mode::News, Mode::Deep],
+    filters: FilterSupport {
+        freshness: true,
+        domains: true,
+        country: false,
+        lang: false,
+    },
+    max_count: 20,
+    timeout: Duration::from_secs(15),
+    billed_on_send: true,
+    price: Price {
+        per_call: 5_000,
+        per_extra_result: 0,
+        included_results: 0,
+    },
+};
 
 pub struct Linkup {
     ctx: Arc<AppContext>,
@@ -17,74 +39,7 @@ impl Linkup {
     }
 
     fn api_key(&self) -> String {
-        super::resolve_key(&self.ctx.config.keys.linkup, "LINKUP_API_KEY")
-    }
-
-    async fn do_search(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-        default_days_back: Option<u64>,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing { provider: "linkup" });
-        }
-
-        let mut body = json!({
-            "q": query,
-            "depth": "standard",
-            "outputType": "searchResults",
-            "maxResults": count,
-        });
-        if !opts.include_domains.is_empty() {
-            body["includeDomains"] = json!(opts.include_domains);
-        }
-        if !opts.exclude_domains.is_empty() {
-            body["excludeDomains"] = json!(opts.exclude_domains);
-        }
-        // Freshness maps to fromDate (YYYY-MM-DD). News search without an
-        // explicit -f defaults to the last week, since Linkup has no news
-        // vertical of its own.
-        let days_back = opts
-            .freshness
-            .as_deref()
-            .and_then(super::freshness_days)
-            .or(default_days_back);
-        if let Some(days) = days_back {
-            body["fromDate"] = json!(super::date_days_ago(days));
-        }
-
-        let client = &self.ctx.client;
-        let key = self.api_key();
-        let resp = super::retry_request(|| async {
-            let r = client
-                .post("https://api.linkup.so/v1/search")
-                .bearer_auth(&key)
-                .json(&body)
-                .send()
-                .await?;
-            let r = super::ok_or_api_error(r, "linkup").await?;
-            Ok(r.json::<LinkupResponse>().await?)
-        })
-        .await?;
-
-        Ok(resp
-            .results
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.result_type.as_deref() != Some("image"))
-            .map(|r| SearchResult {
-                title: r.name.unwrap_or_default(),
-                url: r.url.unwrap_or_default(),
-                snippet: r.content.unwrap_or_default(),
-                source: "linkup".to_string(),
-                published: None,
-                image_url: None,
-                extra: None,
-            })
-            .filter(|r| !r.url.is_empty())
-            .collect())
+        super::key_for(&self.ctx.config, &SPEC)
     }
 }
 
@@ -103,42 +58,78 @@ struct LinkupResult {
 }
 
 #[async_trait]
-impl super::Provider for Linkup {
-    fn name(&self) -> &'static str {
-        "linkup"
-    }
-
-    fn capabilities(&self) -> &[&'static str] {
-        &["general", "news", "deep"]
-    }
-
-    fn env_keys(&self) -> &[&'static str] {
-        &["LINKUP_API_KEY", "SEARCH_KEYS_LINKUP"]
+impl Adapter for Linkup {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
     }
 
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(15)
-    }
+    // Every mode sends `depth: "standard"` today, so deep costs the base
+    // price. A lane that switches deep to `depth: "deep"` must set
+    // `cost_micros` to 50,000.
+    async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+        if !self.is_configured() {
+            return Err(SearchError::AuthMissing { provider: "linkup" });
+        }
+        let opts = call.opts;
+        let mut body = json!({
+            "q": call.query,
+            "depth": "standard",
+            "outputType": "searchResults",
+            "maxResults": call.count,
+        });
+        if !opts.include_domains.is_empty() {
+            body["includeDomains"] = json!(opts.include_domains);
+        }
+        if !opts.exclude_domains.is_empty() {
+            body["excludeDomains"] = json!(opts.exclude_domains);
+        }
+        // Freshness maps to fromDate (YYYY-MM-DD). News search without an
+        // explicit -f defaults to the last week, since Linkup has no news
+        // vertical of its own.
+        let default_days = (call.mode == Mode::News).then_some(7);
+        let days_back = opts
+            .freshness
+            .as_deref()
+            .and_then(super::freshness_days)
+            .or(default_days);
+        if let Some(days) = days_back {
+            body["fromDate"] = json!(super::date_days_ago(days));
+        }
 
-    async fn search(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        self.do_search(query, count, opts, None).await
-    }
+        let client = &self.ctx.client;
+        let key = self.api_key();
+        let resp = super::send(self, call.timeout, || {
+            client
+                .post("https://api.linkup.so/v1/search")
+                .bearer_auth(&key)
+                .json(&body)
+        })
+        .await?;
+        let resp: LinkupResponse = resp.json().await?;
 
-    async fn search_news(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        self.do_search(query, count, opts, Some(7)).await
+        let results = resp
+            .results
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.result_type.as_deref() != Some("image"))
+            .map(|r| SearchResult {
+                title: r.name.unwrap_or_default(),
+                url: r.url.unwrap_or_default(),
+                snippet: r.content.unwrap_or_default(),
+                source: "linkup".to_string(),
+                published: None,
+                image_url: None,
+                extra: None,
+            })
+            .filter(|r| !r.url.is_empty())
+            .collect();
+        Ok(Output {
+            results,
+            ..Output::default()
+        })
     }
 }

@@ -1,11 +1,33 @@
+use super::spec::{FilterSupport, Price};
+use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::types::{Mode, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub static SPEC: ProviderSpec = ProviderSpec {
+    name: "firecrawl",
+    env_keys: &["FIRECRAWL_API_KEY"],
+    modes: &[Mode::Extract],
+    filters: FilterSupport {
+        freshness: false,
+        domains: false,
+        country: false,
+        lang: false,
+    },
+    max_count: 1,
+    timeout: Duration::from_secs(30),
+    billed_on_send: true,
+    price: Price {
+        per_call: 5_000,
+        per_extra_result: 0,
+        included_results: 0,
+    },
+};
 
 pub struct Firecrawl {
     ctx: Arc<AppContext>,
@@ -17,7 +39,7 @@ impl Firecrawl {
     }
 
     fn api_key(&self) -> String {
-        super::resolve_key(&self.ctx.config.keys.firecrawl, "FIRECRAWL_API_KEY")
+        super::key_for(&self.ctx.config, &SPEC)
     }
 }
 
@@ -40,113 +62,22 @@ struct FirecrawlMetadata {
 }
 
 #[async_trait]
-impl super::Provider for Firecrawl {
-    fn name(&self) -> &'static str {
-        "firecrawl"
-    }
-
-    fn env_keys(&self) -> &[&'static str] {
-        &["FIRECRAWL_API_KEY", "SEARCH_KEYS_FIRECRAWL"]
-    }
-    fn capabilities(&self) -> &[&'static str] {
-        &["general", "scrape", "extract"]
+impl Adapter for Firecrawl {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
     }
 
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
     }
 
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(30)
-    }
-
-    async fn search(
-        &self,
-        query: &str,
-        count: usize,
-        _opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        if self.api_key().is_empty() {
+    async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+        if !self.is_configured() {
             return Err(SearchError::AuthMissing {
                 provider: "firecrawl",
             });
         }
-        // Firecrawl v2 search endpoint — web search + scrape combo
-        let client = &self.ctx.client;
-        let auth = format!("Bearer {}", self.api_key());
-        let body = json!({
-            "query": query,
-            "limit": count,
-            "scrapeOptions": { "formats": ["markdown"] }
-        });
-
-        super::retry_request(|| async {
-            let resp = client
-                .post("https://api.firecrawl.dev/v2/search")
-                .header("Authorization", &auth)
-                .json(&body)
-                .send()
-                .await?;
-
-            let resp = super::ok_or_api_error(resp, "firecrawl").await?;
-
-            let val: serde_json::Value = resp.json().await?;
-            let results = val
-                .get("data")
-                .and_then(|d| d.get("web"))
-                .or_else(|| val.get("data"))
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .map(|item| SearchResult {
-                            title: item
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            url: item
-                                .get("url")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            snippet: item
-                                .get("description")
-                                .or_else(|| item.get("markdown"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            source: "firecrawl_search".to_string(),
-                            published: None,
-                            image_url: None,
-                            extra: None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            Ok(results)
-        })
-        .await
-    }
-
-    async fn search_news(
-        &self,
-        _query: &str,
-        _count: usize,
-        _opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        Ok(vec![])
-    }
-}
-
-impl Firecrawl {
-    pub async fn scrape_url(&self, url: &str) -> Result<Vec<SearchResult>, SearchError> {
-        if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing {
-                provider: "firecrawl",
-            });
-        }
-
+        let url = call.query;
         let client = &self.ctx.client;
         let auth = format!("Bearer {}", self.api_key());
         let body = json!({
@@ -154,41 +85,37 @@ impl Firecrawl {
             "formats": ["markdown"]
         });
 
-        super::retry_request(|| async {
-            let resp = client
+        let resp = super::send(self, call.timeout, || {
+            client
                 .post("https://api.firecrawl.dev/v2/scrape")
                 .header("Authorization", &auth)
                 .header("Content-Type", "application/json")
                 .json(&body)
-                .send()
-                .await?;
+        })
+        .await?;
+        let body: FirecrawlScrapeResponse = resp.json().await?;
 
-            if resp.status() == 429 {
-                return Err(SearchError::RateLimited {
-                    provider: "firecrawl",
-                });
-            }
-            let resp = super::ok_or_api_error(resp, "firecrawl").await?;
-
-            let body: FirecrawlScrapeResponse = resp.json().await?;
-            if let Some(data) = body.data {
-                let meta = data.metadata.unwrap_or(FirecrawlMetadata {
-                    title: None,
-                    source_url: None,
-                });
-                Ok(vec![SearchResult {
-                    title: meta.title.unwrap_or_default(),
-                    url: meta.source_url.unwrap_or_else(|| url.to_string()),
+        let results = match body.data {
+            Some(data) => {
+                let (title, source_url) = data
+                    .metadata
+                    .map(|m| (m.title, m.source_url))
+                    .unwrap_or_default();
+                vec![SearchResult {
+                    title: title.unwrap_or_default(),
+                    url: source_url.unwrap_or_else(|| url.to_string()),
                     snippet: data.markdown.unwrap_or_default(),
                     source: "firecrawl".to_string(),
                     published: None,
                     image_url: None,
                     extra: None,
-                }])
-            } else {
-                Ok(vec![])
+                }]
             }
+            None => Vec::new(),
+        };
+        Ok(Output {
+            results,
+            ..Output::default()
         })
-        .await
     }
 }

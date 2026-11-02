@@ -1,29 +1,35 @@
+//! One executor for every mode. The registry names a mode's providers, its
+//! merge kind and its deadline; the engine runs them:
+//! - **fused**: every provider at once, all collected until they finish or
+//!   the deadline passes, then reciprocal-rank fusion;
+//! - **chain**: in order until one returns content the mode accepts;
+//! - **single**: one call.
+//!
+//! A call that has been sent is paid for, so nothing is cancelled before the
+//! mode deadline; whatever is still running then is reported in
+//! `metadata.providers_timed_out`.
+
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::providers::{self, Provider};
-use crate::registry;
+use crate::providers::{self, Adapter, Call, Output};
+use crate::registry::{self, MergeKind};
 use crate::types::{
-    Answer, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus, SearchOpts,
-    SearchResponse, SearchResult, ENVELOPE_VERSION,
+    Answer, CostSummary, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus,
+    SearchOpts, SearchResponse, SearchResult, ENVELOPE_VERSION,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
-use tokio::time::timeout;
-
-/// Once enough unique results have arrived, in-flight providers get this long
-/// to land before being cancelled. Long enough for the second/third-fastest
-/// providers to contribute (so fusion has consensus to rank on), short enough
-/// that one slow provider doesn't hold the response hostage.
-const EARLY_STOP_GRACE: Duration = Duration::from_millis(1500);
 
 /// Reciprocal-rank-fusion constant (standard k=60): dampens the gap between
 /// rank 1 and rank 2 so cross-provider consensus outweighs any single
 /// provider's top pick.
 const RRF_K: f64 = 60.0;
 
-pub async fn execute_search(
+/// Main entry point (called by main.rs): run `mode` over the configured
+/// providers within the mode's deadline.
+pub async fn run(
     ctx: Arc<AppContext>,
     query: &str,
     mode: Mode,
@@ -31,139 +37,130 @@ pub async fn execute_search(
     only_providers: &Option<Vec<String>>,
     opts: &SearchOpts,
 ) -> Result<SearchResponse, SearchError> {
-    let start = Instant::now();
-    let query_arc: Arc<str> = Arc::from(query);
+    let request = Request {
+        query,
+        mode,
+        count,
+        only: only_providers.as_deref(),
+        opts,
+        deadline: registry::spec(mode).deadline,
+    };
+    execute_with(providers::build_providers(&ctx), &request).await
+}
 
-    // Concrete mode in, concrete provider set out — no intent guessing, no
-    // speculative pre-launch. The set is the mode's providers (or whatever -p
-    // requested), intersected with what's actually configured.
-    let wanted = registry::spec(mode).providers;
-    let active: Vec<Box<dyn Provider>> = providers::build_providers(&ctx)
-        .into_iter()
-        .filter(|p| {
-            let name = p.name();
-            let in_mode_set = wanted.contains(&name);
-            (in_mode_set || only_providers.is_some())
-                && provider_allowed(name, only_providers)
-                && p.is_configured()
+/// One search, independent of where adapters come from (tests pass fakes).
+pub(crate) struct Request<'a> {
+    pub query: &'a str,
+    pub mode: Mode,
+    pub count: usize,
+    pub only: Option<&'a [String]>,
+    pub opts: &'a SearchOpts,
+    pub deadline: Duration,
+}
+
+/// What one provider call produced.
+enum Outcome {
+    Done(Output),
+    /// A 2xx the mode would not accept (chain); paid for all the same.
+    Rejected(ProviderFailure, Output),
+    Failed(ProviderFailure),
+    /// Still running at the mode deadline.
+    TimedOut,
+}
+
+pub(crate) async fn execute_with(
+    adapters: Vec<Box<dyn Adapter>>,
+    req: &Request<'_>,
+) -> Result<SearchResponse, SearchError> {
+    let start = Instant::now();
+    let deadline = start + req.deadline;
+    // `scrape` is an alias: route it exactly like `extract`.
+    let mode = match req.mode {
+        Mode::Scrape => Mode::Extract,
+        m => m,
+    };
+    let mode_spec = registry::spec(mode);
+    let plan = plan(adapters, mode, mode_spec.providers, req.only)?;
+    if plan.is_empty() {
+        return Err(no_providers_error(mode, req.only));
+    }
+
+    let names: Vec<&'static str> = plan.iter().map(|a| a.name()).collect();
+    // What a sent-but-unanswered call costs in this mode: billed providers
+    // bill on send. Taken now, before the adapters move into their tasks.
+    let sent_costs: HashMap<&'static str, u64> = plan
+        .iter()
+        .filter(|a| a.spec().billed_on_send)
+        .map(|a| (a.name(), a.sent_cost(mode)))
+        .collect();
+    let mut transport: BTreeMap<String, String> = plan
+        .iter()
+        .map(|a| {
+            let how = if a.spec().env_keys.is_empty() {
+                "local"
+            } else {
+                "direct"
+            };
+            (a.name().to_string(), how.to_string())
         })
         .collect();
 
-    if active.is_empty() {
-        return Err(no_providers_error(mode, only_providers));
-    }
+    let mut outcomes: Vec<(&'static str, Outcome)> = match mode_spec.merge {
+        MergeKind::Fused => run_fused(plan, req, mode, deadline).await,
+        MergeKind::Chain | MergeKind::Single => run_chain(plan, req, mode, deadline).await,
+    };
+    // Plan order, not completion order, so fusion ties break the same way
+    // whichever provider answered first.
+    outcomes.sort_by_key(|(n, _)| names.iter().position(|x| x == n));
 
-    let mut set = JoinSet::new();
-    let mut providers_queried = Vec::new();
-
-    // Deep mode also pulls Brave's LLM Context (grounding) API alongside Brave
-    // web search — querying brave twice (web + grounding) is intentional.
-    if mode == Mode::Deep {
-        let brave = providers::brave::Brave::new(ctx.clone());
-        if brave.is_configured() {
-            let (q, c, o) = (query_arc.clone(), count, opts.clone());
-            set.spawn(async move {
-                let result =
-                    timeout(Duration::from_secs(15), brave.search_llm_context(&q, c, &o)).await;
-                ("brave_llm_context", result)
-            });
-            providers_queried.push("brave_llm_context".to_string());
-        }
-    }
-
-    for provider in active {
-        let q = query_arc.clone();
-        let c = count;
-        let name = provider.name();
-        let tout = provider.timeout();
-        let sopts = opts.clone();
-        providers_queried.push(name.to_string());
-
-        if mode == Mode::News {
-            set.spawn(async move {
-                let result = timeout(tout, provider.search_news(&q, c, &sopts)).await;
-                (name, result)
-            });
-        } else {
-            set.spawn(async move {
-                let result = timeout(tout, provider.search(&q, c, &sopts)).await;
-                (name, result)
-            });
-        }
-    }
-
-    // Per-provider result buckets, fused after collection. Early-stop: once
-    // enough unique results exist, in-flight providers get EARLY_STOP_GRACE
-    // to land, then are cancelled. Deep mode never cancels — coverage is its
-    // entire purpose.
     let mut buckets: Vec<(String, Vec<SearchResult>)> = Vec::new();
-    let mut providers_failed = Vec::new();
-    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
-    let mut unique_urls = HashSet::new();
-    let mut deadline: Option<tokio::time::Instant> = None;
-
-    loop {
-        let join_result = match deadline {
-            Some(d) => match tokio::time::timeout_at(d, set.join_next()).await {
-                Ok(r) => r,
-                Err(_) => {
-                    // Grace expired: cancel stragglers, then drain without a
-                    // deadline so already-finished tasks aren't lost.
-                    set.abort_all();
-                    deadline = None;
-                    continue;
-                }
-            },
-            None => set.join_next().await,
+    let mut answers: Vec<Answer> = Vec::new();
+    let mut failures: Vec<ProviderFailure> = Vec::new();
+    let mut timed_out: Vec<String> = Vec::new();
+    let mut by_provider: BTreeMap<String, u64> = BTreeMap::new();
+    let mut queried: Vec<String> = Vec::new();
+    for (name, outcome) in outcomes {
+        queried.push(name.to_string());
+        let spec = providers::find(name);
+        let sent_cost = sent_costs.get(name).copied();
+        // An answered call: the upstream's own figure, else the estimate.
+        let answered_cost = |out: &Output| {
+            out.cost_micros
+                .unwrap_or_else(|| spec.map_or(0, |s| s.price.estimate(out.results.len() as u16)))
         };
-        let Some(join_result) = join_result else {
-            break;
-        };
-        match join_result {
-            Ok((name, Ok(Ok(items)))) => {
-                for item in &items {
-                    unique_urls.insert(normalize_url(&item.url));
-                }
-                buckets.push((name.to_string(), items));
-                if mode != Mode::Deep && deadline.is_none() && unique_urls.len() >= count {
-                    deadline = Some(tokio::time::Instant::now() + EARLY_STOP_GRACE);
-                }
+        match outcome {
+            Outcome::Done(out) => {
+                by_provider.insert(name.to_string(), answered_cost(&out));
+                answers.extend(out.answers);
+                buckets.push((name.to_string(), out.results));
             }
-            Ok((name, Ok(Err(e)))) => {
-                tracing::warn!("{name}: {e}");
-                provider_failures.push(e.to_provider_failure(name));
-                providers_failed.push(name.to_string());
+            Outcome::Rejected(f, out) => {
+                tracing::warn!("{name}: {}", f.reason);
+                by_provider.insert(name.to_string(), answered_cost(&out));
+                failures.push(f);
             }
-            Ok((name, Err(_))) => {
-                tracing::warn!("{name}: timed out");
-                provider_failures.push(timeout_failure(name));
-                providers_failed.push(name.to_string());
-            }
-            Err(e) => {
-                if !e.is_cancelled() {
-                    tracing::error!("join error: {e}");
+            Outcome::Failed(f) => {
+                tracing::warn!("{name}: {}", f.reason);
+                if providers::billed_failure(f.category) {
+                    if let Some(c) = sent_cost {
+                        by_provider.insert(name.to_string(), c);
+                    }
                 }
+                failures.push(f);
+            }
+            Outcome::TimedOut => {
+                tracing::warn!("{name}: still running at the mode deadline");
+                if let Some(c) = sent_cost {
+                    by_provider.insert(name.to_string(), c);
+                }
+                timed_out.push(name.to_string());
+                failures.push(timeout_failure(name));
             }
         }
     }
 
-    // Synthetic AI answers (non-http pseudo-URLs like perplexity://answer)
-    // move to the answers field: they aren't fetchable web results and must
-    // not consume result slots or pollute `.results[].url` pipelines.
-    let mut answers: Vec<Answer> = Vec::new();
-    for (_, items) in &mut buckets {
-        items.retain(|r| {
-            if is_synthetic_answer(r) {
-                answers.push(Answer {
-                    provider: r.source.clone(),
-                    text: r.snippet.clone(),
-                });
-                false
-            } else {
-                true
-            }
-        });
-    }
+    // A chain that stopped early never reached the rest.
+    transport.retain(|name, _| queried.contains(name));
 
     let provider_results: BTreeMap<String, usize> = buckets
         .iter()
@@ -171,62 +168,275 @@ pub async fn execute_search(
         .map(|(name, items)| (name.clone(), items.len()))
         .collect();
 
-    // Cancelled = started but neither returned nor failed.
-    let providers_cancelled: Vec<String> = providers_queried
-        .iter()
-        .filter(|q| {
-            !buckets.iter().any(|(n, _)| n == *q) && !providers_failed.iter().any(|f| f == *q)
-        })
-        .cloned()
-        .collect();
+    // Only fused modes merge across providers. Chain and single keep the
+    // answering provider's rows and order as sent: rows may share a URL
+    // (images from one page) or have none (places).
+    let mut results = match mode_spec.merge {
+        MergeKind::Fused => fuse_rrf(buckets),
+        MergeKind::Chain | MergeKind::Single => {
+            buckets.into_iter().flat_map(|(_, items)| items).collect()
+        }
+    };
+    results.truncate(req.count);
 
-    let mut all_results = fuse_rrf(buckets);
-    all_results.truncate(count);
-    let result_count = all_results.len();
-    let warnings = filter_warnings(&providers_queried, opts);
-    let elapsed = start.elapsed();
-
-    // Total failure is an error, not a success-shaped envelope.
-    if all_results.is_empty() && answers.is_empty() && !provider_failures.is_empty() {
-        return Err(SearchError::AllProvidersFailed {
-            failed: provider_failures,
-        });
+    // Total failure is an error, not a success-shaped envelope. Zero results
+    // with at least one clean answer is `no_results`.
+    if results.is_empty()
+        && answers.is_empty()
+        && !failures.is_empty()
+        && failures.len() == queried.len()
+    {
+        return Err(SearchError::AllProvidersFailed { failed: failures });
     }
 
+    if mode == Mode::Extract {
+        // Scraped page content is untrusted input for the consuming agent —
+        // label it so downstream prompts can treat it as data, not instructions.
+        for r in &mut results {
+            let extra = r.extra.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = extra.as_object_mut() {
+                obj.insert(
+                    "content_origin".to_string(),
+                    serde_json::json!("untrusted_web_content"),
+                );
+            }
+        }
+    }
+
+    let providers_failed: Vec<String> = failures.iter().map(|f| f.provider.clone()).collect();
     let status = ResponseStatus::classify(
-        all_results.is_empty() && answers.is_empty(),
+        results.is_empty() && answers.is_empty(),
         !providers_failed.is_empty(),
     );
-
     Ok(SearchResponse {
         version: ENVELOPE_VERSION.to_string(),
         status: status.as_str().to_string(),
-        query: query.to_string(),
-        mode: mode.to_string(),
-        results: all_results,
-        answers,
+        query: req.query.to_string(),
+        mode: req.mode.to_string(),
         metadata: ResponseMetadata {
-            elapsed_ms: elapsed.as_millis(),
-            result_count,
-            providers_queried,
+            elapsed_ms: start.elapsed().as_millis(),
+            result_count: results.len(),
+            warnings: filter_warnings(mode, &queried, req.opts),
+            providers_queried: queried,
             providers_failed,
-            providers_cancelled,
+            providers_cancelled: Vec::new(),
+            providers_timed_out: timed_out,
             provider_results,
-            warnings,
             cached: false,
             cache_age_secs: None,
-            provider_failures,
+            provider_failures: failures,
+            transport,
+            cost: (!by_provider.is_empty()).then(|| CostSummary::estimate(by_provider)),
         },
+        results,
+        answers,
     })
 }
 
-/// True for provider-synthesized answers smuggled in as results under a
-/// known pseudo-URL scheme (perplexity://answer, tavily://answer). Matched
-/// exactly — a result with a merely malformed or scheme-less URL is still a
-/// result, not an answer, and must not silently vanish from results[].
-fn is_synthetic_answer(r: &SearchResult) -> bool {
-    const ANSWER_SCHEMES: &[&str] = &["perplexity://", "tavily://"];
-    ANSWER_SCHEMES.iter().any(|s| r.url.starts_with(s))
+/// The mode's configured providers in registry order, narrowed by `-p`.
+/// A `-p` name that does not serve the mode is bad input (exit 3), so a
+/// typo never silently runs nothing or something else.
+fn plan(
+    adapters: Vec<Box<dyn Adapter>>,
+    mode: Mode,
+    order: &[&str],
+    only: Option<&[String]>,
+) -> Result<Vec<Box<dyn Adapter>>, SearchError> {
+    if let Some(list) = only {
+        for want in list {
+            let serves = adapters
+                .iter()
+                .any(|a| a.name().eq_ignore_ascii_case(want) && a.spec().modes.contains(&mode));
+            if !serves {
+                let known = adapters.iter().any(|a| a.name().eq_ignore_ascii_case(want));
+                let why = if known {
+                    format!("provider '{want}' does not serve mode '{mode}'")
+                } else {
+                    format!("unknown provider '{want}'")
+                };
+                return Err(SearchError::InvalidInput {
+                    message: format!(
+                        "{why}; mode '{mode}' is served by [{}]",
+                        servers(&adapters, mode).join(", ")
+                    ),
+                });
+            }
+        }
+    }
+    let rank = |name: &str| order.iter().position(|o| *o == name).unwrap_or(order.len());
+    let mut picked: Vec<Box<dyn Adapter>> = adapters
+        .into_iter()
+        .filter(|a| match only {
+            Some(list) => list.iter().any(|w| w.eq_ignore_ascii_case(a.name())),
+            None => order.contains(&a.name()),
+        })
+        .filter(|a| a.spec().modes.contains(&mode) && a.is_configured())
+        .collect();
+    picked.sort_by_key(|a| rank(a.name()));
+    Ok(picked)
+}
+
+fn servers(adapters: &[Box<dyn Adapter>], mode: Mode) -> Vec<&'static str> {
+    adapters
+        .iter()
+        .filter(|a| a.spec().modes.contains(&mode))
+        .map(|a| a.name())
+        .collect()
+}
+
+fn per_call_count(adapter: &dyn Adapter, count: usize) -> u16 {
+    (count.min(u16::MAX as usize) as u16).clamp(1, adapter.spec().max_count)
+}
+
+fn time_left(deadline: Instant, adapter: &dyn Adapter) -> Duration {
+    adapter
+        .spec()
+        .timeout
+        .min(deadline.saturating_duration_since(Instant::now()))
+}
+
+async fn run_one(
+    adapter: &dyn Adapter,
+    mode: Mode,
+    query: &str,
+    count: usize,
+    opts: &SearchOpts,
+    deadline: Instant,
+) -> Outcome {
+    let call = Call {
+        mode,
+        query,
+        count: per_call_count(adapter, count),
+        opts,
+        timeout: time_left(deadline, adapter),
+    };
+    match tokio::time::timeout_at(deadline.into(), adapter.call(&call)).await {
+        Ok(Ok(out)) => Outcome::Done(out),
+        Ok(Err(e)) => Outcome::Failed(e.to_provider_failure(adapter.name())),
+        Err(_) => Outcome::TimedOut,
+    }
+}
+
+/// Every provider at once; collect until all finish or the deadline passes.
+async fn run_fused(
+    plan: Vec<Box<dyn Adapter>>,
+    req: &Request<'_>,
+    mode: Mode,
+    deadline: Instant,
+) -> Vec<(&'static str, Outcome)> {
+    let mut set: JoinSet<(&'static str, Outcome)> = JoinSet::new();
+    let mut pending: Vec<&'static str> = Vec::new();
+    for adapter in plan {
+        let name = adapter.name();
+        pending.push(name);
+        let query = req.query.to_string();
+        let opts = req.opts.clone();
+        let count = req.count;
+        set.spawn(async move {
+            let outcome = run_one(adapter.as_ref(), mode, &query, count, &opts, deadline).await;
+            (name, outcome)
+        });
+    }
+
+    let mut outcomes = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline.into(), set.join_next()).await {
+            Ok(Some(Ok((name, outcome)))) => {
+                pending.retain(|n| *n != name);
+                outcomes.push((name, outcome));
+            }
+            Ok(Some(Err(e))) => tracing::error!("provider task failed: {e}"),
+            Ok(None) => break,
+            Err(_) => {
+                // Deadline: nothing more will be waited for.
+                set.abort_all();
+                break;
+            }
+        }
+    }
+    outcomes.extend(pending.into_iter().map(|n| (n, Outcome::TimedOut)));
+    outcomes
+}
+
+/// In order; the first output with results that the mode accepts wins.
+async fn run_chain(
+    plan: Vec<Box<dyn Adapter>>,
+    req: &Request<'_>,
+    mode: Mode,
+    deadline: Instant,
+) -> Vec<(&'static str, Outcome)> {
+    let mut outcomes = Vec::new();
+    for adapter in plan {
+        let name = adapter.name();
+        if Instant::now() >= deadline {
+            break; // never sent, so neither a failure nor a cost
+        }
+        match run_one(
+            adapter.as_ref(),
+            mode,
+            req.query,
+            req.count,
+            req.opts,
+            deadline,
+        )
+        .await
+        {
+            Outcome::Done(out) if out.results.is_empty() => {
+                outcomes.push((name, Outcome::Done(out)));
+            }
+            Outcome::Done(out) => match registry::accept(mode, &out) {
+                Ok(()) => {
+                    outcomes.push((name, Outcome::Done(out)));
+                    break;
+                }
+                Err(reason) => {
+                    outcomes.push((name, Outcome::Rejected(rejected(name, reason), out)))
+                }
+            },
+            other => outcomes.push((name, other)),
+        }
+    }
+    outcomes
+}
+
+fn rejected(provider: &str, reason: &str) -> ProviderFailure {
+    ProviderFailure {
+        provider: provider.to_string(),
+        category: FailureCategory::Rejected,
+        http_status: None,
+        code: "rejected".to_string(),
+        reason: format!("{provider} returned {reason}"),
+        retryable: false,
+    }
+}
+
+/// Failure record for a provider still running at the mode deadline.
+fn timeout_failure(provider: &str) -> ProviderFailure {
+    ProviderFailure {
+        provider: provider.to_string(),
+        category: FailureCategory::Timeout,
+        http_status: None,
+        code: "timeout".to_string(),
+        reason: format!("{provider} was still running at the mode deadline"),
+        retryable: true,
+    }
+}
+
+/// Zero providers ran. With `-p` that's the caller's filter selecting only
+/// unconfigured providers — a bad-input error naming the mode's real provider
+/// set. Without `-p` it's a configuration problem.
+fn no_providers_error(mode: Mode, only: Option<&[String]>) -> SearchError {
+    match only {
+        Some(list) => SearchError::InvalidInput {
+            message: format!(
+                "no provider ran: mode '{}' is served by [{}], but -p {} selected none of them that are configured",
+                mode,
+                registry::spec(mode).providers.join(", "),
+                list.join(",")
+            ),
+        },
+        None => SearchError::NoProviders(mode.to_string()),
+    }
 }
 
 /// Reciprocal rank fusion across provider buckets. Each URL scores
@@ -234,18 +444,22 @@ fn is_synthetic_answer(r: &SearchResult) -> bool {
 /// engines agree on outranks any single engine's top hit. Deterministic:
 /// independent of provider completion order. Duplicates keep the first-seen
 /// content (by bucket order), enriched with missing fields and an
-/// `also_found_by` list in `extra`.
+/// `also_found_by` list in `extra`. A row without a URL (a citation or a
+/// place with no link) is its own result: nothing proves two such rows match.
 fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
     struct Fused {
         result: SearchResult,
         score: f64,
         insertion: usize,
     }
-    let mut map: std::collections::HashMap<String, Fused> = std::collections::HashMap::new();
+    let mut map: HashMap<String, Fused> = HashMap::new();
     let mut insertion = 0usize;
     for (provider, items) in buckets {
         for (rank, item) in items.into_iter().enumerate() {
-            let key = normalize_url(&item.url);
+            let key = match normalize_url(&item.url) {
+                k if k.is_empty() => format!("\0{insertion}"),
+                k => k,
+            };
             let add = 1.0 / (RRF_K + rank as f64 + 1.0);
             match map.get_mut(&key) {
                 Some(f) => {
@@ -290,25 +504,36 @@ fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
     fused.into_iter().map(|f| f.result).collect()
 }
 
-/// One warning per active provider that will silently not apply a requested
-/// -f/-d filter, so filtered searches stay auditable. Never excludes a
+/// Honesty notes for filtered searches: one per queried provider that drops
+/// a requested filter, so filtered results stay auditable. Never excludes a
 /// provider — the caller decides whether unfiltered results are acceptable.
-fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
+fn filter_warnings(mode: Mode, queried: &[String], opts: &SearchOpts) -> Vec<String> {
     let wants_freshness = opts.freshness.is_some();
     let wants_domains = !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty();
-    if !wants_freshness && !wants_domains {
+    let wants_country = opts.country.is_some();
+    let wants_lang = opts.lang.is_some();
+    if !(wants_freshness || wants_domains || wants_country || wants_lang) {
         return Vec::new();
     }
+    if !registry::mode_applies_filters(mode) {
+        return vec![format!(
+            "mode '{mode}' does not apply -f/-d/--country/--lang filters; results are unfiltered"
+        )];
+    }
     let mut warnings = Vec::new();
-    for name in active {
-        let support = registry::filter_support(name);
-        let mut missing = Vec::new();
-        if wants_freshness && !support.freshness {
-            missing.push("-f freshness");
-        }
-        if wants_domains && !support.domains {
-            missing.push("-d/--exclude-domain");
-        }
+    for name in queried {
+        let Some(f) = providers::find(name).map(|s| s.filters) else {
+            continue;
+        };
+        let missing: Vec<&str> = [
+            (wants_freshness && !f.freshness, "-f freshness"),
+            (wants_domains && !f.domains, "-d/--exclude-domain"),
+            (wants_country && !f.country, "--country"),
+            (wants_lang && !f.lang, "--lang"),
+        ]
+        .into_iter()
+        .filter_map(|(drop, label)| drop.then_some(label))
+        .collect();
         if !missing.is_empty() {
             warnings.push(format!(
                 "{name} does not apply {}; its results are unfiltered",
@@ -316,7 +541,7 @@ fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
             ));
         }
         if wants_domains {
-            if let Some(note) = support.note {
+            if let Some(note) = registry::filter_support(name).note {
                 warnings.push(note.to_string());
             }
         }
@@ -324,426 +549,61 @@ fn filter_warnings(active: &[String], opts: &SearchOpts) -> Vec<String> {
     warnings
 }
 
-/// Dedup key for a URL. Strips scheme and a leading `www.` only — anchored, so
-/// it can't corrupt a `www.`/`http://` substring inside a path or query (the
-/// old unanchored `.replace()` collapsed `/files/www.x` and rewrote
-/// `?redirect=http://`, causing false dedup collisions and dropped results).
-/// The query string is preserved so paginated/parameterized URLs stay distinct.
-fn normalize_url(url: &str) -> String {
-    let lower = url.trim_end_matches('/').to_lowercase();
-    let no_scheme = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))
-        .unwrap_or(&lower);
-    let no_www = no_scheme.strip_prefix("www.").unwrap_or(no_scheme);
-    strip_tracking_params(no_www)
-}
-
-/// Drop known tracking parameters from the dedup key. Without this,
-/// `article?utm_source=x` and `article` count as different URLs, defeating
-/// both dedup and the cross-provider consensus that fusion ranks on.
-/// Meaningful params (page=, q=, id=) are preserved.
-fn strip_tracking_params(url: &str) -> String {
-    let Some((base, query)) = url.split_once('?') else {
-        return url.to_string();
+/// Dedup key for a URL (PLAN.md §3.7; the server's `canonicalUrl` pins the
+/// same vectors): scheme and a leading `www.` dropped, host lowercased, path
+/// and query case kept, trailing `/` and `#fragment` dropped, tracking
+/// parameters removed and the rest sorted.
+pub(crate) fn normalize_url(url: &str) -> String {
+    let url = url.trim();
+    let rest = strip_prefix_ci(url, "https://")
+        .or_else(|| strip_prefix_ci(url, "http://"))
+        .unwrap_or(url);
+    let rest = rest.split('#').next().unwrap_or(rest);
+    let (before_query, query) = match rest.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => (rest, None),
     };
-    let is_tracker = |param: &str| {
-        let name = param.split('=').next().unwrap_or(param);
-        name.starts_with("utm_")
-            || matches!(
-                name,
-                "fbclid"
-                    | "gclid"
-                    | "gclsrc"
-                    | "dclid"
-                    | "msclkid"
-                    | "igshid"
-                    | "mc_cid"
-                    | "mc_eid"
-                    | "ref_src"
-                    | "ref_url"
-                    | "cmpid"
-                    | "_hsenc"
-                    | "_hsmi"
-            )
+    let (host, path) = match before_query.find('/') {
+        Some(i) => before_query.split_at(i),
+        None => (before_query, ""),
     };
-    let kept: Vec<&str> = query.split('&').filter(|p| !is_tracker(p)).collect();
-    if kept.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}?{}", kept.join("&"))
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let mut key = String::with_capacity(url.len());
+    key.push_str(host);
+    key.push_str(path.trim_end_matches('/'));
+    if let Some(q) = query {
+        let mut params: Vec<&str> = q
+            .split('&')
+            .filter(|p| !p.is_empty() && !is_tracker(p))
+            .collect();
+        params.sort_unstable();
+        if !params.is_empty() {
+            key.push('?');
+            key.push_str(&params.join("&"));
+        }
     }
+    key
 }
 
-fn provider_allowed(name: &str, only: &Option<Vec<String>>) -> bool {
-    only.as_ref()
-        .map(|list| list.iter().any(|f| f.eq_ignore_ascii_case(name)))
-        .unwrap_or(true)
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &s[prefix.len()..])
 }
 
-/// Handle special modes that need direct provider method calls
-pub async fn execute_special(
-    ctx: Arc<AppContext>,
-    query: &str,
-    mode: Mode,
-    count: usize,
-    only_providers: &Option<Vec<String>>,
-    opts: &SearchOpts,
-) -> Result<SearchResponse, SearchError> {
-    let start = Instant::now();
-    let mut results = Vec::new();
-    let mut providers_queried = Vec::new();
-    let mut providers_failed = Vec::new();
-    let mut provider_failures: Vec<ProviderFailure> = Vec::new();
-    let mut provider_results: BTreeMap<String, usize> = BTreeMap::new();
-
-    // Run one timed provider call, recording success/failure uniformly.
-    macro_rules! query_provider {
-        ($name:literal, $fut:expr, $secs:expr) => {{
-            providers_queried.push($name.to_string());
-            record_result(
-                timeout(Duration::from_secs($secs), $fut).await,
-                $name,
-                &mut results,
-                &mut providers_failed,
-                &mut provider_failures,
-                &mut provider_results,
-            );
-        }};
-    }
-
-    match mode {
-        Mode::Scholar => {
-            let serper = providers::serper::Serper::new(ctx.clone());
-            if serper.is_configured() && provider_allowed("serper", only_providers) {
-                query_provider!("serper", serper.search_scholar(query, count), 10);
-            }
-            let serpapi = providers::serpapi::SerpApi::new(ctx.clone());
-            if serpapi.is_configured() && provider_allowed("serpapi", only_providers) {
-                query_provider!("serpapi", serpapi.search_scholar(query, count), 10);
-            }
-        }
-        Mode::Patents => {
-            let serper = providers::serper::Serper::new(ctx.clone());
-            if serper.is_configured() && provider_allowed("serper", only_providers) {
-                query_provider!("serper", serper.search_patents(query, count), 10);
-            }
-        }
-        Mode::Images => {
-            let serper = providers::serper::Serper::new(ctx.clone());
-            if serper.is_configured() && provider_allowed("serper", only_providers) {
-                query_provider!("serper", serper.search_images(query, count), 10);
-            }
-        }
-        Mode::Places => {
-            let serper = providers::serper::Serper::new(ctx.clone());
-            if serper.is_configured() && provider_allowed("serper", only_providers) {
-                query_provider!("serper", serper.search_places(query, count), 10);
-            }
-        }
-        Mode::People => {
-            let exa = providers::exa::Exa::new(ctx.clone());
-            if exa.is_configured() && provider_allowed("exa", only_providers) {
-                query_provider!("exa", exa.search_people(query, count), 15);
-            }
-        }
-        Mode::Similar => {
-            let exa = providers::exa::Exa::new(ctx.clone());
-            if exa.is_configured() && provider_allowed("exa", only_providers) {
-                query_provider!("exa", exa.find_similar(query, count), 15);
-            }
-        }
-        Mode::Social => {
-            let xai = providers::xai::Xai::new(ctx.clone());
-            if xai.is_configured() && provider_allowed("xai", only_providers) {
-                query_provider!("xai", xai.search(query, count, opts), 60);
-            }
-        }
-        Mode::Scrape | Mode::Extract => {
-            // Try Stealth (local) first, then Jina reader, Firecrawl, Browserless.
-            // After each attempt, garbage output (binary bytes, anti-bot
-            // challenge pages) is demoted to a failure so the chain keeps
-            // escalating — a scraper "succeeding" with a Cloudflare
-            // interstitial must not stop the fallback.
-            #[cfg(feature = "stealth")]
-            {
-                let stealth = providers::stealth::Stealth::new(ctx.clone());
-                if provider_allowed("stealth", only_providers) {
-                    query_provider!("stealth", stealth.scrape_url(query), 30);
-                    reject_bad_scrape(
-                        "stealth",
-                        &mut results,
-                        &mut providers_failed,
-                        &mut provider_failures,
-                        &mut provider_results,
-                    );
-                }
-            }
-            if results.is_empty() {
-                let jina = providers::jina::Jina::new(ctx.clone());
-                if jina.is_configured() && provider_allowed("jina", only_providers) {
-                    query_provider!("jina", jina.read_url(query), 30);
-                    reject_bad_scrape(
-                        "jina",
-                        &mut results,
-                        &mut providers_failed,
-                        &mut provider_failures,
-                        &mut provider_results,
-                    );
-                }
-            }
-            if results.is_empty() {
-                let fc = providers::firecrawl::Firecrawl::new(ctx.clone());
-                if fc.is_configured() && provider_allowed("firecrawl", only_providers) {
-                    query_provider!("firecrawl", fc.scrape_url(query), 30);
-                    reject_bad_scrape(
-                        "firecrawl",
-                        &mut results,
-                        &mut providers_failed,
-                        &mut provider_failures,
-                        &mut provider_results,
-                    );
-                }
-            }
-            // Last resort: Browserless cloud browser (handles Cloudflare, JS
-            // rendering). Its output is NOT rejected — after the last rung
-            // there is nothing to escalate to, so imperfect content beats none.
-            if results.is_empty() {
-                let bl = providers::browserless::Browserless::new(ctx.clone());
-                if bl.is_configured() && provider_allowed("browserless", only_providers) {
-                    query_provider!("browserless", bl.scrape_url(query), 30);
-                }
-            }
-        }
-        _ => {} // handled by execute_search
-    }
-
-    if results.is_empty() && providers_queried.is_empty() {
-        return Err(no_providers_error(mode, only_providers));
-    }
-    if results.is_empty() && !provider_failures.is_empty() {
-        return Err(SearchError::AllProvidersFailed {
-            failed: provider_failures,
-        });
-    }
-
-    // Honour -c even when the upstream ignores it. Serper's scholar, places
-    // and patents endpoints return a full page whatever `num` says, so `-c 3`
-    // handed back ten. The fan-out path in execute_search already truncates
-    // after fusing; this path had no equivalent.
-    results.truncate(count);
-
-    // Scraped page content is untrusted input for the consuming agent —
-    // label it so downstream prompts can treat it as data, not instructions.
-    if matches!(mode, Mode::Extract | Mode::Scrape) {
-        for r in &mut results {
-            let extra = r.extra.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(obj) = extra.as_object_mut() {
-                obj.insert(
-                    "content_origin".to_string(),
-                    serde_json::json!("untrusted_web_content"),
-                );
-            }
-        }
-    }
-
-    // Filter honesty: apart from social (xai, which remaps domains to X
-    // handles), no special-mode provider call forwards -f/-d filters.
-    let mut warnings = Vec::new();
-    let wants_filters = opts.freshness.is_some()
-        || !opts.include_domains.is_empty()
-        || !opts.exclude_domains.is_empty();
-    if wants_filters {
-        if mode == Mode::Social {
-            if let Some(note) = registry::filter_support("xai").note {
-                warnings.push(note.to_string());
-            }
-        } else {
-            warnings.push(format!(
-                "mode '{mode}' does not apply -f/-d filters; results are unfiltered"
-            ));
-        }
-    }
-
-    let elapsed = start.elapsed();
-    let result_count = results.len();
-    let status = ResponseStatus::classify(results.is_empty(), !providers_failed.is_empty());
-
-    Ok(SearchResponse {
-        version: ENVELOPE_VERSION.to_string(),
-        status: status.as_str().to_string(),
-        query: query.to_string(),
-        mode: mode.to_string(),
-        results,
-        answers: Vec::new(),
-        metadata: ResponseMetadata {
-            elapsed_ms: elapsed.as_millis(),
-            result_count,
-            providers_queried,
-            providers_failed,
-            providers_cancelled: Vec::new(),
-            provider_results,
-            warnings,
-            cached: false,
-            cache_age_secs: None,
-            provider_failures,
-        },
-    })
-}
-
-/// Extend `results` on success; capture a structured failure (reason + category)
-/// on error or timeout. Shared by every special-mode provider call.
-fn record_result(
-    outcome: Result<Result<Vec<SearchResult>, SearchError>, tokio::time::error::Elapsed>,
-    provider: &'static str,
-    results: &mut Vec<SearchResult>,
-    failed: &mut Vec<String>,
-    failures: &mut Vec<ProviderFailure>,
-    counts: &mut BTreeMap<String, usize>,
-) {
-    match outcome {
-        Ok(Ok(items)) => {
-            if !items.is_empty() {
-                counts.insert(provider.to_string(), items.len());
-            }
-            results.extend(items);
-        }
-        Ok(Err(e)) => {
-            tracing::warn!("{provider}: {e}");
-            failures.push(e.to_provider_failure(provider));
-            failed.push(provider.to_string());
-        }
-        Err(_) => {
-            tracing::warn!("{provider}: timed out");
-            failures.push(timeout_failure(provider));
-            failed.push(provider.to_string());
-        }
-    }
-}
-
-/// Zero providers ran. With `-p` that's the caller's filter excluding (or
-/// selecting unconfigured) providers — a bad-input error naming the mode's
-/// real provider set. Without `-p` it's a configuration problem. The old
-/// blanket "No providers configured for mode X / run config check" misled:
-/// config check shows all green when a -p filter was the actual cause.
-fn no_providers_error(mode: Mode, only_providers: &Option<Vec<String>>) -> SearchError {
-    match only_providers {
-        Some(list) => SearchError::InvalidInput {
-            message: format!(
-                "no provider ran: mode '{}' is served by [{}], but -p {} selected none of them that are configured",
-                mode,
-                registry::spec(mode).providers.join(", "),
-                list.join(",")
-            ),
-        },
-        None => SearchError::NoProviders(mode.to_string()),
-    }
-}
-
-/// Why scraped content is unusable, or None if it looks like real page text.
-/// Two failure classes seen in the wild: undecompressed/binary bytes served
-/// as text (mojibake), and anti-bot challenge pages returned with HTTP 200.
-fn scrape_rejection(content: &str) -> Option<&'static str> {
-    let sample: Vec<char> = content.chars().take(4000).collect();
-    if sample.len() > 200 {
-        let garbage = sample
-            .iter()
-            .filter(|c| **c == '\u{FFFD}' || (c.is_control() && !c.is_whitespace()))
-            .count();
-        if garbage * 20 > sample.len() {
-            return Some("binary or undecodable content");
-        }
-    }
-    // Challenge pages are short; a real article mentioning Cloudflare isn't.
-    if content.chars().count() < 4000 {
-        const CHALLENGE_MARKERS: &[&str] = &[
-            "Checking your browser before accessing",
-            "Just a moment...",
-            "Verifying you are human",
-            "Enable JavaScript and cookies to continue",
-            "cf-browser-verification",
-            "Attention Required! | Cloudflare",
-        ];
-        if CHALLENGE_MARKERS.iter().any(|m| content.contains(m)) {
-            return Some("anti-bot challenge page instead of content");
-        }
-    }
-    None
-}
-
-/// Demote a scrape "success" whose content is garbage to a structured failure
-/// and clear `results`, so the extract/scrape chain escalates to the next
-/// provider instead of returning junk as success.
-fn reject_bad_scrape(
-    provider: &'static str,
-    results: &mut Vec<SearchResult>,
-    failed: &mut Vec<String>,
-    failures: &mut Vec<ProviderFailure>,
-    counts: &mut BTreeMap<String, usize>,
-) {
-    let Some(reason) = results.first().and_then(|r| scrape_rejection(&r.snippet)) else {
-        return;
-    };
-    tracing::warn!("{provider}: {reason}");
-    results.clear();
-    counts.remove(provider);
-    failures.push(ProviderFailure {
-        provider: provider.to_string(),
-        category: FailureCategory::Parse,
-        http_status: None,
-        code: "garbage_content".to_string(),
-        reason: format!("{provider} returned {reason}"),
-        retryable: false,
-    });
-    failed.push(provider.to_string());
-}
-
-/// Failure record for a provider that exceeded its timeout.
-fn timeout_failure(provider: &str) -> ProviderFailure {
-    ProviderFailure {
-        provider: provider.to_string(),
-        category: FailureCategory::Timeout,
-        http_status: None,
-        code: "timeout".to_string(),
-        reason: format!("{provider} timed out"),
-        retryable: true,
-    }
-}
-
-/// Main dispatch: routes to execute_search or execute_special based on mode
-pub async fn run(
-    ctx: Arc<AppContext>,
-    query: &str,
-    mode: Mode,
-    count: usize,
-    only_providers: &Option<Vec<String>>,
-    opts: &SearchOpts,
-) -> Result<SearchResponse, SearchError> {
-    // Routing is explicit: the caller chose `mode` (default General). No intent
-    // guessing — agents read `agent-info` and pick the mode/providers. Special
-    // modes use a provider's dedicated method; the rest aggregate the mode's
-    // provider set.
-    let mut response = match mode {
-        Mode::Scholar
-        | Mode::Patents
-        | Mode::Images
-        | Mode::Places
-        | Mode::People
-        | Mode::Similar
-        | Mode::Scrape
-        | Mode::Extract
-        | Mode::Social => execute_special(ctx, query, mode, count, only_providers, opts).await?,
-        _ => execute_search(ctx, query, mode, count, only_providers, opts).await?,
-    };
-
-    response.metadata.result_count = response.results.len();
-    Ok(response)
+fn is_tracker(param: &str) -> bool {
+    let name = param.split('=').next().unwrap_or(param);
+    name.starts_with("utm_")
+        || matches!(name, "gclid" | "fbclid" | "msclkid" | "mc_eid" | "ref_src")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{fuse_rrf, is_synthetic_answer, normalize_url};
-    use crate::types::SearchResult;
+    use super::*;
+    use crate::providers::{brave, exa, firecrawl, jina, linkup, parallel, perplexity, serpapi};
+    use crate::providers::{serper, tavily, xai, ProviderSpec};
+    use std::sync::Mutex;
 
     fn result(url: &str, source: &str) -> SearchResult {
         SearchResult {
@@ -757,10 +617,504 @@ mod tests {
         }
     }
 
+    /// What a fake adapter does when called.
+    #[derive(Clone)]
+    enum Act {
+        /// Answer after a delay with these URLs (and optional answer/cost).
+        Ok {
+            delay_ms: u64,
+            urls: Vec<String>,
+            answer: Option<&'static str>,
+            cost: Option<u64>,
+            snippet: &'static str,
+        },
+        /// Fail with this category.
+        Fail(FailureCategory),
+    }
+
+    type Log = Arc<Mutex<Vec<(String, u16)>>>;
+
+    struct Fake {
+        spec: &'static ProviderSpec,
+        act: Act,
+        log: Log,
+        /// Overrides `Adapter::sent_cost` (as Tavily and Brave deep do).
+        sent: Option<u64>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for Fake {
+        fn spec(&self) -> &'static ProviderSpec {
+            self.spec
+        }
+        fn is_configured(&self) -> bool {
+            true
+        }
+        fn sent_cost(&self, _mode: Mode) -> u64 {
+            self.sent.unwrap_or(self.spec.price.estimate(0))
+        }
+        async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push((self.spec.name.to_string(), call.count));
+            match &self.act {
+                Act::Ok {
+                    delay_ms,
+                    urls,
+                    answer,
+                    cost,
+                    snippet,
+                } => {
+                    tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+                    let mut results: Vec<SearchResult> =
+                        urls.iter().map(|u| result(u, self.spec.name)).collect();
+                    for r in &mut results {
+                        r.snippet = snippet.to_string();
+                    }
+                    Ok(Output {
+                        results,
+                        answers: answer
+                            .map(|t| Answer {
+                                provider: self.spec.name.to_string(),
+                                text: t.to_string(),
+                            })
+                            .into_iter()
+                            .collect(),
+                        cost_micros: *cost,
+                    })
+                }
+                Act::Fail(category) => Err(SearchError::Upstream {
+                    provider: self.spec.name,
+                    status: 500,
+                    category: *category,
+                    message: "boom".into(),
+                }),
+            }
+        }
+    }
+
+    fn ok(delay_ms: u64, n: usize, tag: &str) -> Act {
+        Act::Ok {
+            delay_ms,
+            urls: (0..n)
+                .map(|i| format!("https://{tag}.example/{i}"))
+                .collect(),
+            answer: None,
+            cost: None,
+            snippet: "a real page about something",
+        }
+    }
+
+    fn fakes(specs: &[(&'static ProviderSpec, Act)]) -> (Vec<Box<dyn Adapter>>, Log) {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let adapters = specs
+            .iter()
+            .map(|(spec, act)| {
+                Box::new(Fake {
+                    spec,
+                    act: act.clone(),
+                    log: log.clone(),
+                    sent: None,
+                }) as Box<dyn Adapter>
+            })
+            .collect();
+        (adapters, log)
+    }
+
+    async fn search(
+        adapters: Vec<Box<dyn Adapter>>,
+        mode: Mode,
+        count: usize,
+        only: Option<&[String]>,
+        deadline_ms: u64,
+    ) -> Result<SearchResponse, SearchError> {
+        let opts = SearchOpts::default();
+        let req = Request {
+            query: "q",
+            mode,
+            count,
+            only,
+            opts: &opts,
+            deadline: Duration::from_millis(deadline_ms),
+        };
+        execute_with(adapters, &req).await
+    }
+
+    fn called(log: &Log) -> Vec<String> {
+        let mut v: Vec<String> = log.lock().unwrap().iter().map(|(n, _)| n.clone()).collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn fused_waits_for_slow_providers_and_reports_the_stuck_one() {
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, ok(5, 3, "fast")),
+            (&exa::SPEC, ok(250, 3, "slow")),
+            (&jina::SPEC, ok(30_000, 3, "stuck")),
+        ]);
+        let started = Instant::now();
+        let r = search(adapters, Mode::General, 3, None, 600).await.unwrap();
+        let took = started.elapsed();
+        // Early stop would have dropped exa once serper filled -c 3.
+        assert!(r.metadata.provider_results.contains_key("exa"));
+        assert!(r.metadata.provider_results.contains_key("serper"));
+        assert_eq!(r.metadata.providers_timed_out, vec!["jina".to_string()]);
+        assert!(r.metadata.providers_cancelled.is_empty());
+        assert_eq!(r.status, "partial_success");
+        assert!(
+            took >= Duration::from_millis(550),
+            "returned before the deadline"
+        );
+        assert!(took < Duration::from_secs(5), "waited past the deadline");
+        // The stuck call was sent, so it counts as spend.
+        let cost = r.metadata.cost.unwrap();
+        assert_eq!(cost.by_provider["jina"], jina::SPEC.price.per_call as u64);
+    }
+
+    #[tokio::test]
+    async fn p_restricts_every_call_in_deep() {
+        let all = || {
+            fakes(&[
+                (&exa::SPEC, ok(1, 2, "exa")),
+                (&serper::SPEC, ok(1, 2, "serper")),
+                (&brave::SPEC, ok(1, 2, "brave")),
+                (&linkup::SPEC, ok(1, 2, "linkup")),
+                (&parallel::SPEC, ok(1, 2, "parallel")),
+                (&tavily::SPEC, ok(1, 2, "tavily")),
+                (&perplexity::SPEC, ok(1, 2, "perplexity")),
+                (&xai::SPEC, ok(1, 2, "xai")),
+            ])
+        };
+        for only in ["brave", "exa"] {
+            let (adapters, log) = all();
+            let list = vec![only.to_string()];
+            let r = search(adapters, Mode::Deep, 10, Some(&list), 2_000)
+                .await
+                .unwrap();
+            assert_eq!(called(&log), vec![only.to_string()]);
+            assert_eq!(r.metadata.providers_queried, vec![only.to_string()]);
+        }
+        // Without -p every deep provider runs.
+        let (adapters, log) = all();
+        search(adapters, Mode::Deep, 10, None, 2_000).await.unwrap();
+        assert_eq!(called(&log).len(), 8);
+    }
+
+    #[tokio::test]
+    async fn scholar_fuses_serper_and_serpapi_concurrently() {
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, ok(200, 5, "serper")),
+            (&serpapi::SPEC, ok(200, 5, "serpapi")),
+        ]);
+        let started = Instant::now();
+        let r = search(adapters, Mode::Scholar, 4, None, 2_000)
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(390),
+            "ran serially"
+        );
+        assert_eq!(r.metadata.provider_results.len(), 2);
+        assert_eq!(r.results.len(), 4);
+        // RRF interleaves the two top-ranked lists.
+        let sources: Vec<&str> = r.results.iter().map(|x| x.source.as_str()).collect();
+        assert!(sources.contains(&"serper") && sources.contains(&"serpapi"));
+    }
+
+    #[tokio::test]
+    async fn count_is_clamped_per_provider() {
+        let (adapters, log) = fakes(&[(&serper::SPEC, ok(1, 1, "a")), (&exa::SPEC, ok(1, 1, "b"))]);
+        search(adapters, Mode::General, 50, None, 2_000)
+            .await
+            .unwrap();
+        let mut counts = log.lock().unwrap().clone();
+        counts.sort();
+        assert_eq!(
+            counts,
+            vec![("exa".to_string(), 20), ("serper".to_string(), 10)]
+        );
+    }
+
+    #[tokio::test]
+    async fn answers_do_not_take_result_slots() {
+        let act = Act::Ok {
+            delay_ms: 1,
+            urls: vec!["https://a.example/1".into(), "https://a.example/2".into()],
+            answer: Some("the answer"),
+            cost: None,
+            snippet: "x",
+        };
+        let (adapters, _) = fakes(&[(&perplexity::SPEC, act)]);
+        let r = search(adapters, Mode::General, 2, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.results.len(), 2);
+        assert_eq!(r.metadata.result_count, 2);
+        assert_eq!(r.answers.len(), 1);
+        assert_eq!(r.answers[0].provider, "perplexity");
+    }
+
+    #[tokio::test]
+    async fn cost_is_an_estimate_per_provider() {
+        let reported = Act::Ok {
+            delay_ms: 1,
+            urls: vec!["https://t.example".into()],
+            answer: None,
+            cost: Some(16_000),
+            snippet: "x",
+        };
+        let (adapters, _) = fakes(&[
+            (&exa::SPEC, ok(1, 12, "exa")),
+            (&tavily::SPEC, reported),
+            (&serper::SPEC, Act::Fail(FailureCategory::Auth)),
+        ]);
+        let r = search(adapters, Mode::General, 20, None, 2_000)
+            .await
+            .unwrap();
+        let cost = r.metadata.cost.unwrap();
+        assert_eq!(cost.basis, "estimate");
+        // exa: 7,000 + 2 results over 10 × 1,000; tavily reported its own.
+        assert_eq!(cost.by_provider["exa"], 9_000);
+        assert_eq!(cost.by_provider["tavily"], 16_000);
+        // A rejected key is not billed.
+        assert!(!cost.by_provider.contains_key("serper"));
+        assert_eq!(cost.micros, 25_000);
+        assert!((cost.usd - 0.025).abs() < 1e-9);
+        assert_eq!(r.metadata.transport["exa"], "direct");
+    }
+
+    /// A paid call whose 200 the mode rejected (a challenge page) was still
+    /// paid for: it counts, at the adapter's reported cost or the estimate.
+    #[tokio::test]
+    async fn rejected_billed_output_counts_as_spend() {
+        let challenge = Act::Ok {
+            delay_ms: 1,
+            urls: vec!["https://site.example/page".into()],
+            answer: None,
+            cost: Some(700),
+            snippet: "Just a moment...",
+        };
+        let (adapters, _) = fakes(&[(&jina::SPEC, challenge), (&firecrawl::SPEC, ok(1, 1, "fc"))]);
+        let r = search(adapters, Mode::Extract, 1, None, 2_000)
+            .await
+            .unwrap();
+        let cost = r.metadata.cost.unwrap();
+        assert_eq!(cost.by_provider["jina"], 700);
+        assert_eq!(cost.by_provider["firecrawl"], 5_000);
+    }
+
+    /// A 2xx whose body did not parse was billed upstream.
+    #[tokio::test]
+    async fn parse_failure_on_a_billed_provider_counts_as_spend() {
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, ok(1, 2, "s")),
+            (&exa::SPEC, Act::Fail(FailureCategory::Parse)),
+        ]);
+        let r = search(adapters, Mode::General, 5, None, 2_000)
+            .await
+            .unwrap();
+        let cost = r.metadata.cost.unwrap();
+        assert_eq!(cost.by_provider["exa"], 7_000);
+        assert_eq!(cost.by_provider["serper"], 1_000);
+    }
+
+    /// A call still running at the deadline is priced at what was sent for
+    /// the mode (Tavily always sends the advanced depth: 16,000), not the
+    /// base rate.
+    #[tokio::test]
+    async fn timeouts_are_priced_at_the_adapters_sent_cost() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let adapters: Vec<Box<dyn Adapter>> = vec![
+            Box::new(Fake {
+                spec: &serper::SPEC,
+                act: ok(1, 2, "s"),
+                log: log.clone(),
+                sent: None,
+            }),
+            Box::new(Fake {
+                spec: &tavily::SPEC,
+                act: ok(5_000, 2, "t"),
+                log,
+                sent: Some(16_000),
+            }),
+        ];
+        let r = search(adapters, Mode::General, 5, None, 300).await.unwrap();
+        assert_eq!(r.metadata.providers_timed_out, vec!["tavily".to_string()]);
+        assert_eq!(r.metadata.cost.unwrap().by_provider["tavily"], 16_000);
+    }
+
+    fn urls(urls: &[&str], snippet: &'static str) -> Act {
+        Act::Ok {
+            delay_ms: 1,
+            urls: urls.iter().map(|u| u.to_string()).collect(),
+            answer: None,
+            cost: None,
+            snippet,
+        }
+    }
+
+    /// Serper places rows carry no `link`, so every url is "": a single
+    /// provider's rows come back as sent, never merged into one.
+    #[tokio::test]
+    async fn places_rows_without_url_are_all_kept() {
+        let (adapters, _) = fakes(&[(&serper::SPEC, urls(&[""; 5], "a cafe"))]);
+        let r = search(adapters, Mode::Places, 5, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.results.len(), 5);
+    }
+
+    /// Images from the same source page share a `link`: single mode keeps
+    /// the provider's rows and order.
+    #[tokio::test]
+    async fn single_mode_keeps_rows_that_share_a_url() {
+        let page = "https://site.example/gallery";
+        let (adapters, _) = fakes(&[(&serper::SPEC, urls(&[page, page, page], "img"))]);
+        let r = search(adapters, Mode::Images, 10, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.results.len(), 3);
+    }
+
+    /// Fusion never treats two link-less rows as the same result.
+    #[tokio::test]
+    async fn fused_rows_without_url_are_not_merged() {
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, urls(&["https://a.org/1", "", ""], "paper")),
+            (&serpapi::SPEC, urls(&["", "https://b.org/2"], "paper")),
+        ]);
+        let r = search(adapters, Mode::Scholar, 10, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.results.len(), 5);
+        assert!(r
+            .results
+            .iter()
+            .filter(|x| x.url.is_empty())
+            .all(|x| x.extra.is_none()));
+    }
+
+    #[tokio::test]
+    async fn p_outside_the_mode_is_bad_input() {
+        let (adapters, log) = fakes(&[
+            (&serper::SPEC, ok(1, 1, "a")),
+            (&firecrawl::SPEC, ok(1, 1, "b")),
+        ]);
+        let list = vec!["firecrawl".to_string()];
+        let err = search(adapters, Mode::General, 5, Some(&list), 2_000)
+            .await
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        assert!(err.to_string().contains("does not serve mode 'general'"));
+        assert!(log.lock().unwrap().is_empty(), "nothing may run");
+    }
+
+    #[tokio::test]
+    async fn chain_moves_past_rejected_output() {
+        let challenge = Act::Ok {
+            delay_ms: 1,
+            urls: vec!["https://site.example/page".into()],
+            answer: None,
+            cost: None,
+            snippet: "Just a moment...",
+        };
+        let (adapters, log) =
+            fakes(&[(&jina::SPEC, challenge), (&firecrawl::SPEC, ok(1, 1, "fc"))]);
+        let r = search(adapters, Mode::Scrape, 1, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.mode, "scrape");
+        assert_eq!(r.results[0].source, "firecrawl");
+        assert_eq!(
+            r.metadata.provider_failures[0].category,
+            FailureCategory::Rejected
+        );
+        assert_eq!(r.status, "partial_success");
+        assert_eq!(
+            called(&log),
+            vec!["firecrawl".to_string(), "jina".to_string()]
+        );
+        assert_eq!(
+            r.results[0].extra.as_ref().unwrap()["content_origin"],
+            "untrusted_web_content"
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_stops_at_the_first_accepted_output() {
+        let (adapters, log) = fakes(&[
+            (&jina::SPEC, ok(1, 1, "j")),
+            (&firecrawl::SPEC, ok(1, 1, "fc")),
+        ]);
+        let r = search(adapters, Mode::Extract, 1, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(called(&log), vec!["jina".to_string()]);
+        assert_eq!(r.metadata.transport.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_results_with_one_failure_is_no_results_not_total_failure() {
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, ok(1, 0, "a")),
+            (&exa::SPEC, Act::Fail(FailureCategory::Server)),
+        ]);
+        let r = search(adapters, Mode::General, 5, None, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(r.status, "no_results");
+
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, Act::Fail(FailureCategory::Auth)),
+            (&exa::SPEC, Act::Fail(FailureCategory::BillingQuota)),
+        ]);
+        let err = search(adapters, Mode::General, 5, None, 2_000)
+            .await
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn url_vectors_match_the_server() {
+        // PLAN.md §3.7, the same five vectors the server's canonicalUrl pins.
+        assert_eq!(
+            normalize_url("https://WWW.Example.com/Post/?utm_source=x#a"),
+            "example.com/Post"
+        );
+        assert_eq!(
+            normalize_url("https://example.com/post/"),
+            normalize_url("https://example.com/post")
+        );
+        assert_ne!(
+            normalize_url("https://youtube.com/watch?v=AbC"),
+            normalize_url("https://youtube.com/watch?v=abc")
+        );
+        assert_eq!(
+            normalize_url("https://example.com/p?b=2&a=1&gclid=z"),
+            "example.com/p?a=1&b=2"
+        );
+        assert_eq!(
+            normalize_url("http://example.com/x"),
+            normalize_url("https://example.com/x")
+        );
+    }
+
+    #[test]
+    fn url_key_keeps_paths_and_queries_intact() {
+        assert!(normalize_url("https://site.com/files/www.report.pdf").contains("www.report.pdf"));
+        assert!(normalize_url("https://a.com/x?redirect=http://b.com")
+            .contains("redirect=http://b.com"));
+        assert_ne!(
+            normalize_url("https://x.com/r?page=1"),
+            normalize_url("https://x.com/r?page=2")
+        );
+        assert_eq!(normalize_url("https://www.example.com/"), "example.com");
+    }
+
     #[test]
     fn rrf_consensus_beats_single_provider_top_rank() {
-        // URL found by two providers (at ranks 2 and 2) must outrank a URL
-        // only one provider returned at rank 1.
         let buckets = vec![
             (
                 "a".to_string(),
@@ -802,15 +1156,9 @@ mod tests {
                 ),
             ]
         };
-        let urls = |buckets| {
-            fuse_rrf(buckets)
-                .into_iter()
-                .map(|r| r.url)
-                .collect::<Vec<_>>()
-        };
-        // y.com has consensus and wins in both arrival orders.
-        assert_eq!(urls(mk("a", "b"))[0], "https://y.com");
-        assert_eq!(urls(mk("b", "a"))[0], "https://y.com");
+        let top = |b| fuse_rrf(b).into_iter().next().unwrap().url;
+        assert_eq!(top(mk("a", "b")), "https://y.com");
+        assert_eq!(top(mk("b", "a")), "https://y.com");
     }
 
     #[test]
@@ -825,82 +1173,19 @@ mod tests {
     }
 
     #[test]
-    fn scrape_rejection_catches_binary_and_challenge_pages() {
-        use super::scrape_rejection;
-        // Mojibake: mostly replacement characters.
-        let binary: String = "\u{FFFD}x\u{FFFD}\u{FFFD}".repeat(100);
-        assert!(scrape_rejection(&binary).is_some());
-        // Cloudflare interstitial served as 200.
+    fn filter_warnings_name_providers_that_drop_filters() {
+        let opts = SearchOpts {
+            freshness: Some("week".into()),
+            country: Some("gb".into()),
+            ..SearchOpts::default()
+        };
+        let w = filter_warnings(Mode::General, &["jina".into(), "serper".into()], &opts);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("jina does not apply -f freshness or --country"));
+        let w = filter_warnings(Mode::Places, &["serper".into()], &opts);
+        assert!(w[0].contains("mode 'places' does not apply"));
         assert!(
-            scrape_rejection("## Checking your browser before accessing\nexample.com").is_some()
+            filter_warnings(Mode::General, &["jina".into()], &SearchOpts::default()).is_empty()
         );
-        // Real prose passes, even when long or mentioning Cloudflare.
-        let article = format!(
-            "How Cloudflare works. {}",
-            "Real sentence with ordinary words. ".repeat(300)
-        );
-        assert!(scrape_rejection(&article).is_none());
-        assert!(scrape_rejection("Short but real snippet about rust.").is_none());
-    }
-
-    #[test]
-    fn synthetic_answers_are_detected_by_scheme() {
-        assert!(is_synthetic_answer(&result(
-            "perplexity://answer",
-            "perplexity"
-        )));
-        assert!(is_synthetic_answer(&result("tavily://answer", "tavily")));
-        assert!(!is_synthetic_answer(&result(
-            "https://x.com/search?q=a",
-            "xai"
-        )));
-        // A malformed/scheme-less URL is still a result — it must not
-        // silently vanish into answers[].
-        assert!(!is_synthetic_answer(&result("example.com/page", "serper")));
-        assert!(!is_synthetic_answer(&result("", "serper")));
-    }
-
-    #[test]
-    fn dedupes_scheme_and_leading_www() {
-        assert_eq!(
-            normalize_url("https://www.example.com/"),
-            normalize_url("http://example.com")
-        );
-    }
-
-    #[test]
-    fn preserves_query_string_so_paginated_urls_stay_distinct() {
-        assert_ne!(
-            normalize_url("https://x.com/r?page=1"),
-            normalize_url("https://x.com/r?page=2")
-        );
-    }
-
-    #[test]
-    fn tracking_params_do_not_defeat_dedup() {
-        assert_eq!(
-            normalize_url("https://a.com/post?utm_source=x&utm_medium=y"),
-            normalize_url("https://a.com/post")
-        );
-        assert_eq!(
-            normalize_url("https://a.com/post?fbclid=abc"),
-            normalize_url("https://a.com/post")
-        );
-        // Meaningful params survive alongside stripped trackers.
-        assert_eq!(
-            normalize_url("https://a.com/r?page=2&gclid=zz"),
-            normalize_url("https://a.com/r?page=2")
-        );
-    }
-
-    #[test]
-    fn does_not_strip_www_inside_path() {
-        assert!(normalize_url("https://site.com/files/www.report.pdf").contains("www.report.pdf"));
-    }
-
-    #[test]
-    fn does_not_rewrite_http_inside_query() {
-        assert!(normalize_url("https://a.com/x?redirect=http://b.com")
-            .contains("redirect=http://b.com"));
     }
 }

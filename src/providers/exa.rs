@@ -1,11 +1,39 @@
+use super::spec::{FilterSupport, Price};
+use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{SearchOpts, SearchResult};
+use crate::types::{Mode, SearchOpts, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub static SPEC: ProviderSpec = ProviderSpec {
+    name: "exa",
+    env_keys: &["EXA_API_KEY"],
+    modes: &[
+        Mode::General,
+        Mode::Academic,
+        Mode::People,
+        Mode::Deep,
+        Mode::Similar,
+    ],
+    filters: FilterSupport {
+        freshness: true,
+        domains: true,
+        country: false,
+        lang: false,
+    },
+    max_count: 20,
+    timeout: Duration::from_secs(15),
+    billed_on_send: true,
+    price: Price {
+        per_call: 7_000,
+        per_extra_result: 1_000,
+        included_results: 10,
+    },
+};
 
 pub struct Exa {
     ctx: Arc<AppContext>,
@@ -17,43 +45,28 @@ impl Exa {
     }
 
     fn api_key(&self) -> String {
-        super::resolve_key(&self.ctx.config.keys.exa, "EXA_API_KEY")
+        super::key_for(&self.ctx.config, &SPEC)
     }
 
     async fn post_api(
         &self,
         path: &str,
         body: serde_json::Value,
+        timeout: Duration,
     ) -> Result<ExaResponse, SearchError> {
-        if self.api_key().is_empty() {
-            return Err(SearchError::AuthMissing { provider: "exa" });
-        }
-
         let url = format!("https://api.exa.ai/{path}");
         let client = &self.ctx.client;
         let api_key = self.api_key();
 
-        super::retry_request(|| async {
-            let resp = client
+        let resp = super::send(self, timeout, || {
+            client
                 .post(&url)
                 .header("x-api-key", api_key.as_str())
                 .header("Content-Type", "application/json")
                 .json(&body)
-                .send()
-                .await?;
-
-            let resp = super::ok_or_api_error(resp, "exa").await?;
-
-            let body_bytes = resp.bytes().await?;
-            let mut body_vec = body_bytes.to_vec();
-            simd_json::from_slice(&mut body_vec).map_err(|e| SearchError::Api {
-                provider: "exa",
-                code: "json_error",
-                status: None,
-                message: e.to_string(),
-            })
         })
-        .await
+        .await?;
+        Ok(resp.json().await?)
     }
 }
 
@@ -78,14 +91,9 @@ fn to_results(exa: ExaResponse, source: &str) -> Vec<SearchResult> {
         .into_iter()
         .map(|r| {
             // Prefer highlights over full text for snippet (more relevant, shorter)
-            let snippet = if let Some(ref hl) = r.highlights {
-                if !hl.is_empty() {
-                    hl.join(" ... ")
-                } else {
-                    r.text.clone().unwrap_or_default()
-                }
-            } else {
-                r.text.unwrap_or_default()
+            let snippet = match r.highlights {
+                Some(hl) if !hl.is_empty() => hl.join(" ... "),
+                _ => r.text.unwrap_or_default(),
             };
             SearchResult {
                 title: r.title.unwrap_or_default(),
@@ -100,7 +108,7 @@ fn to_results(exa: ExaResponse, source: &str) -> Vec<SearchResult> {
         .collect()
 }
 
-fn build_search_body(query: &str, count: usize, opts: &SearchOpts) -> serde_json::Value {
+fn build_search_body(query: &str, count: u16, opts: &SearchOpts) -> serde_json::Value {
     let mut body = json!({
         "query": query,
         "numResults": count,
@@ -118,100 +126,53 @@ fn build_search_body(query: &str, count: usize, opts: &SearchOpts) -> serde_json
         body["excludeDomains"] = json!(opts.exclude_domains);
     }
     // Freshness → startPublishedDate (ISO 8601)
-    if let Some(ref freshness) = opts.freshness {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let days_back: u64 = match freshness.as_str() {
-            "day" => 1,
-            "week" => 7,
-            "month" => 30,
-            "year" => 365,
-            _ => 0,
-        };
-        if days_back > 0 {
-            let target = now.saturating_sub(days_back * 86400);
-            // Format as ISO 8601: YYYY-MM-DDTHH:MM:SSZ
-            let z = (target / 86400) as i64 + 719468;
-            let era = if z >= 0 { z } else { z - 146096 } / 146097;
-            let doe = (z - era * 146097) as u64;
-            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-            let y = yoe as i64 + era * 400;
-            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-            let mp = (5 * doy + 2) / 153;
-            let d = doy - (153 * mp + 2) / 5 + 1;
-            let m = if mp < 10 { mp + 3 } else { mp - 9 };
-            let y = if m <= 2 { y + 1 } else { y };
-            body["startPublishedDate"] = json!(format!("{y:04}-{m:02}-{d:02}T00:00:00Z"));
-        }
+    if let Some(days) = opts.freshness.as_deref().and_then(super::freshness_days) {
+        body["startPublishedDate"] = json!(format!("{}T00:00:00Z", super::date_days_ago(days)));
     }
     body
 }
 
 #[async_trait]
-impl super::Provider for Exa {
-    fn name(&self) -> &'static str {
-        "exa"
+impl Adapter for Exa {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
     }
-    fn capabilities(&self) -> &[&'static str] {
-        &["general", "academic", "people", "similar", "deep"]
-    }
-    fn env_keys(&self) -> &[&'static str] {
-        &["EXA_API_KEY", "SEARCH_KEYS_EXA"]
-    }
+
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
     }
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(15)
-    }
 
-    async fn search(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        let body = build_search_body(query, count, opts);
-        let resp = self.post_api("search", body).await?;
-        Ok(to_results(resp, "exa"))
-    }
-
-    async fn search_news(
-        &self,
-        query: &str,
-        count: usize,
-        opts: &SearchOpts,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        let mut body = build_search_body(query, count, opts);
-        body["category"] = json!("news");
-        let resp = self.post_api("search", body).await?;
-        Ok(to_results(resp, "exa_news"))
-    }
-}
-
-impl Exa {
-    pub async fn search_people(
-        &self,
-        query: &str,
-        count: usize,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        let body = json!({
-            "query": query, "numResults": count, "type": "auto",
-            "category": "people", "contents": { "text": true }
-        });
-        let resp = self.post_api("search", body).await?;
-        Ok(to_results(resp, "exa_people"))
-    }
-
-    pub async fn find_similar(
-        &self,
-        url: &str,
-        count: usize,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        let body = json!({ "url": url, "numResults": count, "contents": { "text": true } });
-        let resp = self.post_api("findSimilar", body).await?;
-        Ok(to_results(resp, "exa_similar"))
+    // Deep and academic still send the general request (type "auto"), so
+    // their cost is the list estimate. A lane that switches deep to
+    // `type: "deep"` must set `cost_micros` (12,000 + 1,000/result over 10).
+    async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+        if !self.is_configured() {
+            return Err(SearchError::AuthMissing { provider: "exa" });
+        }
+        let (path, body, source) = match call.mode {
+            Mode::People => (
+                "search",
+                json!({
+                    "query": call.query, "numResults": call.count, "type": "auto",
+                    "category": "people", "contents": { "text": true }
+                }),
+                "exa_people",
+            ),
+            Mode::Similar => (
+                "findSimilar",
+                json!({ "url": call.query, "numResults": call.count, "contents": { "text": true } }),
+                "exa_similar",
+            ),
+            _ => (
+                "search",
+                build_search_body(call.query, call.count, call.opts),
+                "exa",
+            ),
+        };
+        let resp = self.post_api(path, body, call.timeout).await?;
+        Ok(Output {
+            results: to_results(resp, source),
+            ..Output::default()
+        })
     }
 }

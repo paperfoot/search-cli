@@ -53,7 +53,11 @@ async fn get_json(
     if let Some((k, v)) = header {
         req = req.header(k, v);
     }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = req
+        .timeout(USAGE_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| e.without_url().to_string())?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -89,9 +93,10 @@ async fn brave_usage(ctx: &AppContext, key: String) -> Result<serde_json::Value,
         .get("https://api.search.brave.com/res/v1/web/search?q=a&count=1")
         .header("X-Subscription-Token", key)
         .header("Accept", "application/json")
+        .timeout(USAGE_TIMEOUT)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.without_url().to_string())?;
     let remaining = resp
         .headers()
         .get("x-ratelimit-remaining")
@@ -267,7 +272,7 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
                             supported: true,
                             configured: true,
                             data: None,
-                            error: Some(e),
+                            error: Some(crate::errors::redact_secrets(&e)),
                         },
                         Err(_) => ProviderUsage {
                             provider: name,
@@ -282,8 +287,10 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
         }
     }
 
-    while let Some(Ok(u)) = set.join_next().await {
-        out.push(u);
+    while let Some(joined) = set.join_next().await {
+        if let Ok(u) = joined {
+            out.push(u);
+        }
     }
     out.sort_by(|a, b| a.provider.cmp(&b.provider));
 
@@ -299,23 +306,10 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
     out
 }
 
-/// Resolve the API key for a provider by name, mirroring each provider's own
-/// env > config precedence.
+/// The provider's effective key, with the same env > config precedence the
+/// adapters use.
 fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
-    let k = &ctx.config.keys;
-    match name {
-        "serpapi" => providers::resolve_key(&k.serpapi, "SERPAPI_API_KEY"),
-        "firecrawl" => providers::resolve_key(&k.firecrawl, "FIRECRAWL_API_KEY"),
-        "exa" => providers::resolve_key(&k.exa, "EXA_API_KEY"),
-        "jina" => providers::resolve_key(&k.jina, "JINA_API_KEY"),
-        "linkup" => providers::resolve_key(&k.linkup, "LINKUP_API_KEY"),
-        "tavily" => providers::resolve_key(&k.tavily, "TAVILY_API_KEY"),
-        "brave" => providers::resolve_key(&k.brave, "BRAVE_API_KEY"),
-        "serper" => providers::resolve_key(&k.serper, "SERPER_API_KEY"),
-        "perplexity" => providers::resolve_key(&k.perplexity, "PERPLEXITY_API_KEY"),
-        "browserless" => providers::resolve_key(&k.browserless, "BROWSERLESS_API_KEY"),
-        "parallel" => providers::resolve_key(&k.parallel, "PARALLEL_API_KEY"),
-        "xai" => providers::resolve_key(&k.xai, "XAI_API_KEY"),
-        _ => String::new(),
-    }
+    providers::find(name)
+        .map(|spec| providers::key_for(&ctx.config, spec))
+        .unwrap_or_default()
 }

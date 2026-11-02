@@ -7,10 +7,10 @@ use crate::logging;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Rough per-call cost estimates in USD, from provider pricing pages
-/// (2026-07). Estimates only — `search usage` balance snapshots are ground
-/// truth where available. Keyed by base provider name.
-fn estimated_cost_per_call(provider: &str) -> f64 {
+/// Flat per-call estimates in USD (2026-07), for log lines written before
+/// searches recorded `cost` (0.10). Newer lines carry their own per-provider
+/// cost. `search usage` balance snapshots are ground truth where available.
+fn legacy_cost_per_call(provider: &str) -> f64 {
     match provider {
         "serper" => 0.001,
         "jina" => 0.0005,
@@ -106,7 +106,12 @@ fn read_entries(days: u64) -> (Vec<serde_json::Value>, u64) {
 
 pub fn compute(days: u64) -> StatsReport {
     let (entries, log_files_read) = read_entries(days);
+    let mut report = summarize(&entries, days, log_files_read);
+    report.balances = read_balance_trends(days);
+    report
+}
 
+fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> StatsReport {
     let mut searches = 0u64;
     let mut cache_hits = 0u64;
     let mut by_mode: BTreeMap<String, u64> = BTreeMap::new();
@@ -115,7 +120,7 @@ pub fn compute(days: u64) -> StatsReport {
     // url -> providers that returned it, for read-through attribution.
     let mut url_sources: HashMap<String, HashSet<String>> = HashMap::new();
 
-    for e in &entries {
+    for e in entries {
         searches += 1;
         let cached = e.get("cached").and_then(|c| c.as_bool()).unwrap_or(false);
         if cached {
@@ -139,17 +144,28 @@ pub fn compute(days: u64) -> StatsReport {
 
         // Billing/contribution only counts fresh runs.
         if !cached {
+            let failed: HashSet<String> = str_array(e, "providers_failed")
+                .iter()
+                .map(|p| base_provider(p).to_string())
+                .collect();
+            let logged_cost = e.pointer("/cost/by_provider").and_then(|c| c.as_object());
             for p in str_array(e, "providers_queried") {
                 let base = base_provider(&p).to_string();
-                let stat = by_provider.entry(base.clone()).or_default();
+                let spend = match logged_cost {
+                    // The engine's own figure, timeouts of billed calls included.
+                    Some(costs) => {
+                        costs.get(&p).and_then(|v| v.as_u64()).unwrap_or(0) as f64 / 1_000_000.0
+                    }
+                    // A failed call (bad key, no credit) was not billed.
+                    None if failed.contains(&base) => 0.0,
+                    None => legacy_cost_per_call(&base),
+                };
+                let stat = by_provider.entry(base).or_default();
                 stat.calls += 1;
-                stat.estimated_spend_usd += estimated_cost_per_call(&base);
+                stat.estimated_spend_usd += spend;
             }
-            for p in str_array(e, "providers_failed") {
-                by_provider
-                    .entry(base_provider(&p).to_string())
-                    .or_default()
-                    .failures += 1;
+            for base in failed {
+                by_provider.entry(base).or_default().failures += 1;
             }
             for p in str_array(e, "providers_cancelled") {
                 by_provider
@@ -199,7 +215,7 @@ pub fn compute(days: u64) -> StatsReport {
         by_provider,
         estimated_total_spend_usd,
         top_queries,
-        balances: read_balance_trends(days),
+        balances: BTreeMap::new(),
         log_files_read,
     }
 }
@@ -347,4 +363,34 @@ pub fn render_human(r: &StatsReport) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spend_uses_logged_cost_and_skips_failed_calls() {
+        let entries = vec![
+            // New line: the engine's own per-provider cost.
+            serde_json::json!({
+                "ts": 1, "mode": "general", "query": "a", "cached": false,
+                "providers_queried": ["exa", "serper"],
+                "providers_failed": ["serper"],
+                "cost": {"by_provider": {"exa": 9000}},
+            }),
+            // Old line: flat table, the failed provider not billed.
+            serde_json::json!({
+                "ts": 2, "mode": "general", "query": "b", "cached": false,
+                "providers_queried": ["serper", "brave"],
+                "providers_failed": ["brave"],
+            }),
+        ];
+        let r = summarize(&entries, 7, 1);
+        assert!((r.by_provider["exa"].estimated_spend_usd - 0.009).abs() < 1e-9);
+        assert!((r.by_provider["serper"].estimated_spend_usd - 0.001).abs() < 1e-9);
+        assert_eq!(r.by_provider["brave"].estimated_spend_usd, 0.0);
+        assert_eq!(r.by_provider["brave"].failures, 1);
+        assert_eq!(r.by_provider["serper"].calls, 2);
+    }
 }

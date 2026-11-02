@@ -4,7 +4,9 @@
 //! summarize it. A unit test pins the mode list so a new `Mode` variant
 //! cannot ship without a registry entry.
 
+use crate::providers::{self, Output};
 use crate::types::Mode;
+use std::time::Duration;
 
 /// What the `-q` argument means for a mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,14 @@ pub struct ModeSpec {
     pub providers: &'static [&'static str],
     pub description: &'static str,
     pub when_to_use: &'static str,
+    /// Whole-run budget: the server's deadline plus 5 s, so a hosted call is
+    /// never abandoned while the server still works on it (PLAN.md §3.5).
+    /// Calls already sent are never cancelled before it.
+    pub deadline: Duration,
+}
+
+const fn secs(s: u64) -> Duration {
+    Duration::from_secs(s)
 }
 
 pub const MODES: &[ModeSpec] = &[
@@ -63,25 +73,27 @@ pub const MODES: &[ModeSpec] = &[
         input: InputKind::Query,
         merge: MergeKind::Fused,
         providers: &[
-            "parallel",
-            "brave",
             "serper",
             "exa",
             "jina",
+            "brave",
             "linkup",
+            "parallel",
             "tavily",
             "perplexity",
         ],
         description: "Broad web search fused across all general-capable providers",
         when_to_use: "Default for any web lookup that doesn't fit a specialist mode.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::News,
         input: InputKind::Query,
         merge: MergeKind::Fused,
-        providers: &["parallel", "brave", "serper", "linkup", "tavily", "perplexity"],
+        providers: &["serper", "brave", "linkup", "parallel", "tavily", "perplexity"],
         description: "News-specific endpoints of the news-capable providers",
         when_to_use: "Current events and anything where recency dominates; combine with -f day or -f week.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::Academic,
@@ -90,6 +102,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["exa", "serper", "tavily", "perplexity"],
         description: "Papers, preprints, and studies on the open web (semantic + web search)",
         when_to_use: "Finding research by topic. For Google Scholar records (citations, versions, PDFs) use scholar instead.",
+        deadline: secs(30),
     },
     ModeSpec {
         mode: Mode::People,
@@ -98,23 +111,25 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["exa"],
         description: "Person and LinkedIn-profile search (Exa category search)",
         when_to_use: "Finding a specific person, their role, or their LinkedIn profile.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::Deep,
         input: InputKind::Query,
         merge: MergeKind::Fused,
         providers: &[
-            "parallel",
-            "brave",
-            "serper",
             "exa",
+            "serper",
+            "brave",
             "linkup",
+            "parallel",
             "tavily",
             "perplexity",
             "xai",
         ],
-        description: "Maximum-coverage fan-out (web + X/Twitter + Brave grounding); waits for every provider, never cancels early",
-        when_to_use: "Research where recall matters more than latency. Raise -c (e.g. -c 30) to keep more of the pool.",
+        description: "Maximum-coverage fan-out (web + X/Twitter + Brave grounding)",
+        when_to_use: "Research where recall matters more than latency. Raise -c (e.g. -c 30) to keep more of the fused pool.",
+        deadline: secs(50),
     },
     ModeSpec {
         mode: Mode::Extract,
@@ -123,6 +138,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["stealth", "jina", "firecrawl", "browserless"],
         description: "Full page content as markdown; tries the local stealth scraper, then Jina Reader, Firecrawl, and Browserless until one succeeds",
         when_to_use: "Reading one specific page, including JS-heavy or anti-bot pages. -q must be a full URL.",
+        deadline: secs(65),
     },
     ModeSpec {
         mode: Mode::Similar,
@@ -131,6 +147,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["exa"],
         description: "Pages semantically similar to the given URL (Exa findSimilar)",
         when_to_use: "\"More like this page\": competitors, alternatives, related coverage. -q must be a full URL.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::Scrape,
@@ -139,6 +156,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["stealth", "jina", "firecrawl", "browserless"],
         description: "Alias of extract — identical provider chain and behavior",
         when_to_use: "Same as extract; the two names are interchangeable.",
+        deadline: secs(65),
     },
     ModeSpec {
         mode: Mode::Scholar,
@@ -147,6 +165,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["serper", "serpapi"],
         description: "Google Scholar records (citations, versions, PDF links)",
         when_to_use: "Scholarly metadata for a known paper/author. For topic discovery use academic.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::Patents,
@@ -155,6 +174,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["serper"],
         description: "Google Patents search",
         when_to_use: "Prior art, patent families, inventor/assignee lookups.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::Images,
@@ -163,6 +183,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["serper"],
         description: "Google Images search (returns image_url per result)",
         when_to_use: "Finding images; check the image_url field of each result.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::Places,
@@ -171,6 +192,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["serper"],
         description: "Local businesses and places (Google Maps data)",
         when_to_use: "Businesses, opening hours, addresses near a location.",
+        deadline: secs(25),
     },
     ModeSpec {
         mode: Mode::Social,
@@ -179,6 +201,7 @@ pub const MODES: &[ModeSpec] = &[
         providers: &["xai"],
         description: "Live X/Twitter search via xAI Grok — an X summary plus cited posts",
         when_to_use: "What's being said on X, trending topics, account activity. Here -d/--exclude-domain filter X handles, not domains.",
+        deadline: secs(65),
     },
 ];
 
@@ -190,9 +213,9 @@ pub fn spec(mode: Mode) -> &'static ModeSpec {
         .expect("registry entry for every mode")
 }
 
-/// Which of the CLI's `-f`/`-d` filters a provider actually forwards to its
-/// API. Providers not listed here (parallel, firecrawl, stealth, browserless)
-/// apply none — the engine warns when their results enter a filtered search.
+/// Which of the CLI's `-f`/`-d` filters a provider forwards to its API, read
+/// from its spec. The engine warns when a provider that drops a requested
+/// filter contributes to a filtered search.
 pub struct FilterSupport {
     pub freshness: bool,
     pub domains: bool,
@@ -201,31 +224,69 @@ pub struct FilterSupport {
 }
 
 pub fn filter_support(provider: &str) -> FilterSupport {
-    // Base name so "brave_llm_context" inherits brave's support.
-    let base = provider.split("_llm_").next().unwrap_or(provider);
-    match base {
-        "brave" | "serper" | "serpapi" | "tavily" | "exa" | "perplexity" | "parallel"
-        | "linkup" => FilterSupport {
-            freshness: true,
-            domains: true,
-            note: None,
-        },
-        "jina" => FilterSupport {
-            freshness: false,
-            domains: true,
-            note: None,
-        },
-        "xai" => FilterSupport {
-            freshness: true,
-            domains: true,
-            note: Some("xai maps --domain/--exclude-domain to X handles, not web domains"),
-        },
-        _ => FilterSupport {
-            freshness: false,
-            domains: false,
-            note: None,
-        },
+    let f = providers::find(provider).map(|s| s.filters);
+    FilterSupport {
+        freshness: f.is_some_and(|f| f.freshness),
+        domains: f.is_some_and(|f| f.domains),
+        note: (provider == "xai")
+            .then_some("xai maps --domain/--exclude-domain to X handles, not web domains"),
     }
+}
+
+/// Modes whose calls forward the caller's filters. The vertical endpoints
+/// (scholar, patents, images, places), people, similar and extract send none.
+pub fn mode_applies_filters(mode: Mode) -> bool {
+    matches!(
+        mode,
+        Mode::General | Mode::News | Mode::Academic | Mode::Deep | Mode::Social
+    )
+}
+
+/// Whether an output is acceptable for the mode. In a chain a rejected output
+/// is recorded as a `rejected` failure and the next provider runs, so junk
+/// never ends the chain as a success. Only extract judges content today.
+pub fn accept(mode: Mode, output: &Output) -> Result<(), &'static str> {
+    match mode {
+        Mode::Extract | Mode::Scrape => match output.results.first() {
+            Some(r) => match scrape_rejection(&r.snippet) {
+                Some(reason) => Err(reason),
+                None => Ok(()),
+            },
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// Why scraped content is unusable, or None if it looks like real page text.
+/// Two failure classes seen in the wild: undecompressed/binary bytes served
+/// as text (mojibake), and anti-bot challenge pages returned with HTTP 200.
+fn scrape_rejection(content: &str) -> Option<&'static str> {
+    let sample: Vec<char> = content.chars().take(4000).collect();
+    if sample.len() > 200 {
+        let garbage = sample
+            .iter()
+            .filter(|c| **c == '\u{FFFD}' || (c.is_control() && !c.is_whitespace()))
+            .count();
+        if garbage * 20 > sample.len() {
+            return Some("binary or undecodable content");
+        }
+    }
+    // Challenge pages are short; a real article mentioning Cloudflare isn't.
+    if content.chars().count() < 4000 {
+        const CHALLENGE_MARKERS: &[&str] = &[
+            "Checking your browser before accessing",
+            "Just a moment...",
+            "Verifying you are human",
+            "Enable JavaScript and cookies to continue",
+            "cf-browser-verification",
+            "Attention Required! | Cloudflare",
+        ];
+        if CHALLENGE_MARKERS.iter().any(|m| content.contains(m)) {
+            return Some("anti-bot challenge page instead of content");
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -245,28 +306,67 @@ mod tests {
     }
 
     #[test]
-    fn registry_providers_exist() {
-        // Every provider named in the registry must be a real provider name.
-        let known = [
-            "parallel",
-            "brave",
-            "serper",
-            "exa",
-            "jina",
-            "linkup",
-            "firecrawl",
-            "tavily",
-            "serpapi",
-            "perplexity",
-            "browserless",
-            "stealth",
-            "xai",
-        ];
+    fn registry_providers_serve_their_modes() {
+        // Every provider a mode routes to has a spec that lists the mode
+        // (stealth only exists with its feature).
         for spec in MODES {
+            let mode = if spec.mode == Mode::Scrape {
+                Mode::Extract
+            } else {
+                spec.mode
+            };
             for p in spec.providers {
-                assert!(known.contains(p), "unknown provider {p} in registry");
+                match providers::find(p) {
+                    Some(ps) => assert!(ps.modes.contains(&mode), "{p} does not serve {mode}"),
+                    None => assert_eq!(*p, "stealth", "unknown provider {p} in registry"),
+                }
             }
         }
+    }
+
+    #[test]
+    fn deadlines_are_server_plus_five() {
+        assert_eq!(spec(Mode::General).deadline, secs(25));
+        assert_eq!(spec(Mode::Academic).deadline, secs(30));
+        assert_eq!(spec(Mode::Deep).deadline, secs(50));
+        assert_eq!(spec(Mode::Extract).deadline, secs(65));
+        assert_eq!(spec(Mode::Social).deadline, secs(65));
+        for m in MODES {
+            assert!(m.deadline >= secs(25));
+        }
+    }
+
+    #[test]
+    fn accept_rejects_binary_and_challenge_pages_in_extract() {
+        use crate::types::SearchResult;
+        let out = |text: &str| Output {
+            results: vec![SearchResult {
+                title: String::new(),
+                url: "https://x.com".into(),
+                snippet: text.to_string(),
+                source: "t".into(),
+                published: None,
+                image_url: None,
+                extra: None,
+            }],
+            ..Output::default()
+        };
+        // Mojibake: mostly replacement characters.
+        let binary: String = "\u{FFFD}x\u{FFFD}\u{FFFD}".repeat(100);
+        assert!(accept(Mode::Extract, &out(&binary)).is_err());
+        // Cloudflare interstitial served as 200.
+        let challenge = "## Checking your browser before accessing\nexample.com";
+        assert!(accept(Mode::Extract, &out(challenge)).is_err());
+        assert!(accept(Mode::Scrape, &out(challenge)).is_err());
+        // Real prose passes, even when long or mentioning Cloudflare.
+        let article = format!(
+            "How Cloudflare works. {}",
+            "Real sentence with ordinary words. ".repeat(300)
+        );
+        assert!(accept(Mode::Extract, &out(&article)).is_ok());
+        assert!(accept(Mode::Extract, &out("Short but real snippet about rust.")).is_ok());
+        // Search modes don't judge content.
+        assert!(accept(Mode::General, &out(challenge)).is_ok());
     }
 
     #[test]
