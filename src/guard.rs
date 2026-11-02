@@ -26,10 +26,12 @@ pub fn allow_private() -> bool {
     ALLOW_PRIVATE.load(Ordering::Relaxed)
 }
 
-/// Reject URLs whose host is (or resolves to) a non-public address.
-/// DNS failure is NOT a rejection — the scraper will fail on its own, with a
-/// clearer error than a pre-flight guess. Resolution is checked once here;
-/// DNS-rebinding between check and fetch is out of scope and documented.
+/// Reject URLs whose host is (or resolves to) a non-public address: the
+/// early, friendly refusal before any rung runs. It is not the enforcement:
+/// a second lookup may answer differently (DNS rebinding), so the local
+/// rungs' own resolvers (`page::resolve_public`, used by direct's reqwest and
+/// stealth's wreq) check the addresses they connect to and fail closed. A
+/// DNS failure here is therefore not a rejection; the fetch fails on its own.
 pub async fn assert_public_url(raw: &str) -> Result<(), SearchError> {
     let parsed = url::Url::parse(raw).map_err(|e| SearchError::InvalidInput {
         message: format!("not a valid URL: {e}"),
