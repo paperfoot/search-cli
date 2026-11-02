@@ -202,12 +202,14 @@ pub fn classify_http(
 }
 
 /// Generic body rules for 4xx answers (a 5xx body describes the provider's
-/// trouble, not the caller's account).
+/// trouble, not the caller's account). Only message text counts: in a JSON
+/// body that is its string values, never its key names, so Brave's per-second
+/// 429 (`"meta":{"quota_limit":2000,…}`) stays a rate limit.
 pub fn classify_body(status: u16, body: &str) -> Option<FailureCategory> {
     if !(400..500).contains(&status) {
         return None;
     }
-    let b = body.to_ascii_lowercase();
+    let b = message_text(body).to_ascii_lowercase();
     const BILLING: &[&str] = &["quota", "credits", "funds", "insufficient", "balance"];
     if BILLING.iter().any(|w| b.contains(w)) {
         return Some(FailureCategory::BillingQuota);
@@ -216,6 +218,30 @@ pub fn classify_body(status: u16, body: &str) -> Option<FailureCategory> {
         return Some(FailureCategory::Auth);
     }
     None
+}
+
+/// The human-readable part of an error body: every string value of a JSON
+/// body joined by newlines, or the raw text when it is not JSON.
+fn message_text(body: &str) -> String {
+    fn walk(v: &serde_json::Value, out: &mut String) {
+        match v {
+            serde_json::Value::String(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|i| walk(i, out)),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => {
+            let mut out = String::new();
+            walk(&v, &mut out);
+            out
+        }
+        Err(_) => body.to_string(),
+    }
 }
 
 /// "invalid … key/token" or "key/token … invalid", within a short window so
@@ -406,6 +432,38 @@ mod tests {
         assert_eq!(classify_http(Some(C::Auth), 429, linkup), C::Auth);
         assert_eq!(classify_http(None, 503, "balance service down"), C::Server);
         assert_eq!(classify_http(None, 429, "slow down"), C::RateLimit);
+    }
+
+    /// Brave's free-plan per-second 429 carries `quota_limit` in its meta: a
+    /// JSON key, not a message, so it must stay a rate limit (exit 4), not a
+    /// billing failure (exit 2, "add credit").
+    #[test]
+    fn billing_words_in_json_keys_do_not_count() {
+        use FailureCategory as C;
+        let brave = r#"{"type":"ErrorResponse","error":{"status":429,"detail":"Request rate limit exceeded for plan","meta":{"plan":"Free","rate_limit":1,"rate_current":1,"quota_limit":2000,"quota_current":342},"code":"RATE_LIMITED"}}"#;
+        assert_eq!(classify_http(None, 429, brave), C::RateLimit);
+        let failed = vec![SearchError::Upstream {
+            provider: "brave",
+            status: 429,
+            category: classify_http(None, 429, brave),
+            message: "m".into(),
+        }
+        .to_provider_failure("brave")];
+        assert_eq!(SearchError::AllProvidersFailed { failed }.exit_code(), 4);
+        // A key named like a credential is not an auth message either.
+        assert_eq!(
+            classify_http(None, 400, r#"{"invalid_token_count":0,"detail":"bad q"}"#),
+            C::BadRequest
+        );
+        // Billing words in values still count, JSON or plain text.
+        assert_eq!(
+            classify_http(None, 429, r#"{"error":{"code":"QUOTA_LIMITED"}}"#),
+            C::BillingQuota
+        );
+        assert_eq!(
+            classify_http(None, 403, "insufficient balance"),
+            C::BillingQuota
+        );
     }
 
     #[test]

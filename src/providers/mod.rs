@@ -447,6 +447,23 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 3);
     }
 
+    /// End to end through `send` with the real Brave adapter: the free
+    /// plan's per-second 429 is a rate limit (exit 4), not billing (exit 2).
+    #[tokio::test]
+    async fn brave_per_second_429_is_rate_limit_not_billing() {
+        let (url, hits) = server(Some("HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 227\r\n\r\n{\"type\":\"ErrorResponse\",\"error\":{\"id\":\"4083cd30\",\"status\":429,\"detail\":\"Request rate limit exceeded for plan\",\"meta\":{\"plan\":\"Free\",\"rate_limit\":1,\"rate_current\":1,\"quota_limit\":2000,\"quota_current\":342},\"code\":\"RATE_LIMITED\"}}")).await;
+        let ctx = Arc::new(AppContext::new(AppConfig::default()));
+        let adapter = brave::Brave::new(ctx);
+        let c = client();
+        let err = send(&adapter, Duration::from_secs(5), || c.get(&url))
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), FailureCategory::RateLimit);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let failed = vec![err.to_provider_failure("brave")];
+        assert_eq!(SearchError::AllProvidersFailed { failed }.exit_code(), 4);
+    }
+
     #[tokio::test]
     async fn rate_limit_without_retry_after_is_not_retried() {
         let (url, hits) = server(Some(

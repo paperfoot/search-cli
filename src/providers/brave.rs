@@ -2,7 +2,7 @@ use super::spec::{FilterSupport, Price};
 use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{Mode, SearchOpts, SearchResult};
+use crate::types::{FailureCategory, Mode, SearchOpts, SearchResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -93,6 +93,19 @@ impl Adapter for Brave {
 
     fn is_configured(&self) -> bool {
         !self.api_key().is_empty()
+    }
+
+    /// Brave names the cause in `error.code`. Its per-second 429 also lists
+    /// the monthly quota in `meta`, so only the code tells a rate limit
+    /// (retry shortly) from an exhausted plan (add credit).
+    fn classify(&self, _status: u16, body: &str) -> Option<FailureCategory> {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        match v.pointer("/error/code")?.as_str()? {
+            "RATE_LIMITED" => Some(FailureCategory::RateLimit),
+            "QUOTA_LIMITED" => Some(FailureCategory::BillingQuota),
+            "SUBSCRIPTION_TOKEN_INVALID" | "SUBSCRIPTION_NOT_FOUND" => Some(FailureCategory::Auth),
+            _ => None,
+        }
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
@@ -308,5 +321,29 @@ impl Brave {
             }
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    fn brave() -> Brave {
+        Brave::new(Arc::new(AppContext::new(AppConfig::default())))
+    }
+
+    #[test]
+    fn error_code_decides_rate_limit_quota_and_auth() {
+        use FailureCategory as C;
+        let b = brave();
+        // The free plan's 1 req/s answer (as published in openclaw/openclaw#14245).
+        let per_second = r#"{"type":"ErrorResponse","error":{"id":"4083cd30","status":429,"detail":"Request rate limit exceeded for plan","meta":{"plan":"Free","rate_limit":1,"rate_current":1,"quota_limit":2000,"quota_current":342},"code":"RATE_LIMITED"}}"#;
+        assert_eq!(b.classify(429, per_second), Some(C::RateLimit));
+        let monthly = r#"{"type":"ErrorResponse","error":{"status":429,"detail":"Request quota limit exceeded for plan","code":"QUOTA_LIMITED"}}"#;
+        assert_eq!(b.classify(429, monthly), Some(C::BillingQuota));
+        let dead_key = r#"{"type":"ErrorResponse","error":{"status":422,"detail":"The provided subscription token is invalid.","code":"SUBSCRIPTION_TOKEN_INVALID"}}"#;
+        assert_eq!(b.classify(422, dead_key), Some(C::Auth));
+        assert_eq!(b.classify(400, "not json"), None);
     }
 }
