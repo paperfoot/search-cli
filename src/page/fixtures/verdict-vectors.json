@@ -1,0 +1,217 @@
+{
+ "_about": "Page verdict vectors shared by search-cli (src/page/verdict.rs) and metasearch.sh (src/lib/engine/page.ts). Keep the two copies identical. body_file is relative to this file. expect is page.ts's Rejection code, or ok.",
+ "vectors": [
+  {
+   "name": "an article is ok",
+   "expect": "ok",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "article.html"
+  },
+  {
+   "name": "a short docs page is thin",
+   "expect": "thin",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "docs-table.html"
+  },
+  {
+   "name": "a server-rendered page keeps its mount node full",
+   "expect": "ok",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "ssr-next.html"
+  },
+  {
+   "name": "cloudflare interstitial",
+   "expect": "challenge",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "cloudflare-challenge.html"
+  },
+  {
+   "name": "cloudflare interstitial on a 403",
+   "expect": "challenge",
+   "content_type": "text/html; charset=utf-8",
+   "status": 403,
+   "headers": {},
+   "body_file": "cloudflare-challenge.html"
+  },
+  {
+   "name": "cloudflare interstitial rendered as markdown",
+   "expect": "challenge",
+   "content_type": "text/markdown",
+   "status": 200,
+   "headers": {},
+   "body": "# Just a moment...\n\nexample.com"
+  },
+  {
+   "name": "cf-mitigated header",
+   "expect": "challenge",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {
+    "cf-mitigated": "challenge"
+   },
+   "body_file": "article.html"
+  },
+  {
+   "name": "cloudflare javascript detections on a normal page",
+   "expect": "ok",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "cloudflare-jsd-page.html"
+  },
+  {
+   "name": "an article about cloudflare challenges",
+   "expect": "ok",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "cloudflare-article.html"
+  },
+  {
+   "name": "datadome interstitial",
+   "expect": "challenge",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body": "<html><head><title>example.com</title></head><body><script src=\"https://ct.captcha-delivery.com/c.js\"></script></body></html>"
+  },
+  {
+   "name": "datadome tag and a search form on a normal page",
+   "expect": "ok",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "datadome-tag-page.html"
+  },
+  {
+   "name": "perimeterx",
+   "expect": "challenge",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body": "<html><body><div id=\"px-captcha\"></div><p>Press and hold</p></body></html>"
+  },
+  {
+   "name": "akamai access denied",
+   "expect": "challenge",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body": "<HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1>You don't have permission to access \"http://www.example.com/\" on this server.<P>Reference #18.6f2d3e17.1730550000.1a2b3c4d</BODY></HTML>"
+  },
+  {
+   "name": "a short captcha form",
+   "expect": "challenge",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body": "<html><body><h1>One more step</h1><form action=\"/verify\" method=\"post\"><div class=\"g-recaptcha\" data-sitekey=\"x\"></div><button>Continue</button></form></body></html>"
+  },
+  {
+   "name": "next.js shell",
+   "expect": "js_shell",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "next-shell.html"
+  },
+  {
+   "name": "noscript shell",
+   "expect": "js_shell",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body_file": "noscript-shell.html"
+  },
+  {
+   "name": "pdf by content type",
+   "expect": "binary",
+   "content_type": "application/pdf",
+   "status": 200,
+   "headers": {},
+   "body": "%PDF-1.7 ..."
+  },
+  {
+   "name": "png by content type",
+   "expect": "binary",
+   "content_type": "image/png",
+   "status": 200,
+   "headers": {},
+   "body": ""
+  },
+  {
+   "name": "pdf without a content type",
+   "expect": "binary",
+   "content_type": null,
+   "status": 200,
+   "headers": {},
+   "body": "%PDF-1.4\n�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002�\u0001�\u0002"
+  },
+  {
+   "name": "an rss feed is text",
+   "expect": "ok",
+   "content_type": "application/rss+xml",
+   "status": 200,
+   "headers": {},
+   "body": "<rss><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item><item>news</item></rss>"
+  },
+  {
+   "name": "json is text",
+   "expect": "ok",
+   "content_type": "application/json",
+   "status": 200,
+   "headers": {},
+   "body": "{\"items\": [\"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\", \"a reasonably long string value\"]}"
+  },
+  {
+   "name": "a thin html page",
+   "expect": "thin",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body": "<html><body><p>Coming soon.</p></body></html>"
+  },
+  {
+   "name": "thin plain text",
+   "expect": "thin",
+   "content_type": "text/plain",
+   "status": 200,
+   "headers": {},
+   "body": "Short but real."
+  },
+  {
+   "name": "markdown with enough text",
+   "expect": "ok",
+   "content_type": "text/markdown",
+   "status": 200,
+   "headers": {},
+   "body": "# Title\n\nA real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. A real paragraph of markdown. "
+  },
+  {
+   "name": "title and svg text are not visible text",
+   "expect": "thin",
+   "content_type": "text/html; charset=utf-8",
+   "status": 200,
+   "headers": {},
+   "body": "<html><head><title>Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words Long title words </title></head><body><svg><text>label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label label </text></svg><p>Hi</p></body></html>"
+  },
+  {
+   "name": "pay per crawl",
+   "expect": "payment_required",
+   "content_type": "text/html; charset=utf-8",
+   "status": 402,
+   "headers": {
+    "crawler-price": "USD 0.01"
+   },
+   "body": "<p>pay</p>"
+  }
+ ]
+}
