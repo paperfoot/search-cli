@@ -289,39 +289,49 @@ pub mod skill {
         let mut results = Vec::new();
         for t in &targets() {
             let skill_path = t.path.join("SKILL.md");
-            let status = if skill_path.exists()
+            // A failed install is reported in the result (JSON readers see it
+            // on stdout), not only as a stderr line.
+            let (status, error) = if skill_path.exists()
                 && std::fs::read_to_string(&skill_path).is_ok_and(|c| c == SKILL_CONTENT)
             {
-                "already_current"
+                ("already_current", None)
             } else {
-                if let Err(e) = std::fs::create_dir_all(&t.path) {
-                    eprintln!("  Failed {}: {e}", t.name);
-                    continue;
+                match std::fs::create_dir_all(&t.path)
+                    .and_then(|()| std::fs::write(&skill_path, SKILL_CONTENT))
+                {
+                    Ok(()) => ("installed", None),
+                    Err(e) => ("failed", Some(e.to_string())),
                 }
-                if let Err(e) = std::fs::write(&skill_path, SKILL_CONTENT) {
-                    eprintln!("  Failed {}: {e}", t.name);
-                    continue;
-                }
-                "installed"
             };
-            results.push((t.name, skill_path.display().to_string(), status));
+            results.push((t.name, skill_path.display().to_string(), status, error));
         }
 
         if ctx.is_json() {
             let items: Vec<serde_json::Value> = results
                 .iter()
-                .map(|(name, path, status)| {
-                    serde_json::json!({"platform": name, "path": path, "status": status})
+                .map(|(name, path, status, error)| {
+                    let mut item =
+                        serde_json::json!({"platform": name, "path": path, "status": status});
+                    if let Some(e) = error {
+                        item["error"] = serde_json::json!(e);
+                    }
+                    item
                 })
                 .collect();
+            let any_ok = results.iter().any(|r| r.2 != "failed");
+            let all_ok = results.iter().all(|r| r.2 != "failed");
             crate::output::json::render_value(&serde_json::json!({
                 "version": "1",
-                "status": "success",
+                "status": if all_ok { "success" } else if any_ok { "partial_success" } else { "error" },
                 "data": items,
             }));
         } else if !ctx.suppress_human() {
             use owo_colors::OwoColorize;
-            for (name, path, status) in &results {
+            for (name, path, status, error) in &results {
+                if let Some(e) = error {
+                    eprintln!("  Failed {name}: {e}");
+                    continue;
+                }
                 let marker = if *status == "installed" { "+" } else { "=" };
                 println!(" {} {} -> {}", marker.green(), name.bold(), path.dimmed());
             }
