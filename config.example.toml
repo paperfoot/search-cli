@@ -1,20 +1,37 @@
-# search-cli configuration
-# Place at ~/.config/search/config.toml
-# All keys can also be set via env vars with SEARCH_ prefix
-# e.g. SEARCH_BRAVE_KEY, SEARCH_SERPER_KEY
+# search configuration
+#
+# Location: ~/.config/search/config.toml (Linux)
+#           ~/Library/Application Support/search/config.toml (macOS)
+# `search config path` prints it. The file is created with mode 0600.
+#
+# Environment variables win over this file. For each provider, in order:
+#   1. <PROVIDER>_API_KEY      e.g. BRAVE_API_KEY, SERPER_API_KEY
+#   2. SEARCH_KEYS_<PROVIDER>  e.g. SEARCH_KEYS_BRAVE, SEARCH_KEYS_SERPER
+#   3. this file
+#
+# Set keys without leaving them in shell history:
+#   echo "$KEY" | search config set keys.brave -
 
 [keys]
-brave = ""
 serper = ""
 exa = ""
 jina = ""
-firecrawl = ""
+brave = ""
+linkup = ""
+parallel = ""
 tavily = ""
-serpapi = ""
 perplexity = ""
-browserless = ""
+serpapi = ""
 xai = ""
+firecrawl = ""
+browserless = ""
 
 [settings]
-timeout = 10
-count = 10
+count = 10            # results per search when -c is not given
+
+[metasearch]
+# Written by `search login`; METASEARCH_TOKEN or SEARCH_METASEARCH_TOKEN override it.
+token = ""
+# Most engines a fused search sends through metasearch.sh: 3 by default, 6 for deep.
+# Engines you name with -p are always sent.
+max_providers = 3
