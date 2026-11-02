@@ -424,6 +424,57 @@ fn provider_not_available_is_server_and_drops_the_manifest_cache() {
     assert_eq!(m.requests("/api/v1/manifest").len(), 2);
 }
 
+/// The cached manifest under the mock's HOME, wherever the platform keeps caches.
+fn manifest_cache(dir: &std::path::Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(found) = manifest_cache(&p) {
+                return Some(found);
+            }
+        } else if p.file_name().is_some_and(|n| n == "manifest.json") {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// A failed manifest refresh keeps the stale copy and backs off for a
+/// minute, so a metasearch.sh outage costs one wait, not one per search.
+#[test]
+fn failed_manifest_refresh_backs_off_instead_of_blocking_every_search() {
+    let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let s = served.clone();
+    let mock = start(
+        "manifestbackoff",
+        Arc::new(move |req: &Req, i| match req.path.as_str() {
+            "/api/v1/manifest" => {
+                if s.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Reply::Json(200, manifest())
+                } else {
+                    Reply::Json(500, json!({ "error": "internal_error" }))
+                }
+            }
+            _ => handler(|r, _| search_ok(r))(req, i),
+        }),
+    );
+    let (code, v) = pinned(&mock);
+    assert_eq!(code, 0, "{v}");
+    let path = manifest_cache(&mock.home).expect("manifest cached");
+    let mut cached: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cached["fetched_at"] = json!(0); // stale
+    std::fs::write(&path, serde_json::to_vec(&cached).unwrap()).unwrap();
+    let (code, v) = pinned(&mock);
+    assert_eq!(code, 0, "the stale copy still serves: {v}");
+    assert_eq!(mock.requests("/api/v1/manifest").len(), 2);
+    pinned(&mock);
+    assert_eq!(
+        mock.requests("/api/v1/manifest").len(),
+        2,
+        "no refetch within the minute"
+    );
+}
+
 #[test]
 fn zero_keys_auto_general_is_charged_capped_routed_and_reranked() {
     let mock = start("zero", handler(|r, _| search_ok(r)));

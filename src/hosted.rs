@@ -22,6 +22,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// minutes keeps that fresh without a round trip per search.
 const MANIFEST_TTL_SECS: u64 = 600;
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// After a failed fetch, the stale copy is used this long before retrying.
+const MANIFEST_RETRY_SECS: u64 = 60;
 /// Account calls (`/me`, revoke, device flow) must fail in seconds.
 pub const ACCOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 pub const ROUTE_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -104,7 +106,7 @@ pub fn cached_manifest(base: &str) -> Option<V1Manifest> {
         .map(|c| c.manifest)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct CachedManifest {
     fetched_at: u64,
     base: String,
@@ -269,7 +271,15 @@ impl MetasearchClient {
                 });
                 Some(manifest)
             }
-            None => cached.map(|c| c.manifest),
+            // A failed or hung fetch keeps the stale copy and is not retried
+            // for a minute, so an outage costs one 5 s wait, not one per search.
+            None => cached.map(|c| {
+                write_manifest_cache(&CachedManifest {
+                    fetched_at: now_secs().saturating_sub(MANIFEST_TTL_SECS - MANIFEST_RETRY_SECS),
+                    ..c.clone()
+                });
+                c.manifest
+            }),
         }
     }
 
