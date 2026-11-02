@@ -583,7 +583,6 @@ fn lone_handle(q: &str) -> Option<String> {
 
 /// Rule 3: `^(similar to|sites like|alternatives to|competitors (of|to)|more like)\s+(https?://\S+)$`.
 fn similar_url(q: &str) -> Option<String> {
-    let lower = q.to_lowercase();
     const LEADS: &[&str] = &[
         "similar to",
         "sites like",
@@ -592,17 +591,17 @@ fn similar_url(q: &str) -> Option<String> {
         "competitors to",
         "more like",
     ];
-    let lead = LEADS.iter().find(|l| lower.starts_with(*l))?;
+    // Compare the original text, ASCII case-insensitively: offsets taken
+    // from a lowercased copy can land inside a multi-byte character.
+    let lead = LEADS
+        .iter()
+        .find(|l| q.get(..l.len()).is_some_and(|h| h.eq_ignore_ascii_case(l)))?;
     let rest = &q[lead.len()..];
     if !rest.starts_with(char::is_whitespace) {
         return None;
     }
     let url = rest.trim_start();
-    let l = url.to_ascii_lowercase();
-    ((l.starts_with("http://") || l.starts_with("https://"))
-        && url.len() > 8
-        && !url.chars().any(char::is_whitespace))
-    .then(|| url.to_string())
+    is_absolute_url(url).then(|| url.to_string())
 }
 
 /// Rule 4's number form: `\b(US|EP|WO)\s?\d{6,}\b`.
@@ -786,6 +785,15 @@ mod tests {
         ] {
             assert_eq!(local(q), ("social".into(), "rule".into()), "query {q:?}");
         }
+    }
+
+    /// Lowercasing can change byte length (U+212A KELVIN SIGN is 3 bytes and
+    /// lowercases to 'k'); rule 3 used to slice the original with offsets
+    /// from the lowercased copy and panicked, leaving stdout empty.
+    #[test]
+    fn rule_3_never_panics_on_case_folding_that_changes_length() {
+        assert_eq!(local("SITES LI\u{212A}E https://example.com").0, "general");
+        assert_eq!(local("SITES LIKE https://example.com").0, "similar");
     }
 
     /// The server's judge.test.ts freshness vectors, through the local rules.
