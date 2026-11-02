@@ -246,7 +246,7 @@ pub fn filter_support(provider: &str) -> FilterSupport {
         freshness: f.is_some_and(|f| f.freshness),
         domains: f.is_some_and(|f| f.domains),
         note: (provider == "xai")
-            .then_some("xai maps --domain/--exclude-domain to X handles, not web domains"),
+            .then_some("social: xai maps --domain/--exclude-domain to X handles. deep: xai skips the call (no charge) when the filters rule out x.com, and otherwise does not apply them"),
     }
 }
 

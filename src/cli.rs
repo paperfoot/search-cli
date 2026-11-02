@@ -6,7 +6,8 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 13 search providers across 13 search modes.\n\
+    long_about = "Aggregates 14 providers (12 search APIs plus keyless direct and stealth\n\
+        fetchers) across 13 modes.\n\
         With no -m the mode is auto: a URL extracts, an X/Twitter cue searches\n\
         X, and so on; the decision is reported in metadata.routing.auto. An\n\
         explicit -m or -p is always obeyed. Auto never picks deep.\n\
@@ -24,10 +25,11 @@ use clap::{Parser, Subcommand};
           firecrawl  JS-rendered page scraping + structured extraction\n  \
           tavily     RAG-oriented search: general, news, academic, deep\n  \
           serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
-          perplexity LLM-synthesized answer with citations (Sonar)\n  \
+          perplexity Ranked web results with dates (Perplexity Search API)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
-          stealth    Local anti-bot scraper (no API key)\n  \
-          xai        Only real-time X/Twitter search (Grok agentic)\n\n\
+          direct     Honest local page fetch, markdown first (no API key)\n  \
+          stealth    Local Chrome-impersonating fetch (no API key)\n  \
+          xai        Real-time X/Twitter search (Grok agentic)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # auto mode\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \
@@ -193,7 +195,7 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,stealth,xai)
+    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 
@@ -205,7 +207,7 @@ pub struct SearchArgs {
     #[arg(long, value_delimiter = ',')]
     pub exclude_domain: Option<Vec<String>>,
 
-    /// Freshness filter: day, week, month, year
+    /// Freshness filter: day, week, month or year (anything else exits 3)
     #[arg(short, long)]
     pub freshness: Option<String>,
 
@@ -218,12 +220,12 @@ pub struct SearchArgs {
     pub max_chars: Option<usize>,
 
     /// Country code for region-biased results (e.g. gb, de, jp) — applied by
-    /// providers that support it (serper, serpapi, brave, parallel)
+    /// serper, brave, parallel and perplexity (agent-info lists filters)
     #[arg(long)]
     pub country: Option<String>,
 
-    /// Language code for results (e.g. en, de, fr) — applied by providers
-    /// that support it (serper, serpapi, brave)
+    /// Language code for results (e.g. en, de, fr) — applied by serper,
+    /// brave and perplexity (agent-info lists filters)
     #[arg(long)]
     pub lang: Option<String>,
 
