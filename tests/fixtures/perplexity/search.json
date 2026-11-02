@@ -1,0 +1,33 @@
+{
+  "results": [
+    {
+      "title": "Tokio - An asynchronous Rust runtime",
+      "url": "https://tokio.rs/",
+      "snippet": "Tokio is an asynchronous runtime for the Rust programming language. It provides the building blocks needed for writing networking applications.",
+      "date": "2026-10-21",
+      "last_updated": "2026-10-30"
+    },
+    {
+      "title": "Which async runtime should I use in 2026? : r/rust",
+      "url": "https://www.reddit.com/r/rust/comments/1abcde/which_async_runtime/",
+      "snippet": "Most people reach for tokio; smol and glommio fit narrower cases.",
+      "date": "2026-09-14",
+      "last_updated": null
+    },
+    {
+      "title": "",
+      "url": "",
+      "snippet": "A row without a URL is dropped.",
+      "date": null
+    },
+    {
+      "title": "tokio - Rust",
+      "url": "https://docs.rs/tokio/latest/tokio/",
+      "snippet": "A runtime for writing reliable network applications without compromising speed.",
+      "date": null,
+      "last_updated": "2026-10-01"
+    }
+  ],
+  "id": "3c7e4a12-5b9d-4f0e-8a61-2d4c9b7e1f03",
+  "server_time": null
+}
