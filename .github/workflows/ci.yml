@@ -47,6 +47,26 @@ jobs:
       - name: Test (no stealth)
         run: cargo test --locked --no-default-features
 
+  # Linux build WITH default features (stealth: wreq + BoringSSL). Allowed to
+  # fail for now: when it is green, release.yml's LINUX_FLAGS can drop
+  # --no-default-features and Linux binaries ship with the stealth step.
+  linux-default:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools for BoringSSL
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev perl pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test (default features)
+        run: cargo test --locked
+
   # Advisory + license + source gate. wreq is a pre-release pin inherited
   # from the yanked rquest crate — exactly the dependency class to watch.
   deny:
