@@ -560,6 +560,22 @@ fn offline_cmd(tag: &str) -> Command {
     c
 }
 
+/// An unknown -f used to be dropped silently by some providers and sent raw
+/// to others; it is now refused before any call (exit 3).
+#[test]
+fn unknown_freshness_is_refused_before_any_call() {
+    let out = offline_cmd("fresh")
+        .args(["search", "-q", "rust", "-f", "hour", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("-f must be one of day, week, month, year"),
+        "{stdout}"
+    );
+}
+
 /// Rule 1 trims and ignores scheme case, so the URL check after it must too:
 /// " HTTPS://..." used to route to extract and then fail as "not a URL".
 #[test]

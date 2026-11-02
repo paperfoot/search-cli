@@ -522,6 +522,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     );
                 }
             }
+            // An unknown -f used to be dropped silently by some providers
+            // (unfiltered results, no warning) and sent raw to others (a 4xx).
+            if let Some(f) = args.freshness.as_deref() {
+                if !matches!(f, "day" | "week" | "month" | "year") {
+                    return bail(
+                        errors::SearchError::InvalidInput {
+                            message: format!(
+                                "-f must be one of day, week, month, year (got '{f}')"
+                            ),
+                        },
+                        ctx,
+                    );
+                }
+            }
 
             // metasearch.sh: refused outright when the configured host is not
             // trusted, so a poisoned `metasearch.url` never gets the token.
