@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.0 (unreleased)
+## 0.10.0 — 2026-11-02
 
 ### Search without your own keys
 - After `search login`, engines you have no key for run through metasearch.sh
@@ -14,6 +14,9 @@
   (micro-USD, per engine, and whether the figure is an estimate or the
   amount charged) and how each engine was reached in `metadata.transport`.
   `search stats` now prices spend from these figures.
+- When a refresh of the metasearch.sh manifest fails, the stale copy is
+  used and the refresh is retried after a minute, so an outage no longer
+  adds a 5 s wait to every logged-in search.
 
 ### Auto mode
 - With no `-m`, the mode is `auto`: fixed rules for URLs, X, similar-site
@@ -97,10 +100,6 @@
   `usd_per_call_where_different` for the modes an engine prices unlike its
   `usd_per_call` (deep on Exa, Brave, Linkup and Parallel; academic and
   deep on Tavily).
-
-- When a refresh of the metasearch.sh manifest fails, the stale copy is
-  used and the refresh is retried after a minute, so an outage no longer
-  adds a 5 s wait to every logged-in search.
 
 ### Config
 - `settings.timeout` is gone: every call is bounded by its mode's deadline,
