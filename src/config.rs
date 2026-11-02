@@ -166,21 +166,24 @@ fn tighten_config_permissions() {
     }
 }
 
-/// Valid provider key names for `config set keys.<name>`.
-pub const PROVIDER_KEYS: &[&str] = &[
-    "parallel",
-    "brave",
-    "serper",
-    "exa",
-    "jina",
-    "linkup",
-    "firecrawl",
-    "tavily",
-    "serpapi",
-    "perplexity",
-    "browserless",
-    "xai",
-];
+/// Valid provider key names for `config set keys.<name>`: every provider
+/// that takes a key, from the provider specs.
+pub fn provider_keys() -> Vec<&'static str> {
+    crate::providers::all()
+        .iter()
+        .filter(|s| !s.env_keys.is_empty())
+        .map(|s| s.name)
+        .collect()
+}
+
+/// Keyed providers with their effective key (env > SEARCH_KEYS_* > file).
+fn effective_keys(config: &AppConfig) -> Vec<(&'static crate::providers::ProviderSpec, String)> {
+    crate::providers::all()
+        .iter()
+        .filter(|s| !s.env_keys.is_empty())
+        .map(|s| (*s, crate::providers::key_for(config, s)))
+        .collect()
+}
 
 /// Valid setting names for `config set settings.<name>`.
 pub const SETTING_KEYS: &[&str] = &["timeout", "count"];
@@ -220,34 +223,13 @@ pub fn config_show(config: &AppConfig) {
         println!("Configuration ({})\n", config_path().display());
     }
 
-    use crate::providers;
-
-    let keys: &[(&str, &str, &str)] = &[
-        ("parallel", &config.keys.parallel, "PARALLEL_API_KEY"),
-        ("brave", &config.keys.brave, "BRAVE_API_KEY"),
-        ("serper", &config.keys.serper, "SERPER_API_KEY"),
-        ("exa", &config.keys.exa, "EXA_API_KEY"),
-        ("jina", &config.keys.jina, "JINA_API_KEY"),
-        ("linkup", &config.keys.linkup, "LINKUP_API_KEY"),
-        ("firecrawl", &config.keys.firecrawl, "FIRECRAWL_API_KEY"),
-        ("tavily", &config.keys.tavily, "TAVILY_API_KEY"),
-        ("serpapi", &config.keys.serpapi, "SERPAPI_API_KEY"),
-        ("perplexity", &config.keys.perplexity, "PERPLEXITY_API_KEY"),
-        (
-            "browserless",
-            &config.keys.browserless,
-            "BROWSERLESS_API_KEY",
-        ),
-        ("xai", &config.keys.xai, "XAI_API_KEY"),
-    ];
-
     if c {
         println!("  {}", "[keys]".bold());
     } else {
         println!("[keys]");
     }
-    for (name, config_val, env_var) in keys {
-        let effective = providers::resolve_key(config_val, env_var);
+    for (spec, effective) in effective_keys(config) {
+        let name = spec.name;
         let masked = mask_key(&effective);
         if c {
             let val = if effective.is_empty() {
@@ -340,10 +322,11 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
             // load_config fail to deserialize and bricked every later command.
             let typed_value = match *section {
                 "keys" => {
-                    if !PROVIDER_KEYS.contains(name) {
+                    let valid = provider_keys();
+                    if !valid.contains(name) {
                         return Err(SearchError::Config(format!(
                             "Unknown provider 'keys.{name}'. Valid: {}",
-                            PROVIDER_KEYS.join(", ")
+                            valid.join(", ")
                         )));
                     }
                     toml::Value::String(value.to_string())
@@ -461,90 +444,22 @@ pub fn config_check(config: &AppConfig) {
     use std::io::IsTerminal;
     let c = std::io::stdout().is_terminal();
 
-    use crate::providers;
-
-    let all: &[(&str, &str, &str, &str)] = &[
-        (
-            "parallel",
-            &config.keys.parallel,
-            "PARALLEL_API_KEY",
-            "Independent web index (Parallel AI)",
-        ),
-        (
-            "brave",
-            &config.keys.brave,
-            "BRAVE_API_KEY",
-            "Web + News search",
-        ),
-        (
-            "serper",
-            &config.keys.serper,
-            "SERPER_API_KEY",
-            "Google SERP, Scholar, Patents, Images, Places",
-        ),
-        (
-            "exa",
-            &config.keys.exa,
-            "EXA_API_KEY",
-            "Semantic search, People, Similar pages",
-        ),
-        (
-            "jina",
-            &config.keys.jina,
-            "JINA_API_KEY",
-            "Web search + URL reader",
-        ),
-        (
-            "linkup",
-            &config.keys.linkup,
-            "LINKUP_API_KEY",
-            "High-accuracy agent search (SimpleQA leader)",
-        ),
-        (
-            "firecrawl",
-            &config.keys.firecrawl,
-            "FIRECRAWL_API_KEY",
-            "Web scraping + extraction",
-        ),
-        (
-            "tavily",
-            &config.keys.tavily,
-            "TAVILY_API_KEY",
-            "General, News, Academic, Deep search",
-        ),
-        (
-            "serpapi",
-            &config.keys.serpapi,
-            "SERPAPI_API_KEY",
-            "80+ engines: Google, Bing, YouTube, Baidu, Scholar",
-        ),
-        (
-            "perplexity",
-            &config.keys.perplexity,
-            "PERPLEXITY_API_KEY",
-            "AI-powered answers with citations (Perplexity Sonar)",
-        ),
-        (
-            "browserless",
-            &config.keys.browserless,
-            "BROWSERLESS_API_KEY",
-            "Cloud browser for Cloudflare/JS-heavy pages",
-        ),
-        (
-            "xai",
-            &config.keys.xai,
-            "XAI_API_KEY",
-            "X/Twitter social search via xAI Grok",
-        ),
-    ];
+    let all = effective_keys(config);
 
     if c {
         println!("\n{}  Provider Health Check\n", "search".bold().cyan());
     }
 
     let mut configured = 0;
-    for (name, config_val, env_var, desc) in all {
-        let is_configured = !providers::resolve_key(config_val, env_var).is_empty();
+    for (spec, key) in &all {
+        let name = spec.name;
+        let desc = spec
+            .modes
+            .iter()
+            .map(|m| crate::providers::spec::mode_str(*m))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let is_configured = !key.is_empty();
         if !is_configured {
             if c {
                 println!(
