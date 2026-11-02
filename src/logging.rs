@@ -1,4 +1,4 @@
-use crate::types::SearchResponse;
+use crate::types::{ProviderFailure, SearchResponse};
 use directories::ProjectDirs;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -44,10 +44,6 @@ pub fn log_search(response: &SearchResponse) {
         return;
     }
     let path = log_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -56,6 +52,7 @@ pub fn log_search(response: &SearchResponse) {
     let entry = serde_json::json!({
         "v": 1,
         "ts": now,
+        "status": response.status,
         "query": response.query,
         "mode": response.mode,
         "result_count": response.metadata.result_count,
@@ -77,9 +74,62 @@ pub fn log_search(response: &SearchResponse) {
         "urls": response.results.iter().take(10).map(|r| &r.url).collect::<Vec<_>>(),
     });
 
-    let mut line = serde_json::to_string(&entry).unwrap_or_default();
+    append_line(&path, &entry);
+}
+
+/// Log a search in which every provider failed. Those runs never produce a
+/// `SearchResponse`, yet each provider was still called (and may have billed),
+/// so `search stats` must see their calls and failures. Failure reasons are
+/// left out on purpose: upstream error text can echo a request URL, and some
+/// providers carry their key in the query string.
+pub fn log_failed_search(query: &str, mode: &str, elapsed_ms: u128, failed: &[ProviderFailure]) {
+    if logging_disabled() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let providers: Vec<&str> = failed.iter().map(|f| f.provider.as_str()).collect();
+    let entry = serde_json::json!({
+        "v": 1,
+        "ts": now,
+        "status": "error",
+        "error_code": "all_providers_failed",
+        "query": query,
+        "mode": mode,
+        "result_count": 0,
+        "elapsed_ms": elapsed_ms,
+        "cached": false,
+        "providers_queried": providers,
+        "providers_failed": providers,
+        "failure_categories": failed
+            .iter()
+            .map(|f| format!("{}:{}", f.provider, f.category.as_str()))
+            .collect::<Vec<_>>(),
+        "failures": failed
+            .iter()
+            .map(|f| serde_json::json!({
+                "provider": f.provider,
+                "category": f.category.as_str(),
+                "code": f.code,
+                "http_status": f.http_status,
+                "retryable": f.retryable,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    append_line(&log_path(), &entry);
+}
+
+/// Append one JSON line with a single `write_all`: concurrent agent
+/// invocations append to the same file, and multi-write appends can interleave.
+fn append_line(path: &std::path::Path, entry: &serde_json::Value) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut line = serde_json::to_string(entry).unwrap_or_default();
     line.push('\n');
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -91,22 +141,12 @@ pub fn log_balances(balances: &serde_json::Value) {
     if logging_disabled() {
         return;
     }
-    let dir = log_dir();
-    let _ = fs::create_dir_all(&dir);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let entry = serde_json::json!({ "v": 1, "ts": now, "balances": balances });
-    let mut line = serde_json::to_string(&entry).unwrap_or_default();
-    line.push('\n');
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("balances.jsonl"))
-    {
-        let _ = file.write_all(line.as_bytes());
-    }
+    append_line(&log_dir().join("balances.jsonl"), &entry);
 }
 
 fn epoch_days_to_date(total_days: u64) -> String {

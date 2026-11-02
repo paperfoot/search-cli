@@ -470,11 +470,23 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 None
             };
 
+            let started = std::time::Instant::now();
             let response =
                 engine::run(app, &args.query, args.mode, count, &args.providers, &opts).await;
 
             if let Some(sp) = spinner {
                 sp.finish_and_clear();
+            }
+
+            // A run where every provider failed still made (possibly billed)
+            // calls; log it so `search stats` counts them.
+            if let Err(errors::SearchError::AllProvidersFailed { failed }) = &response {
+                logging::log_failed_search(
+                    &args.query,
+                    &mode_str,
+                    started.elapsed().as_millis(),
+                    failed,
+                );
             }
 
             let mut response = response?;
