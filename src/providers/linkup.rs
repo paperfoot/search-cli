@@ -137,11 +137,13 @@ impl Adapter for Linkup {
         !self.api_key().is_empty()
     }
 
-    /// An empty balance is a 429 `INSUFFICIENT_FUNDS_CREDITS`: billing, not
-    /// a rate limit, so it is never retried and never tells agents to wait.
+    /// An empty balance (429 `INSUFFICIENT_FUNDS_CREDITS`) and the key's own
+    /// spending cap (429 `EXCEED_BUDGET_LIMIT`) are billing, not rate limits:
+    /// never retried, and agents are never told to wait.
     fn classify(&self, status: u16, body: &str) -> Option<FailureCategory> {
-        (status == 429 && body.contains("INSUFFICIENT_FUNDS"))
-            .then_some(FailureCategory::BillingQuota)
+        (status == 429
+            && (body.contains("INSUFFICIENT_FUNDS") || body.contains("EXCEED_BUDGET_LIMIT")))
+        .then_some(FailureCategory::BillingQuota)
     }
 
     fn sent_cost(&self, mode: Mode) -> u64 {
@@ -247,12 +249,39 @@ mod tests {
         );
     }
 
-    /// End to end through the shared `send`: the funds 429 is tried once
-    /// (no retry even with Retry-After), and as the only failure it exits 2.
+    /// The key's own spending cap (body from Linkup's official SDK tests,
+    /// `LinkupBudgetLimitExceededError`) is billing too: waiting won't lift it.
+    #[test]
+    fn budget_limit_429_is_billing_quota() {
+        let body = include_str!("../../tests/fixtures/linkup/budget_limit_429.json");
+        let a = adapter();
+        assert_eq!(a.classify(429, body), Some(FailureCategory::BillingQuota));
+        assert_eq!(
+            classify_http(a.classify(429, body), 429, body),
+            FailureCategory::BillingQuota
+        );
+    }
+
     #[tokio::test]
     async fn out_of_funds_is_sent_once_and_exits_2() {
+        billing_429_is_sent_once_and_exits_2(include_str!(
+            "../../tests/fixtures/linkup/insufficient_funds_429.json"
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn budget_limit_is_sent_once_and_exits_2() {
+        billing_429_is_sent_once_and_exits_2(include_str!(
+            "../../tests/fixtures/linkup/budget_limit_429.json"
+        ))
+        .await;
+    }
+
+    /// End to end through the shared `send`: a billing 429 is tried once
+    /// (no retry even with Retry-After), and as the only failure it exits 2.
+    async fn billing_429_is_sent_once_and_exits_2(body: &'static str) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let body = include_str!("../../tests/fixtures/linkup/insufficient_funds_429.json");
         let reply: &'static str = Box::leak(
             format!(
                 "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
