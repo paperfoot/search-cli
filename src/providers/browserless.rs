@@ -1,8 +1,10 @@
+use super::direct::{marked_output, unsupported_unless_extract};
 use super::spec::{FilterSupport, Price};
 use super::{Adapter, Call, Output, ProviderSpec};
 use crate::context::AppContext;
 use crate::errors::SearchError;
-use crate::types::{Mode, SearchResult};
+use crate::page::Page;
+use crate::types::Mode;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,14 +53,18 @@ impl Adapter for Browserless {
         !self.api_key().is_empty()
     }
 
-    /// Render the page in Browserless's cloud browser (Cloudflare, JS-heavy
-    /// pages), then extract the article text locally.
+    /// Render the page in Browserless's cloud browser (the anti-bot last
+    /// resort), then convert the rendered HTML to markdown locally. The
+    /// verdict on the rendered page is marked on the result, so the chain
+    /// rejects a challenge or an empty render and still counts the cost.
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+        unsupported_unless_extract("browserless", call.mode)?;
         if !self.is_configured() {
             return Err(SearchError::AuthMissing {
                 provider: "browserless",
             });
         }
+        crate::registry::rung_gate("browserless", call.query)?;
         let url = call.query;
         let body = serde_json::json!({
             "url": url,
@@ -67,67 +73,81 @@ impl Adapter for Browserless {
         let client = &self.ctx.client;
         let token = self.api_key();
 
+        // Browserless authenticates with `?token=`; `send` strips the URL
+        // from transport errors, and `redact` keeps it out of the rest.
         let resp = super::send(self, call.timeout, || {
             client
-                .post("https://production-sfo.browserless.io/content")
+                .post(ENDPOINT)
+                .query(&[("token", token.as_str())])
                 .header("Content-Type", "application/json")
-                .bearer_auth(&token)
                 .json(&body)
         })
-        .await?;
-        let html = resp.text().await?;
-
-        let parsed_url = url::Url::parse(url).map_err(|e| SearchError::InvalidInput {
-            message: format!("Invalid URL '{url}': {e}"),
-        })?;
-        let mut cursor = std::io::Cursor::new(html.as_bytes());
-        let (title, text) = match readability::extractor::extract(&mut cursor, &parsed_url) {
-            Ok(article) if !article.text.trim().is_empty() => {
-                let title = if article.title.is_empty() {
-                    url.to_string()
-                } else {
-                    article.title
-                };
-                (title, article.text)
-            }
-            _ => (url.to_string(), extract_text_simple(&html)),
+        .await
+        .map_err(|e| redact(e, &token))?;
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| Some("text/html".to_string()));
+        let html = resp.text().await.map_err(|e| redact(e.into(), &token))?;
+        let page = Page {
+            final_url: url.to_string(),
+            status: 200,
+            content_type,
+            body: html,
+            headers: reqwest::header::HeaderMap::new(),
         };
-
-        if text.trim().is_empty() {
-            return Err(SearchError::Api {
-                provider: "browserless",
-                code: "extraction_error",
-                message: "Page returned no extractable content".to_string(),
-                status: None,
-            });
-        }
-
-        Ok(Output {
-            results: vec![SearchResult {
-                title,
-                url: url.to_string(),
-                snippet: text,
-                source: "browserless".to_string(),
-                published: None,
-                image_url: None,
-                extra: None,
-            }],
-            ..Output::default()
-        })
+        Ok(marked_output("browserless", page).await)
     }
 }
 
-/// Simple HTML tag stripper
-fn extract_text_simple(html: &str) -> String {
-    let mut text = String::with_capacity(html.len() / 3);
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => text.push(c),
-            _ => {}
-        }
+const ENDPOINT: &str = "https://production-sfo.browserless.io/content";
+
+/// Remove the token from an error's text.
+fn redact(e: SearchError, token: &str) -> SearchError {
+    if token.is_empty() || !e.to_string().contains(token) {
+        return e;
     }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    SearchError::Upstream {
+        provider: "browserless",
+        status: e.http_status().unwrap_or(0),
+        category: e.category(),
+        message: e.to_string().replace(token, "[redacted]"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_token_never_reaches_an_error_message() {
+        let e = SearchError::Upstream {
+            provider: "browserless",
+            status: 401,
+            category: crate::types::FailureCategory::Auth,
+            message: "HTTP 401: bad token sk-secret-123".into(),
+        };
+        let shown = redact(e, "sk-secret-123").to_string();
+        assert!(!shown.contains("sk-secret-123"), "{shown}");
+        assert!(shown.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn a_challenge_render_is_marked_for_rejection() {
+        let page = Page {
+            final_url: "https://x.example/".into(),
+            status: 200,
+            content_type: Some("text/html".into()),
+            body: "<html><head><title>Just a moment...</title></head><body>Checking your browser before accessing x.example</body></html>".into(),
+            headers: reqwest::header::HeaderMap::new(),
+        };
+        let out = marked_output("browserless", page).await;
+        assert!(crate::registry::accept(Mode::Extract, &out).is_err());
+        assert_eq!(
+            out.results[0].extra.as_ref().unwrap()["verdict"],
+            "challenge"
+        );
+    }
 }
