@@ -23,8 +23,8 @@ use cli::{Cli, Commands, ConfigAction, SkillAction};
 use config::{config_check, config_set, config_show, load_config};
 use context::AppContext;
 use output::{Ctx, OutputFormat};
+use std::io::IsTerminal;
 use std::sync::Arc;
-use tokio::net::lookup_host;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -67,7 +67,9 @@ const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--d
 
 /// Initialize tracing to stderr so provider/engine diagnostics are never silently
 /// dropped. Honors `RUST_LOG`; `--debug` raises the default level to `debug`.
-/// Writes to stderr only, keeping JSON envelopes on stdout machine-parseable.
+/// Writes to stderr only, keeping JSON envelopes on stdout machine-parseable,
+/// and without ANSI colour codes unless stderr is a terminal (a log file or an
+/// agent capturing stderr gets plain text).
 fn init_tracing(debug: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
     // `--debug` shows app-level debug but mutes noisy transport crates so the
@@ -81,6 +83,7 @@ fn init_tracing(debug: bool) {
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .with_target(false)
         .without_time()
         .try_init();
@@ -88,32 +91,20 @@ fn init_tracing(debug: bool) {
 
 #[tokio::main]
 async fn main() {
-    // 1. Pre-emptive DNS resolution (starts immediately in background)
-    tokio::spawn(async {
-        let domains = [
-            "api.parallel.ai:443",
-            "api.search.brave.com:443",
-            "google.serper.dev:443",
-            "api.exa.ai:443",
-            "api.jina.ai:443",
-            "api.tavily.com:443",
-            "api.perplexity.ai:443",
-        ];
-        for domain in domains {
-            let _ = lookup_host(domain).await;
-        }
-    });
+    // No DNS or TLS "prewarm": it ran on every command (even --version) and
+    // sent HEAD requests to providers the search might never use. The real
+    // requests resolve and handshake on demand through the shared client.
 
-    // 2. Start loading config in parallel with CLI parsing
+    // Start loading config in parallel with CLI parsing.
     let config_handle = tokio::task::spawn_blocking(load_config);
 
-    // 3. Pre-scan global flags before clap parses (covers flags trailing a bare
+    // Pre-scan global flags before clap parses (covers flags trailing a bare
     //    query, plus the help/version/error paths). Init tracing immediately.
     let flags = scan_global_flags();
     init_tracing(flags.debug);
     let json_flag = flags.json;
 
-    // 4. CLI Parsing — use try_parse so we own error handling
+    // CLI parsing — use try_parse so we own error handling
     let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -159,7 +150,7 @@ async fn main() {
 
     let ctx = Ctx::new(cli.json, cli.quiet);
 
-    // 5. Wait for config
+    // Wait for config
     let config = match config_handle.await {
         Ok(Ok(c)) => c,
         // A malformed config is a config error (exit 2 + JSON envelope when
@@ -184,22 +175,6 @@ async fn main() {
     };
 
     let app = Arc::new(AppContext::new(config));
-
-    // 6. Pre-emptive TLS Handshake
-    let is_search = cli.command.is_none() || matches!(cli.command, Some(Commands::Search(_)));
-    if is_search && !cli.last {
-        let app_c = app.clone();
-        tokio::spawn(async move {
-            let urls = [
-                "https://api.search.brave.com/res/v1/web/search",
-                "https://google.serper.dev/search",
-                "https://api.exa.ai/search",
-            ];
-            for url in urls {
-                let _ = app_c.client.head(url).send().await;
-            }
-        });
-    }
 
     let exit_code = match run(cli, &ctx, app).await {
         Ok(code) => code,
