@@ -68,8 +68,9 @@ pub fn decisive(query: &str) -> Option<Hit> {
         h.query = Some(url);
         return Some(h);
     }
-    if let Some(cue) =
-        first_phrase(&lower, &["patent", "patents", "prior art"]).or_else(|| patent_number(&lower))
+    if let Some(cue) = patent_word(&lower)
+        .or_else(|| first_phrase(&lower, &["prior art"]))
+        .or_else(|| patent_number(q))
     {
         return Some(hit(4, Mode::Patents, &cue));
     }
@@ -607,27 +608,94 @@ fn similar_url(q: &str) -> Option<String> {
     is_absolute_url(url).then(|| url.to_string())
 }
 
-/// Rule 4's number form: `\b(US|EP|WO)\s?\d{6,}\b`.
-fn patent_number(lower: &str) -> Option<String> {
-    for office in ["us", "ep", "wo"] {
-        for (i, _) in lower.match_indices(office) {
-            if !boundary_before(lower, i) {
+/// Rule 4's words: `\bpatents?\b(?!\s+leather)`. Never "patent leather"
+/// (shoes and bags).
+fn patent_word(lower: &str) -> Option<String> {
+    ["patent", "patents"]
+        .iter()
+        .find(|w| {
+            lower.match_indices(*w).any(|(i, m)| {
+                let end = i + m.len();
+                let after = &lower[end..];
+                let next = after.trim_start();
+                boundary_before(lower, i)
+                    && boundary_after(lower, end)
+                    && !(next.len() < after.len() && next.starts_with("leather"))
+            })
+        })
+        .map(|w| w.to_string())
+}
+
+/// Rule 4's numbers, case-sensitive like the server's `PATENT_NUMBER`:
+/// `\b(?:US|EP)\s?\d{7,8}(?:\s?[AB]\d)?\b|\bWO\s?\d{4}\/?\d{6}\b`. A phone
+/// number after "call us" or a long order number is not a patent.
+fn patent_number(q: &str) -> Option<String> {
+    let digits = |s: &str| s.chars().take_while(char::is_ascii_digit).count();
+    let skip_space = |s: &str| match s.chars().next() {
+        Some(c) if c.is_whitespace() => s.len() - c.len_utf8(),
+        _ => s.len(),
+    };
+    for office in ["US", "EP", "WO"] {
+        for (i, _) in q.match_indices(office) {
+            if !boundary_before(q, i) {
                 continue;
             }
-            let mut rest = &lower[i + 2..];
-            if let Some(c) = rest.chars().next().filter(|c| c.is_whitespace()) {
-                rest = &rest[c.len_utf8()..];
-            }
-            let digits = rest.chars().take_while(char::is_ascii_digit).count();
-            if digits >= 6 && boundary_after(rest, digits) {
-                return Some(lower[i..lower.len() - rest.len() + digits].to_string());
+            let after_office = &q[i + 2..];
+            let rest = &after_office[after_office.len() - skip_space(after_office)..];
+            // Byte offset in `rest` where the number ends, if it is one.
+            let end = if office == "WO" {
+                (digits(rest) >= 4)
+                    .then(|| {
+                        let tail = rest[4..].strip_prefix('/').unwrap_or(&rest[4..]);
+                        let at = rest.len() - tail.len();
+                        (digits(tail) >= 6 && boundary_after(tail, 6)).then_some(at + 6)
+                    })
+                    .flatten()
+            } else {
+                let n = digits(rest);
+                if !(7..=8).contains(&n) {
+                    None
+                } else {
+                    // Optional kind code (`\s?[AB]\d`), then a word boundary.
+                    let tail = &rest[n..];
+                    let kind = &tail[tail.len() - skip_space(tail)..];
+                    let mut k = kind.chars();
+                    let with_kind = matches!(k.next(), Some('A' | 'B'))
+                        && k.next().is_some_and(|c| c.is_ascii_digit())
+                        && boundary_after(kind, 2);
+                    if with_kind {
+                        Some(rest.len() - kind.len() + 2)
+                    } else {
+                        boundary_after(rest, n).then_some(n)
+                    }
+                }
+            };
+            if let Some(end) = end {
+                return Some(q[i..q.len() - rest.len() + end].to_string());
             }
         }
     }
     None
 }
 
-/// Rule 5: `\b(images?|photos?|pictures?|logos?|wallpapers?)\s+(of|for)\b`.
+/// Words before "images" that make them system images, which want docs, not
+/// pictures ("base docker images for node 22", "vm images for arm64").
+const SYSTEM_IMAGE_WORDS: &[&str] = &[
+    "docker",
+    "container",
+    "disk",
+    "iso",
+    "vm",
+    "base",
+    "os",
+    "system",
+    "boot",
+    "cloud",
+    "machine",
+];
+
+/// Rule 5, except system images:
+/// `(?<!\b(?:docker|container|disk|iso|vm|base|os|system|boot|cloud|machine)\s+)\b(images?|photos?|pictures?|logos?|wallpapers?)\s+(of|for)\b`.
 fn image_cue(lower: &str) -> Option<String> {
     const NOUNS: &[&str] = &[
         "images",
@@ -643,7 +711,7 @@ fn image_cue(lower: &str) -> Option<String> {
     ];
     for noun in NOUNS {
         for (i, _) in lower.match_indices(noun) {
-            if !boundary_before(lower, i) {
+            if !boundary_before(lower, i) || after_system_word(&lower[..i]) {
                 continue;
             }
             let after = &lower[i + noun.len()..];
@@ -659,6 +727,16 @@ fn image_cue(lower: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The lookbehind of rule 5: `before` ends in a system-image word and at
+/// least one space.
+fn after_system_word(before: &str) -> bool {
+    let word_end = before.trim_end();
+    word_end.len() < before.len()
+        && SYSTEM_IMAGE_WORDS
+            .iter()
+            .any(|w| word_end.ends_with(w) && boundary_before(word_end, word_end.len() - w.len()))
 }
 
 #[cfg(test)]
@@ -687,6 +765,53 @@ mod tests {
         // A mode every pinned provider serves stays; so does general itself.
         assert!(fit_pinned(Mode::Places, &p(&["serper"])).is_none());
         assert!(fit_pinned(Mode::General, &p(&["exa"])).is_none());
+    }
+
+    /// The server's rule 4 and 5 vectors (metasearch `judge.test.ts`, "rules
+    /// 4 and 5: patents and images fire on their patterns and stay quiet on
+    /// traps"), amended 2 Nov 2026: system images and look-alike numbers are
+    /// not decisive. The extra cases were checked against the server's
+    /// regexes in node.
+    #[test]
+    fn rules_4_and_5_fire_on_their_patterns_and_stay_quiet_on_traps() {
+        let rule = |q: &str| decisive(q).map(|h| h.mode.to_string());
+        for (q, mode) in [
+            ("prior art for swipe to unlock", "patents"),
+            ("US 10123456 B2", "patents"),
+            ("photos of the Eiffel Tower", "images"),
+            ("wallpapers for a 4k monitor", "images"),
+            ("logo for stripe", "images"),
+            ("EP1234567", "patents"),
+            ("WO2020123456 claims", "patents"),
+            ("WO 2020/123456", "patents"),
+            ("US 1234567B1", "patents"),
+            ("US 1234567 A1x", "patents"),
+            ("EP 12345678 B1", "patents"),
+            ("dockerbase images for x", "images"),
+            ("my photos of iso images for", "images"),
+        ] {
+            assert_eq!(rule(q).as_deref(), Some(mode), "{q}");
+        }
+        for q in [
+            "best base docker images for node 22",
+            "official container images for arm64 raspberry pi",
+            "ubuntu iso images for virtualbox",
+            "patent leather chelsea boots women",
+            "call us 0800123456 scam",
+            "order US 0800123456 status",
+            "image processing library for rust",
+            "us 1234567 lowercase office",
+            "WO2020123456A1",
+            "patents leather tanning",
+            "US 123456789",
+            "cloud  images for arm",
+        ] {
+            let r = rule(q);
+            assert!(
+                r.as_deref() != Some("images") && r.as_deref() != Some("patents"),
+                "{q} -> {r:?}"
+            );
+        }
     }
 
     /// Mirrors the server's vectors: (query, mode, source) without JEV.

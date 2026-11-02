@@ -21,9 +21,10 @@ command, flag, mode, engine and exit code.
 The mode defaults to `auto`: fixed rules first (a lone URL is `extract`;
 "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social`, but
 never code like `@property` or an email; `similar to <URL>` is `similar`;
-"patent" or "prior art" is `patents`; "images of" is `images`), then JEV when
-logged in, else keyword rules, else `general`. In `news` and `social`, a time
-word sets `-f` unless you passed one ("today", "yesterday" → `day`;
+"patent" or "prior art" is `patents`, never "patent leather"; "images of" is
+`images`, never Docker or VM images), then JEV when logged in, else keyword
+rules, else `general`. In `news` and `social`, a time word sets `-f` unless
+you passed one ("today", "yesterday" → `day`;
 "this week", "latest", "breaking" → `week`; "this month", "this year" →
 `month`, `year`). Auto never picks `deep`, and picks `social` only on an X
 cue: ask for those two with `-m`. An explicit `-m` or `-p` always wins; if the

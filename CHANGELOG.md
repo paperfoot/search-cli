@@ -25,7 +25,9 @@
   envelope's `mode` is the mode that ran, and `metadata.routing.auto` gives
   its source and reason. Auto never picks `deep`, and picks `social` only on
   an X cue; code at-words (`@property`, `@types/node`), "Twitter card" and
-  email addresses are not X cues. An explicit `-m` or `-p` is always obeyed;
+  email addresses are not X cues. "Patent leather", phone and order numbers
+  are not patent cues, and Docker, container, ISO or VM images are not image
+  searches. An explicit `-m` or `-p` is always obeyed;
   if the `-p` engines cannot serve the mode auto picked, the search runs as
   `general`.
 - In `news` and `social`, a time word such as "today", "latest" or "this
