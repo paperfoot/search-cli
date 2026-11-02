@@ -247,13 +247,14 @@ async fn fetch_inner(client: &PageClient, url: &str) -> Result<Page, PageError> 
             if hop > MAX_REDIRECTS {
                 return Err(PageError::TooManyRedirects);
             }
+            // Raw UTF-8 in Location is common; `join` percent-encodes it.
             let location = resp
                 .headers()
                 .get(LOCATION)
-                .and_then(|v| v.to_str().ok())
+                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
                 .ok_or(PageError::BadRedirect(status.as_u16()))?;
             let next = current
-                .join(location)
+                .join(location.trim())
                 .map_err(|_| PageError::BadRedirect(status.as_u16()))?;
             if !matches!(next.scheme(), "http" | "https") {
                 return Err(PageError::BadRedirect(status.as_u16()));
@@ -306,8 +307,18 @@ fn decode(raw: &[u8], content_type: Option<&str>) -> String {
     let declared = content_type
         .and_then(charset_param)
         .and_then(|l| Encoding::for_label(l.as_bytes()));
+    // A `<meta>` tag only declares the charset of HTML: markdown or JSON
+    // that quotes one in its text must not be re-decoded by it.
+    let may_be_html = content_type
+        .map(super::mime_essence)
+        .is_none_or(|e| e.is_empty() || e.contains("html"));
     let encoding = declared
-        .or_else(|| meta_charset(raw).and_then(|l| Encoding::for_label(l.as_bytes())))
+        .or_else(|| {
+            may_be_html
+                .then(|| meta_charset(raw))
+                .flatten()
+                .and_then(|l| Encoding::for_label(l.as_bytes()))
+        })
         // A UTF-16 label without a BOM is a lie the spec says to read as UTF-8.
         .map(|e| {
             if e == UTF_16LE || e == UTF_16BE {
@@ -617,6 +628,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(page.body, "hello");
+    }
+
+    /// Raw UTF-8 in a Location header is followed, as browsers do.
+    #[tokio::test]
+    async fn a_utf8_location_is_followed() {
+        let addr = serve(|path, _, _| match path {
+            "/start" => {
+                let mut r = b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\nConnection: close\r\nLocation: /caf".to_vec();
+                r.extend_from_slice("\u{e9}\r\n\r\n".as_bytes());
+                r
+            }
+            _ => response("200 OK", &[("Content-Type", "text/plain")], b"arrived"),
+        })
+        .await;
+        let page = get(addr, "/start").await.unwrap();
+        assert_eq!(page.body, "arrived");
+        assert_eq!(page.final_url, format!("http://{addr}/caf%C3%A9"));
+    }
+
+    /// Markdown quoting a `<meta charset>` in its text stays UTF-8.
+    #[tokio::test]
+    async fn a_meta_tag_in_markdown_text_does_not_change_the_charset() {
+        let addr = serve(|_, _, _| {
+            response(
+                "200 OK",
+                &[("Content-Type", "text/markdown")],
+                "Old pages declare `<meta charset=\"iso-8859-1\">`. \u{e9}t\u{e9}".as_bytes(),
+            )
+        })
+        .await;
+        let page = get(addr, "/enc.md").await.unwrap();
+        assert!(page.body.contains("\u{e9}t\u{e9}"), "{}", page.body);
     }
 
     #[tokio::test]
