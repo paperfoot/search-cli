@@ -55,7 +55,10 @@ pub fn decisive(query: &str) -> Option<Hit> {
     let q = query.trim();
     let lower = q.to_lowercase();
     if is_absolute_url(q) {
-        return Some(hit(1, Mode::Extract, "a URL"));
+        // Fetch the trimmed URL, so " HTTPS://x " reaches extract as a URL.
+        let mut h = hit(1, Mode::Extract, "a URL");
+        h.query = Some(q.to_string());
+        return Some(h);
     }
     if let Some(cue) = x_cue(q) {
         return Some(hit(2, Mode::Social, &cue));

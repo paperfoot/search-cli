@@ -547,3 +547,31 @@ fn test_performance_benchmark() {
     eprintln!("    min:  {}ms", min);
     eprintln!("    max:  {}ms", max);
 }
+
+/// A clean environment: an empty HOME, no keys, no login, no log.
+fn offline_cmd(tag: &str) -> Command {
+    let home = std::env::temp_dir().join(format!("search-cli-test-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let mut c = search_cmd();
+    c.env_clear()
+        .env("HOME", home)
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("SEARCH_LOG", "off");
+    c
+}
+
+/// Rule 1 trims and ignores scheme case, so the URL check after it must too:
+/// " HTTPS://..." used to route to extract and then fail as "not a URL".
+#[test]
+fn auto_extract_accepts_padded_uppercase_urls() {
+    let out = offline_cmd("upurl")
+        .args(["search", "-q", " HTTPS://127.0.0.1:9/page ", "--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&stdout).is_ok(),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("takes a URL"), "{stdout}");
+}

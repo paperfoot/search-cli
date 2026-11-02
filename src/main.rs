@@ -628,8 +628,12 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // query — fail fast (exit 3) instead of feeding a text query to
             // paid scrapers as if it were an address.
             let spec = registry::spec(mode);
+            if spec.input == registry::InputKind::Url {
+                query = query.trim().to_string();
+            }
+            let scheme = query.get(..8).unwrap_or(&query).to_ascii_lowercase();
             if spec.input == registry::InputKind::Url
-                && !(query.starts_with("http://") || query.starts_with("https://"))
+                && !(scheme.starts_with("http://") || scheme.starts_with("https://"))
             {
                 return bail(
                     errors::SearchError::InvalidInput {
