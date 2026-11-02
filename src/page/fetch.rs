@@ -3,9 +3,14 @@
 
 use super::{Page, PageError};
 use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderValue, ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT};
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
-use url::Url;
+use url::{Host, Url};
 
 /// Markdown first with an implicit q=1: listed after HTML it loses, and
 /// developers.cloudflare.com answers HTML (measured 2 Nov 2026).
@@ -25,76 +30,216 @@ pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 /// Redirect hops followed before giving up.
 pub const MAX_REDIRECTS: usize = 5;
 
-/// Which hops go through `guard::assert_public_url`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HopGuard {
-    /// Every hop, the first included. The default.
-    Every,
-    /// Only redirect targets: the caller already checked the first URL.
-    RedirectsOnly,
-    /// None: the user passed `--allow-private`.
-    Off,
+/// A DNS answer slower than this fails the fetch (it never passes the guard:
+/// a guard that let a slow lookup through would be one an attacker's DNS
+/// server can switch off). Generous, because a cold lookup can take seconds.
+const DNS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The only client [`fetch_direct`] accepts. It never follows redirects on
+/// its own (every hop goes through the guard here), and the guarded kind
+/// resolves names itself, refusing any answer with a private, loopback or
+/// link-local address. The check runs on the addresses the connection then
+/// uses, so DNS rebinding and a slow first answer have nothing to slip
+/// through. Build one with [`client`] or [`client_allow_private`].
+#[derive(Clone)]
+pub struct PageClient {
+    http: reqwest::Client,
+    guarded: bool,
+    /// Tests only: one local server treated as public, so a redirect from a
+    /// "public" page to a private one can be exercised on 127.0.0.1.
+    #[cfg(test)]
+    exempt: Option<SocketAddr>,
 }
 
-/// A client fit for [`fetch_direct`]: it must not follow redirects itself,
-/// or a redirect to a private address would skip the guard.
-pub fn client() -> Result<reqwest::Client, PageError> {
+impl std::fmt::Debug for PageClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageClient")
+            .field("guarded", &self.guarded)
+            .finish()
+    }
+}
+
+/// The default client: private, loopback and link-local destinations are
+/// refused on every hop, by name and by resolved address. System proxies are
+/// ignored, because a proxy resolves the name where the guard cannot see it.
+pub fn client() -> Result<PageClient, PageError> {
+    guarded_client(Arc::new(PublicOnly {
+        lookup: system_lookup,
+    }))
+}
+
+/// For `--allow-private`: no address filtering, system proxies honoured.
+pub fn client_allow_private() -> Result<PageClient, PageError> {
+    Ok(PageClient {
+        http: base_builder().build().map_err(build_error)?,
+        guarded: false,
+        #[cfg(test)]
+        exempt: None,
+    })
+}
+
+fn guarded_client(resolver: Arc<PublicOnly>) -> Result<PageClient, PageError> {
+    Ok(PageClient {
+        http: base_builder()
+            .no_proxy()
+            .dns_resolver(resolver)
+            .build()
+            .map_err(build_error)?,
+        guarded: true,
+        #[cfg(test)]
+        exempt: None,
+    })
+}
+
+fn base_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(UA)
         .connect_timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| PageError::Network(format!("cannot build HTTP client: {e}")))
 }
 
-/// Fetch `url` with every hop guarded. `client` must come from [`client`]
-/// (or otherwise have redirects disabled); `timeout` bounds the whole fetch,
-/// redirects and body included.
+fn build_error(e: reqwest::Error) -> PageError {
+    PageError::Network(format!("cannot build HTTP client: {e}"))
+}
+
+type LookupFuture = Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>;
+
+fn system_lookup(host: String) -> LookupFuture {
+    Box::pin(async move { Ok(tokio::net::lookup_host((host.as_str(), 0)).await?.collect()) })
+}
+
+/// The resolver of a guarded client: fails closed on an error, a timeout,
+/// an empty answer or any non-public address in the answer.
+struct PublicOnly {
+    lookup: fn(String) -> LookupFuture,
+}
+
+impl Resolve for PublicOnly {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+        let lookup = self.lookup;
+        Box::pin(async move {
+            if is_internal_name(&host) {
+                return Err(Blocked(blocked_name(&host)).into());
+            }
+            let addrs = tokio::time::timeout(DNS_TIMEOUT, lookup(host.clone()))
+                .await
+                .map_err(|_| format!("DNS lookup for {host} timed out after {DNS_TIMEOUT:?}"))??;
+            if addrs.is_empty() {
+                return Err(format!("DNS lookup for {host} returned no addresses").into());
+            }
+            for addr in &addrs {
+                if let Err(e) = check_ip(addr.ip()).await {
+                    return Err(Blocked(format!("{host} resolves to {e}")).into());
+                }
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// A destination the guard refused, carried through reqwest's error chain
+/// so the caller gets [`PageError::Blocked`], not a network error.
+#[derive(Debug)]
+struct Blocked(String);
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Blocked {}
+
+/// Names that never leave the machine or the LAN: the same list as
+/// `guard::assert_public_url`.
+fn is_internal_name(host: &str) -> bool {
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+}
+
+fn blocked_name(host: &str) -> String {
+    format!(
+        "'{host}' is a private/loopback/link-local address — blocked by default so agents can't be steered into internal endpoints. Pass --allow-private to override."
+    )
+}
+
+/// The guard's address rules, applied to one IP (no DNS for an IP string).
+async fn check_ip(ip: IpAddr) -> Result<(), String> {
+    crate::guard::assert_public_host(&ip.to_string(), 0)
+        .await
+        .map_err(|e| match e {
+            crate::errors::SearchError::InvalidInput { message } => message,
+            other => other.to_string(),
+        })
+}
+
+/// Fetch `url`, guarded on every hop when `client` came from [`client`].
+/// `timeout` bounds the whole fetch, redirects and body included.
 pub async fn fetch_direct(
-    client: &reqwest::Client,
+    client: &PageClient,
     url: &str,
     timeout: Duration,
 ) -> Result<Page, PageError> {
-    fetch_guarded(client, url, timeout, HopGuard::Every).await
-}
-
-/// [`fetch_direct`] with an explicit guard policy.
-pub async fn fetch_guarded(
-    client: &reqwest::Client,
-    url: &str,
-    timeout: Duration,
-    guard: HopGuard,
-) -> Result<Page, PageError> {
-    tokio::time::timeout(timeout, fetch_inner(client, url, guard))
+    tokio::time::timeout(timeout, fetch_inner(client, url))
         .await
         .map_err(|_| PageError::Timeout(timeout))?
 }
 
-async fn fetch_inner(
-    client: &reqwest::Client,
-    url: &str,
-    guard: HopGuard,
-) -> Result<Page, PageError> {
+impl PageClient {
+    /// IP-literal hosts never reach the resolver, so they are checked here.
+    async fn check_url(&self, url: &Url) -> Result<(), PageError> {
+        if !self.guarded {
+            return Ok(());
+        }
+        let ip = match url.host() {
+            Some(Host::Ipv4(ip)) => IpAddr::V4(ip),
+            Some(Host::Ipv6(ip)) => IpAddr::V6(ip),
+            Some(Host::Domain(_)) => return Ok(()), // the resolver checks it
+            None => return Err(PageError::InvalidUrl(format!("{url}: no host"))),
+        };
+        #[cfg(test)]
+        if self.exempt
+            == Some(SocketAddr::new(
+                ip,
+                url.port_or_known_default().unwrap_or(0),
+            ))
+        {
+            return Ok(());
+        }
+        check_ip(ip).await.map_err(PageError::Blocked)
+    }
+}
+
+fn send_error(e: reqwest::Error) -> PageError {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(err) = source {
+        if let Some(blocked) = err.downcast_ref::<Blocked>() {
+            return PageError::Blocked(blocked.0.clone());
+        }
+        source = err.source();
+    }
+    PageError::Network(e.without_url().to_string())
+}
+
+async fn fetch_inner(client: &PageClient, url: &str) -> Result<Page, PageError> {
     let mut current = parse_http_url(url)?;
     let mut hop = 0;
     loop {
-        if guard == HopGuard::Every || (guard == HopGuard::RedirectsOnly && hop > 0) {
-            check_public(current.as_str()).await?;
-        }
+        // A fragment is never sent; the HTTP stack drops it, and userinfo
+        // too, from the URL it reports back.
+        current.set_fragment(None);
+        client.check_url(&current).await?;
         let mut resp = client
+            .http
             .get(current.clone())
             .header(ACCEPT, HeaderValue::from_static(ACCEPT_VALUE))
             .header(USER_AGENT, HeaderValue::from_static(UA))
             .send()
             .await
-            .map_err(|e| PageError::Network(e.without_url().to_string()))?;
-
-        // A client that followed a redirect on its own skipped the guard.
-        if resp.url() != &current {
-            return Err(PageError::Network(
-                "the HTTP client follows redirects itself; build it with page::client()".into(),
-            ));
-        }
+            .map_err(send_error)?;
 
         let status = resp.status();
         if status.is_redirection() && status.as_u16() != 304 {
@@ -126,11 +271,7 @@ async fn fetch_inner(
             .map(str::to_string);
 
         let mut raw: Vec<u8> = Vec::new();
-        while let Some(chunk) = resp
-            .chunk()
-            .await
-            .map_err(|e| PageError::Network(e.without_url().to_string()))?
-        {
+        while let Some(chunk) = resp.chunk().await.map_err(send_error)? {
             let room = MAX_BODY_BYTES - raw.len();
             if chunk.len() >= room {
                 raw.extend_from_slice(&chunk[..room]);
@@ -157,15 +298,6 @@ fn parse_http_url(raw: &str) -> Result<Url, PageError> {
         )));
     }
     Ok(url)
-}
-
-async fn check_public(url: &str) -> Result<(), PageError> {
-    crate::guard::assert_public_url(url)
-        .await
-        .map_err(|e| match e {
-            crate::errors::SearchError::InvalidInput { message } => PageError::Blocked(message),
-            other => PageError::Blocked(other.to_string()),
-        })
 }
 
 /// Decode with the BOM, else the Content-Type charset, else a `<meta>`
@@ -280,15 +412,35 @@ mod tests {
         bytes
     }
 
-    async fn get(addr: SocketAddr, path: &str, guard: HopGuard) -> Result<Page, PageError> {
-        let client = client().unwrap();
-        fetch_guarded(
+    /// GET through the `--allow-private` client: the test servers are local.
+    async fn get(addr: SocketAddr, path: &str) -> Result<Page, PageError> {
+        let client = client_allow_private().unwrap();
+        fetch_direct(
             &client,
             &format!("http://{addr}{path}"),
             Duration::from_secs(5),
-            guard,
         )
         .await
+    }
+
+    /// A guarded client whose resolver answers from `lookup`, and which
+    /// treats the one local server `exempt` as public.
+    fn guarded_with(lookup: fn(String) -> LookupFuture, exempt: Option<SocketAddr>) -> PageClient {
+        let mut c = guarded_client(Arc::new(PublicOnly { lookup })).unwrap();
+        c.exempt = exempt;
+        c
+    }
+
+    fn loopback_lookup(_: String) -> LookupFuture {
+        Box::pin(async { Ok(vec![SocketAddr::from(([127, 0, 0, 1], 0))]) })
+    }
+
+    fn secrets(_: &str, _: &str, _: SocketAddr) -> Vec<u8> {
+        response(
+            "200 OK",
+            &[("Content-Type", "text/plain")],
+            b"internal secrets",
+        )
     }
 
     #[tokio::test]
@@ -308,7 +460,7 @@ mod tests {
             }
         })
         .await;
-        let page = get(addr, "/docs", HopGuard::RedirectsOnly).await.unwrap();
+        let page = get(addr, "/docs").await.unwrap();
         assert_eq!(page.status, 200);
         assert!(page.is_markdown(), "content type {:?}", page.content_type);
         assert_eq!(page.body, "# Docs\n\nHello.");
@@ -325,7 +477,7 @@ mod tests {
         })
         .await;
         for path in ["/meta", "/header"] {
-            let page = get(addr, path, HopGuard::Off).await.unwrap();
+            let page = get(addr, path).await.unwrap();
             assert!(
                 page.body.contains("日本語のページです"),
                 "{path}: {}",
@@ -336,29 +488,135 @@ mod tests {
 
     #[tokio::test]
     async fn redirect_to_a_private_address_is_refused() {
-        let addr = serve(|path, _, addr| match path {
-            "/start" => response(
-                "302 Found",
-                &[(
-                    "Location",
-                    &format!("http://127.0.0.1:{}/admin", addr.port()),
-                )],
+        let private = serve(secrets).await;
+        // A "public" page (exempted local server) redirecting inward.
+        static TARGET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        TARGET.set(format!("http://{private}/admin")).unwrap();
+        let public =
+            serve(|_, _, _| response("302 Found", &[("Location", TARGET.get().unwrap())], b""))
+                .await;
+        let client = guarded_with(loopback_lookup, Some(public));
+        let err = fetch_direct(
+            &client,
+            &format!("http://{public}/start"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, PageError::Blocked(_)), "{err:?}");
+        // The first hop is guarded as well.
+        let err = fetch_direct(
+            &client,
+            &format!("http://{private}/admin"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, PageError::Blocked(_)), "{err:?}");
+        // So is the default client.
+        let err = fetch_direct(
+            &super::client().unwrap(),
+            &format!("http://{private}/admin"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, PageError::Blocked(_)), "{err:?}");
+    }
+
+    /// The guard must judge the address the connection uses, not an earlier
+    /// lookup of the same name: a rebinding name, or a first answer slower
+    /// than the guard's timeout, used to reach 127.0.0.1 (review R5b).
+    #[tokio::test]
+    async fn a_name_that_resolves_to_loopback_is_refused_at_connect() {
+        let private = serve(secrets).await;
+        let client = guarded_with(loopback_lookup, None);
+        let url = format!("http://rebind.attacker.example:{}/admin", private.port());
+        let r = fetch_direct(&client, &url, Duration::from_secs(5)).await;
+        assert!(matches!(r, Err(PageError::Blocked(_))), "{r:?}");
+        // Also as a redirect target.
+        static TARGET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        TARGET
+            .set(format!(
+                "http://rebind.attacker.example:{}/admin",
+                private.port()
+            ))
+            .unwrap();
+        let public = serve(|_, _, _| {
+            response(
+                "307 Temporary Redirect",
+                &[("Location", TARGET.get().unwrap())],
                 b"",
-            ),
-            _ => response(
-                "200 OK",
-                &[("Content-Type", "text/plain")],
-                b"internal secrets",
-            ),
+            )
         })
         .await;
-        let err = get(addr, "/start", HopGuard::RedirectsOnly)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, PageError::Blocked(_)), "{err:?}");
-        // The default guards the first hop as well.
-        let err = get(addr, "/admin", HopGuard::Every).await.unwrap_err();
-        assert!(matches!(err, PageError::Blocked(_)), "{err:?}");
+        let client = guarded_with(loopback_lookup, Some(public));
+        let r = fetch_direct(
+            &client,
+            &format!("http://{public}/"),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(r, Err(PageError::Blocked(_))), "{r:?}");
+    }
+
+    /// A failed or slow DNS answer fails the fetch; it used to count as a
+    /// pass for the guard.
+    #[tokio::test]
+    async fn dns_failure_and_timeout_fail_closed() {
+        fn failing(_: String) -> LookupFuture {
+            Box::pin(async { Err(std::io::Error::other("SERVFAIL")) })
+        }
+        fn hanging(_: String) -> LookupFuture {
+            Box::pin(std::future::pending())
+        }
+        fn empty(_: String) -> LookupFuture {
+            Box::pin(async { Ok(vec![]) })
+        }
+        for lookup in [failing as fn(String) -> LookupFuture, hanging, empty] {
+            let client = guarded_with(lookup, None);
+            let r = fetch_direct(
+                &client,
+                "http://slow.attacker.example/",
+                Duration::from_secs(10),
+            )
+            .await;
+            assert!(matches!(r, Err(PageError::Network(_))), "{r:?}");
+        }
+        // Internal names are refused before any lookup.
+        let r = fetch_direct(
+            &guarded_with(failing, None),
+            "http://metadata.google.internal/",
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(r, Err(PageError::Blocked(_))), "{r:?}");
+    }
+
+    /// Fragments and userinfo used to fail every fetch with "the HTTP client
+    /// follows redirects itself" (review R3, R14): the HTTP stack reports a
+    /// URL without them.
+    #[tokio::test]
+    async fn fragment_and_userinfo_urls_are_fetched() {
+        let addr = serve(|path, _, _| match path {
+            "/hop" => response("302 Found", &[("Location", "/docs#from-location")], b""),
+            _ => response("200 OK", &[("Content-Type", "text/plain")], b"hello"),
+        })
+        .await;
+        for path in ["/docs#section-2", "/hop"] {
+            let page = get(addr, path).await.unwrap();
+            assert_eq!(page.body, "hello");
+            assert_eq!(page.final_url, format!("http://{addr}/docs"));
+        }
+        let client = client_allow_private().unwrap();
+        let page = fetch_direct(
+            &client,
+            &format!("http://user:pw@{addr}/x"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.body, "hello");
     }
 
     #[tokio::test]
@@ -370,10 +628,10 @@ mod tests {
             _ => response("302 Found", &[("Location", "/loop")], b""),
         })
         .await;
-        let page = get(addr, "/a", HopGuard::Off).await.unwrap();
+        let page = get(addr, "/a").await.unwrap();
         assert_eq!(page.body, "arrived");
         assert_eq!(page.final_url, format!("http://{addr}/c"));
-        let err = get(addr, "/loop", HopGuard::Off).await.unwrap_err();
+        let err = get(addr, "/loop").await.unwrap_err();
         assert!(matches!(err, PageError::TooManyRedirects), "{err:?}");
     }
 
@@ -387,7 +645,7 @@ mod tests {
             )
         })
         .await;
-        let page = get(addr, "/big", HopGuard::Off).await.unwrap();
+        let page = get(addr, "/big").await.unwrap();
         assert_eq!(page.body.len(), MAX_BODY_BYTES);
     }
 
@@ -401,7 +659,7 @@ mod tests {
             )
         })
         .await;
-        let page = get(addr, "/paid", HopGuard::Off).await.unwrap();
+        let page = get(addr, "/paid").await.unwrap();
         assert_eq!(page.status, 402);
         assert_eq!(
             page.verdict(),

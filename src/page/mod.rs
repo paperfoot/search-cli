@@ -19,7 +19,9 @@ mod fetch;
 mod markdown;
 mod verdict;
 
-pub use fetch::{client, fetch_direct, fetch_guarded, HopGuard, MAX_BODY_BYTES, MAX_REDIRECTS};
+pub use fetch::{
+    client, client_allow_private, fetch_direct, PageClient, MAX_BODY_BYTES, MAX_REDIRECTS,
+};
 pub use markdown::to_markdown;
 pub use verdict::{verdict, Verdict};
 
