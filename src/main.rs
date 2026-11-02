@@ -66,6 +66,39 @@ fn scan_global_flags() -> GlobalFlags {
 /// captured, so `search foo --json` searches "foo", not "foo --json".
 const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--debug", "--verbose"];
 
+/// `search` subcommand flags. After a shorthand query they are not parsed:
+/// they would become query words, and `search "q" -p exa` would quietly fan
+/// out to every provider with "-p exa" in the query.
+const SEARCH_FLAG_TOKENS: &[&str] = &[
+    "-q",
+    "--query",
+    "-m",
+    "--mode",
+    "-p",
+    "--providers",
+    "-c",
+    "--count",
+    "-f",
+    "--freshness",
+    "-d",
+    "--domain",
+    "--exclude-domain",
+    "--country",
+    "--lang",
+    "--no-cache",
+    "--no-rerank",
+    "--max-chars",
+    "--allow-private",
+];
+
+/// The first search flag among shorthand query words, `--flag=value` included.
+fn shorthand_search_flag(words: &[String]) -> Option<&str> {
+    words
+        .iter()
+        .map(|w| w.split('=').next().unwrap_or(w))
+        .find(|w| SEARCH_FLAG_TOKENS.contains(w))
+}
+
 /// Initialize tracing to stderr so provider/engine diagnostics are never silently
 /// dropped. Honors `RUST_LOG`; `--debug` raises the default level to `debug`.
 /// Writes to stderr only, keeping JSON envelopes on stdout machine-parseable,
@@ -338,20 +371,31 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
             entry
         })
         .collect();
-    let modes_info: Vec<serde_json::Value> = registry::MODES
-        .iter()
-        .filter(|s| s.mode != types::Mode::Scrape)
-        .map(|s| {
-            json!({
-                "name": s.mode.to_string(),
-                "input": s.input.as_str(),
-                "merge": s.merge.as_str(),
-                "deadline_s": s.deadline.as_secs(),
-                "providers": s.providers.join(","),
-                "about": s.description,
-                "use": s.when_to_use,
-            })
-        })
+    let auto_info = json!({
+        "name": "auto",
+        "input": "query or url",
+        "merge": "resolves to one of the modes below before anything runs",
+        "providers": "those of the resolved mode",
+        "about": "The default. Rules 1-5 (URL, X cue, similar to <url>, patents, images of), then metasearch.sh's JEV model when logged in, then signal rules 6-10, then general. Never deep; social only on an explicit X cue. metadata.routing.auto reports mode, source and reason.",
+        "use": "Leave -m off unless you know the mode; pass -m deep or -m social to pay for those.",
+    });
+    let modes_info: Vec<serde_json::Value> = std::iter::once(auto_info)
+        .chain(
+            registry::MODES
+                .iter()
+                .filter(|s| s.mode != types::Mode::Scrape)
+                .map(|s| {
+                    json!({
+                        "name": s.mode.to_string(),
+                        "input": s.input.as_str(),
+                        "merge": s.merge.as_str(),
+                        "deadline_s": s.deadline.as_secs(),
+                        "providers": s.providers.join(","),
+                        "about": s.description,
+                        "use": s.when_to_use,
+                    })
+                }),
+        )
         .collect();
     json!({
         "name": "search",
@@ -404,6 +448,19 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
     } else if cli.last {
         Commands::Search(default_search_args(String::new()))
     } else if !cli.query_words.is_empty() {
+        if let Some(flag) = shorthand_search_flag(&cli.query_words) {
+            let err = errors::SearchError::InvalidInput {
+                message: format!(
+                    "'{flag}' after a shorthand query would be searched as text. Use: search search -q \"<query>\" {flag} ..."
+                ),
+            };
+            if ctx.is_json() {
+                output::json::render_error(&err);
+            } else {
+                eprintln!("Error: {err}");
+            }
+            return Ok(err.exit_code());
+        }
         // Drop any global-flag tokens trailing_var_arg swallowed into the query
         // (their effect was already applied via the pre-scan merge in main).
         let query = cli

@@ -591,3 +591,28 @@ fn auto_extract_accepts_padded_uppercase_urls() {
     );
     assert!(!stdout.contains("takes a URL"), "{stdout}");
 }
+
+/// Search flags after a shorthand query used to become query words, so
+/// `search "q" -p serper` searched every provider for "q -p serper".
+#[test]
+fn shorthand_refuses_search_flags_instead_of_searching_them() {
+    for flag in ["-p", "--no-cache", "--mode=news"] {
+        let out = offline_cmd("shortflag")
+            .args(["rust async", flag, "serper", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{flag}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("search search -q"), "{stdout}");
+    }
+}
+
+#[test]
+fn agent_info_lists_auto_first() {
+    let out = offline_cmd("autofirst")
+        .args(["agent-info", "--json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["modes"][0]["name"], "auto", "{}", v["modes"]);
+}
