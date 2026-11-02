@@ -11,14 +11,20 @@ cargo build
 cargo test
 ```
 
-Requires Rust 1.75+ and Cargo.
+Requires a current stable Rust. On Linux, build with `--no-default-features` unless you have the BoringSSL build tools (`cmake clang libclang-dev perl pkg-config`) for the `stealth` feature.
 
 ## Making Changes
 
 1. Fork the repo and create a branch from `master`
 2. Make your changes
-3. Run `cargo test` and `cargo clippy` to check for issues
+3. Run the checks CI runs: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`
 4. Open a pull request with a clear description of what you changed and why
+
+## Docs and the Claude plugins
+
+- `SKILL.md` is embedded in the binary (`search skill install`) and copied byte for byte to `plugins/search-cli/skills/search/SKILL.md`. Change both: `cp SKILL.md plugins/search-cli/skills/search/SKILL.md`.
+- `claude plugin validate .` checks the marketplace; `claude plugin validate plugins/<name>` checks a plugin.
+- The mode and provider tables in `README.md` and `SKILL.md` follow `src/registry.rs`; `search agent-info` prints the same data.
 
 ## What We're Looking For
 
