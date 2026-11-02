@@ -152,8 +152,19 @@ impl Jina {
         if let Some(r) = out.results.first_mut().filter(|_| !title.is_empty()) {
             r.title = title;
         }
+        if let Some(c) = reader_cost(&body) {
+            out.cost_micros = Some(c);
+        }
         Ok(out)
     }
+}
+
+/// Reader bills by the tokens it reports: $0.05 per million, so
+/// ceil(tokens × 0.05) µ$ (PLAN D4, provider-reported cost wins). `None`
+/// leaves the flat estimate when the field is missing.
+fn reader_cost(body: &serde_json::Value) -> Option<u64> {
+    let tokens = body.pointer("/data/usage/tokens")?.as_u64()?;
+    Some(tokens.div_ceil(20))
 }
 
 fn reader_request(client: &reqwest::Client, auth: &str, url: &str) -> reqwest::RequestBuilder {
@@ -168,6 +179,18 @@ fn reader_request(client: &reqwest::Client, auth: &str, url: &str) -> reqwest::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_cost_comes_from_reported_tokens() {
+        let body = |t: u64| serde_json::json!({"data": {"content": "x", "usage": {"tokens": t}}});
+        assert_eq!(reader_cost(&body(100_000)), Some(5_000));
+        assert_eq!(reader_cost(&body(2_000)), Some(100));
+        assert_eq!(reader_cost(&body(1)), Some(1));
+        assert_eq!(
+            reader_cost(&serde_json::json!({"data": {"content": "x"}})),
+            None
+        );
+    }
     use crate::config::AppConfig;
     use crate::types::SearchOpts;
 
