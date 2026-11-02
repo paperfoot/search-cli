@@ -1,0 +1,1 @@
+{"type":"ErrorResponse","error":{"id":"a5920e3e-f6a3-4758-850c-7f4c3d8491c1","status":422,"detail":"The provided API key is invalid.","meta":{"component":"authentication"},"code":"SUBSCRIPTION_TOKEN_INVALID"},"time":1793621081}

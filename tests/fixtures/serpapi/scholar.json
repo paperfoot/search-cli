@@ -1,0 +1,16 @@
+{
+  "search_metadata": { "status": "Success" },
+  "organic_results": [
+    {
+      "position": 0,
+      "title": "Reciprocal rank fusion outperforms condorcet and individual rank learning methods",
+      "result_id": "4GqZvj5I8a8J",
+      "link": "https://dl.acm.org/doi/abs/10.1145/1571941.1572114",
+      "snippet": "Reciprocal Rank Fusion (RRF) serves as a baseline.",
+      "publication_info": { "summary": "GV Cormack, CLA Clarke, S Buettcher - Proceedings of the 32nd …, 2009 - dl.acm.org" },
+      "resources": [{ "title": "acm.org", "file_format": "PDF", "link": "https://dl.acm.org/doi/pdf/10.1145/1571941.1572114" }],
+      "inline_links": { "cited_by": { "total": 2201, "link": "https://scholar.google.com/scholar?cites=1" } }
+    },
+    { "position": 1, "title": "[CITATION] A paper with no link", "result_id": "x" }
+  ]
+}

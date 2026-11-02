@@ -1,0 +1,4 @@
+{
+  "error": "Invalid request body | Validation error: Too small: expected string to have >=1 characters at \"query\"",
+  "tag": "INVALID_REQUEST_BODY"
+}

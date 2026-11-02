@@ -1,0 +1,55 @@
+{
+  "searchParameters": {
+    "q": "rank fusion reciprocal",
+    "type": "search",
+    "num": 10,
+    "engine": "google"
+  },
+  "organic": [
+    {
+      "title": "Reciprocal rank fusion | Elasticsearch Reference",
+      "link": "https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion",
+      "displayedLink": "https://www.elastic.co › ... › Guides and examples",
+      "snippet": "Reciprocal rank fusion (RRF) is a method for combining multiple result sets with different relevance indicators into a single result set.",
+      "position": 1
+    },
+    {
+      "title": "Reciprocal Rank Fusion (RRF) explained in 4 mins",
+      "link": "https://medium.com/@devalshah1619/mathematical-intuition-behind-reciprocal-rank-fusion-rrf-explained-in-2-mins-002df0cc5e2a",
+      "displayedLink": "460+ likes  ·  2 years ago",
+      "snippet": "Reciprocal Rank Fusion is a rank aggregation method that combines rankings from multiple sources into a single, unified ranking. In the context ...",
+      "date": "2 years ago",
+      "position": 2
+    },
+    {
+      "title": "Better RAG Results With Reciprocal Rank Fusion",
+      "link": "https://www.mongodb.com/resources/basics/reciprocal-rank-fusion",
+      "displayedLink": "https://www.mongodb.com › resources › basics › recipro...",
+      "snippet": "It uses methods like reciprocal rank fusion to combine scores from multiple retrieval methods and provide the final ranking and unified result. Combining ...",
+      "position": 3
+    }
+  ],
+  "peopleAlsoAsk": [
+    {
+      "question": "What does reciprocal rank fusion do?"
+    },
+    {
+      "question": "What is the difference between reciprocal rank fusion and reranking?"
+    },
+    {
+      "question": "What does \"reciprocal rank\" mean?"
+    }
+  ],
+  "relatedSearches": [
+    {
+      "query": "Reciprocal rank Fusion formula"
+    },
+    {
+      "query": "Rank fusion reciprocal meaning"
+    },
+    {
+      "query": "Reciprocal Rank Fusion Python"
+    }
+  ],
+  "credits": 1
+}

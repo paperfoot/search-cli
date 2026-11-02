@@ -243,11 +243,15 @@ pub static NO_FILTERS: crate::types::SearchOpts = crate::types::SearchOpts {
 };
 
 /// Append `site:` / `-site:` operators for providers without native domain filters.
+/// Google-style engines AND bare `site:` terms, so include domains are joined
+/// with `OR` (as the server's `withSiteOperators` does); excludes stay `-site:`.
 pub fn augment_query(query: &str, opts: &crate::types::SearchOpts) -> String {
-    let mut q = String::with_capacity(query.len() + 16 * opts.include_domains.len());
+    let mut q = String::with_capacity(
+        query.len() + 16 * (opts.include_domains.len() + opts.exclude_domains.len()),
+    );
     q.push_str(query);
-    for d in &opts.include_domains {
-        q.push_str(" site:");
+    for (i, d) in opts.include_domains.iter().enumerate() {
+        q.push_str(if i == 0 { " site:" } else { " OR site:" });
         q.push_str(d);
     }
     for d in &opts.exclude_domains {
@@ -305,6 +309,25 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn augment_query_ors_include_domains_and_negates_excludes() {
+        let opts = crate::types::SearchOpts {
+            include_domains: vec!["a.org".into(), "b.com".into(), "c.net".into()],
+            exclude_domains: vec!["x.com".into(), "y.com".into()],
+            ..crate::types::SearchOpts::default()
+        };
+        assert_eq!(
+            augment_query("q", &opts),
+            "q site:a.org OR site:b.com OR site:c.net -site:x.com -site:y.com"
+        );
+        let one = crate::types::SearchOpts {
+            include_domains: vec!["a.org".into()],
+            ..crate::types::SearchOpts::default()
+        };
+        assert_eq!(augment_query("q", &one), "q site:a.org");
+        assert_eq!(augment_query("q", &NO_FILTERS), "q");
+    }
 
     // Uses uniquely-named env vars so parallel tests don't race on shared state.
     #[test]

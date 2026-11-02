@@ -1,0 +1,56 @@
+{
+  "searchParameters": {
+    "q": "rank fusion search engine",
+    "type": "patents",
+    "num": 10,
+    "engine": "google"
+  },
+  "organic": [
+    {
+      "title": "Caching large language model (LLM) responses using hybrid retrieval and …",
+      "snippet": "A system and method for improving computer functionality by retrieving answers/responses to questions/input from a cache such as those used with chatbots and generative AI systems. Disclosed is a multi-layered caching strategy that focuses on the relevance of a cache hit by improving the quality …",
+      "link": "https://patents.google.com/patent/US12259913B1/en",
+      "priorityDate": "2024-02-14",
+      "filingDate": "2024-02-14",
+      "grantDate": "2025-03-25",
+      "publicationDate": "2025-03-25",
+      "inventor": "Brien H Muschett",
+      "assignee": "Inventus Holdings, Llc",
+      "publicationNumber": "US12259913B1",
+      "language": "en",
+      "thumbnailUrl": "https://patentimages.storage.googleapis.com/49/c7/35/a0b9803f51ccab/US12259913-20250325-D00000.png",
+      "pdfUrl": "https://patentimages.storage.googleapis.com/09/5f/aa/eaba6cbe00979e/US12259913.pdf"
+    },
+    {
+      "title": "Systems and methods for classifying electronic information using advanced …",
+      "snippet": "Systems and methods for classifying electronic information or documents into a number of classes and subclasses are provided through an active learning algorithm. In certain embodiments, seed sets may be eliminated by merging relevance feedback and machine learning phases. Such document …",
+      "link": "https://patents.google.com/patent/US8838606B1/en",
+      "priorityDate": "2013-03-15",
+      "filingDate": "2013-06-18",
+      "grantDate": "2014-09-16",
+      "publicationDate": "2014-09-16",
+      "inventor": "Gordon Villy Cormack",
+      "assignee": "Gordon Villy Cormack",
+      "publicationNumber": "US8838606B1",
+      "language": "en",
+      "thumbnailUrl": "https://patentimages.storage.googleapis.com/54/0b/f4/884c6caea26ce5/US08838606-20140916-D00000.png",
+      "pdfUrl": "https://patentimages.storage.googleapis.com/a1/da/f1/471e0e2024fd87/US8838606.pdf"
+    },
+    {
+      "title": "Systems and methods for assessing outcomes of the combination of predictive or …",
+      "snippet": "An improved patient monitoring system can include a processor device, a display, a first sensor in communication with the processor device, the first sensor being at least one of an electrocardiogram sensor, a pressure sensor, a blood oxygenation sensor, an image sensor, an impedance sensor, or a …",
+      "link": "https://patents.google.com/patent/US20250191779A1/en",
+      "priorityDate": "2019-09-04",
+      "filingDate": "2024-07-17",
+      "grantDate": "",
+      "publicationDate": "2025-06-12",
+      "inventor": "Bruce S. Kristal",
+      "assignee": "The Brigham And Women's Hospital, Inc.",
+      "publicationNumber": "US20250191779A1",
+      "language": "en",
+      "thumbnailUrl": "https://patentimages.storage.googleapis.com/2e/46/29/ced2394cf00b25/US20250191779A1-20250612-D00000.png",
+      "pdfUrl": "https://patentimages.storage.googleapis.com/0f/c0/a3/a03660ca0e8eec/US20250191779A1.pdf"
+    }
+  ],
+  "credits": 1
+}

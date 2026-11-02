@@ -1,0 +1,24 @@
+{
+  "type": "search",
+  "query": { "original": "rank fusion", "more_results_available": true },
+  "web": {
+    "type": "search",
+    "results": [
+      {
+        "title": "Reciprocal <strong>rank fusion</strong> | Elasticsearch Reference",
+        "url": "https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion",
+        "description": "Reciprocal <strong>rank fusion</strong> (RRF) is a method for combining multiple result sets.",
+        "page_age": "2026-09-14T08:12:00",
+        "age": "September 14, 2026",
+        "extra_snippets": ["RRF requires no tuning.", "The constant k defaults to 60."]
+      },
+      {
+        "title": "Reciprocal Rank Fusion outperforms Condorcet",
+        "url": "https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf",
+        "description": "Cormack, Clarke &amp; Buettcher, SIGIR 2009.",
+        "age": "2 years ago"
+      },
+      { "title": "Not a web page", "url": "javascript:void(0)", "description": "dropped" }
+    ]
+  }
+}

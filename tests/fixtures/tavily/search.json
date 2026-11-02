@@ -1,0 +1,26 @@
+{
+  "query": "who won the 2026 world cup",
+  "follow_up_questions": null,
+  "answer": "Spain won the 2026 FIFA World Cup.",
+  "images": [],
+  "results": [
+    {
+      "url": "https://www.fifa.com/en/tournaments/mens/worldcup/canadamexicousa2026",
+      "title": "FIFA World Cup 26",
+      "content": "Spain beat Argentina in the final at MetLife Stadium.",
+      "score": 0.91,
+      "raw_content": null,
+      "published_date": "Sun, 19 Jul 2026 22:10:00 GMT"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup",
+      "title": "2026 FIFA World Cup - Wikipedia",
+      "content": "The 2026 FIFA World Cup was the 23rd FIFA World Cup.",
+      "score": 0.84,
+      "raw_content": null
+    }
+  ],
+  "response_time": 1.21,
+  "usage": { "credits": 1 },
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}

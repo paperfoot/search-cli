@@ -1,0 +1,15 @@
+{
+  "type": "news",
+  "query": { "original": "brave search api" },
+  "results": [
+    {
+      "type": "news_result",
+      "title": "Brave launches LLM Context endpoint",
+      "url": "https://example-news.com/brave-llm-context",
+      "description": "The new endpoint returns grounding snippets for <strong>AI</strong> agents.",
+      "age": "3 hours ago",
+      "page_age": "2026-11-02T09:00:00",
+      "meta_url": { "hostname": "example-news.com" }
+    }
+  ]
+}

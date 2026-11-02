@@ -1,0 +1,51 @@
+{
+  "searchParameters": {
+    "q": "coffee shops soho london",
+    "type": "places",
+    "num": 10,
+    "page": 1,
+    "engine": "google"
+  },
+  "places": [
+    {
+      "position": 1,
+      "title": "Hideaway Coffee House",
+      "address": "7 Farrier's Psge",
+      "latitude": 51.511337,
+      "longitude": -0.1352386,
+      "rating": 4.7,
+      "ratingCount": 1300,
+      "priceLevel": "£1–10",
+      "category": "Coffee shop",
+      "website": "https://www.instagram.com/hideawaycoffee/",
+      "cid": "6973990054311486276"
+    },
+    {
+      "position": 2,
+      "title": "Kiss the Hippo Coffee Soho",
+      "address": "30 Golden Square",
+      "latitude": 51.511703,
+      "longitude": -0.1379331,
+      "rating": 4.6,
+      "ratingCount": 716,
+      "priceLevel": "£1–10",
+      "category": "Coffee shop",
+      "website": "https://www.kissthehippo.com/",
+      "cid": "5686153484176968158"
+    },
+    {
+      "position": 3,
+      "title": "Sacred Grounds",
+      "address": "54 Dean St",
+      "latitude": 51.51242,
+      "longitude": -0.1318065,
+      "rating": 4.7,
+      "ratingCount": 325,
+      "priceLevel": "£1–10",
+      "category": "Coffee shop",
+      "website": "https://www.sacredgrounds.co.uk/",
+      "cid": "6274924617515164511"
+    }
+  ],
+  "credits": 1
+}

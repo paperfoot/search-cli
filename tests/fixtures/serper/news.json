@@ -1,0 +1,38 @@
+{
+  "searchParameters": {
+    "q": "openai",
+    "type": "news",
+    "num": 10,
+    "page": 1,
+    "tbs": "qdr:w",
+    "allowSuggested": true,
+    "engine": "google"
+  },
+  "news": [
+    {
+      "title": "Making it easier for websites to express AI training preferences",
+      "link": "https://openai.com/index/helping-websites-express-ai-training-preferences/",
+      "snippet": "OpenAI will honor a shared robots.txt signal to help website operators communicate their AI training preferences to participating providers.",
+      "date": "2 days ago",
+      "source": "OpenAI",
+      "imageUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSp7dy-CsPRhYK8q7c7-rY4oiRHVeoo4ZafbSaTQEdAA988uo_QVZ6SqOjpEaAP-ox5IBerTq9aUNnmOLzJ-Q-pRSRAdNrzUoQXnWpfBv5klcE&s"
+    },
+    {
+      "title": "ServiceNow and OpenAI accelerate enterprise AI, from models and operations to cybersecurity and agentic development",
+      "link": "https://newsroom.servicenow.com/press-releases/details/2026/ServiceNow-and-OpenAI-accelerate-enterprise-AI-from-models-and-operations-to-cybersecurity-and-agentic-development/default.aspx",
+      "snippet": "New ServiceNow plugin lets customers complete governed and secure ServiceNow workflows through ChatGPT OpenAI plans to make ServiceNow available across its...",
+      "date": "4 days ago",
+      "source": "ServiceNow Newsroom",
+      "imageUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQpKEZfo9cztXGpV2mUJ5F_7hPpFuaIJpZ0FzNkYY0xjaMovSYUiZFNFqzYIWihtFVGtPvcn23prmrMU4wuCWWr1SV_uUAFdGV-812t3fmC3J9V&s"
+    },
+    {
+      "title": "OpenAI slashes funding target by $10 billion amid tech rout, FT reports",
+      "link": "https://www.reuters.com/business/openai-cuts-funding-target-by-10-billion-ft-reports-2026-10-31/",
+      "snippet": "OpenAI has slashed the target for its latest funding round by $10 billion amid a selloff in tech stocks ​driven by AI worries, the Financial Times reported...",
+      "date": "2 days ago",
+      "source": "Reuters",
+      "imageUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQSKWTQMD9Um4OP0G5Iudes5YW-XaGdOvKwX9Il0CZ3Nhn3iEfBaEU7TIaifyVEPNvzN8pcCsCjqiE2b5unydzSTngIIFpetkUK2cSOzYStGCY&s"
+    }
+  ],
+  "credits": 1
+}
