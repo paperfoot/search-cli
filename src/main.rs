@@ -536,6 +536,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     );
                 }
             }
+            // --allow-private reaches the resolvers direct and stealth use,
+            // not just the pre-flight check below.
+            guard::set_allow_private(args.allow_private);
 
             // metasearch.sh: refused outright when the configured host is not
             // trusted, so a poisoned `metasearch.url` never gets the token.
