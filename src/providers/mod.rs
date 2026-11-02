@@ -99,6 +99,14 @@ pub fn key_for(config: &AppConfig, spec: &ProviderSpec) -> String {
     }
 }
 
+/// A failure that still cost a billed call: the request reached the
+/// provider and was answered too late (timeout) or with a 2xx that did not
+/// parse. Auth, quota, rate-limit, bad-request and server answers are not
+/// billed; a connection error never left.
+pub fn billed_failure(category: FailureCategory) -> bool {
+    matches!(category, FailureCategory::Timeout | FailureCategory::Parse)
+}
+
 /// How many times a request may be re-sent, and the backoff between tries.
 const MAX_RETRIES: u32 = 2;
 const BACKOFF_MIN: Duration = Duration::from_millis(200);

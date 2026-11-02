@@ -81,6 +81,13 @@ pub trait Adapter: Send + Sync {
     fn classify(&self, _status: u16, _body: &str) -> Option<FailureCategory> {
         None
     }
+    /// What one call in `mode` costs once sent, before any answer: the price
+    /// of a call that times out or whose 2xx fails to parse. Override when a
+    /// mode sends more than the base call (Tavily's advanced depth, Brave
+    /// deep's two requests). Only counted for `billed_on_send` providers.
+    fn sent_cost(&self, _mode: Mode) -> u64 {
+        self.spec().price.estimate(0)
+    }
     fn name(&self) -> &'static str {
         self.spec().name
     }

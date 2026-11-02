@@ -108,6 +108,16 @@ impl Adapter for Brave {
         }
     }
 
+    /// Deep sends web search and LLM Context together: two billed requests.
+    fn sent_cost(&self, mode: Mode) -> u64 {
+        let per_call = SPEC.price.per_call as u64;
+        if mode == Mode::Deep {
+            2 * per_call
+        } else {
+            per_call
+        }
+    }
+
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "brave" });
@@ -122,7 +132,8 @@ impl Adapter for Brave {
             // provider call, so `-p` governs both and the cost is one line.
             Mode::Deep => {
                 let (web, grounding) = tokio::join!(self.search(call), self.llm_context(call));
-                let calls_ok = web.is_ok() as u64 + grounding.is_ok() as u64;
+                // Each half that reached Brave is billed, answered or not.
+                let billed = billed_half(&web) + billed_half(&grounding);
                 let results = match (web, grounding) {
                     (Ok(w), Ok(g)) => merge(w, g),
                     (Ok(w), Err(e)) => {
@@ -138,7 +149,7 @@ impl Adapter for Brave {
                 Ok(Output {
                     results,
                     answers: Vec::new(),
-                    cost_micros: Some(per_call * calls_ok),
+                    cost_micros: Some(per_call * billed),
                 })
             }
             _ => Ok(Output {
@@ -146,6 +157,15 @@ impl Adapter for Brave {
                 ..Output::default()
             }),
         }
+    }
+}
+
+/// 1 when one half of a deep call was billed: it answered, or it reached
+/// Brave and timed out or came back unparseable.
+fn billed_half<T>(half: &Result<T, SearchError>) -> u64 {
+    match half {
+        Ok(_) => 1,
+        Err(e) => super::billed_failure(e.category()) as u64,
     }
 }
 
@@ -345,5 +365,27 @@ mod tests {
         let dead_key = r#"{"type":"ErrorResponse","error":{"status":422,"detail":"The provided subscription token is invalid.","code":"SUBSCRIPTION_TOKEN_INVALID"}}"#;
         assert_eq!(b.classify(422, dead_key), Some(C::Auth));
         assert_eq!(b.classify(400, "not json"), None);
+    }
+
+    /// Deep sends two requests: a timed-out or unparseable half was billed,
+    /// a rate-limited one was not.
+    #[test]
+    fn deep_prices_every_half_that_was_sent() {
+        let b = brave();
+        assert_eq!(b.sent_cost(Mode::Deep), 10_000);
+        assert_eq!(b.sent_cost(Mode::General), 5_000);
+        let ok: Result<(), SearchError> = Ok(());
+        let timed_out: Result<(), SearchError> = Err(super::super::timeout_error("brave"));
+        let parse: Result<(), SearchError> =
+            Err(serde_json::from_str::<u8>("x").unwrap_err().into());
+        let limited: Result<(), SearchError> = Err(SearchError::Upstream {
+            provider: "brave",
+            status: 429,
+            category: FailureCategory::RateLimit,
+            message: "m".into(),
+        });
+        assert_eq!(billed_half(&ok) + billed_half(&timed_out), 2);
+        assert_eq!(billed_half(&parse), 1);
+        assert_eq!(billed_half(&limited), 0);
     }
 }

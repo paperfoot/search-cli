@@ -71,6 +71,11 @@ impl Adapter for Tavily {
         !self.api_key().is_empty()
     }
 
+    /// Every mode sends the advanced depth, so a timed-out call cost that.
+    fn sent_cost(&self, _mode: Mode) -> u64 {
+        ADVANCED_MICROS
+    }
+
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "tavily" });
@@ -141,5 +146,19 @@ impl Adapter for Tavily {
             // Every mode sends the advanced depth today.
             cost_micros: Some(ADVANCED_MICROS),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    #[test]
+    fn a_sent_call_costs_the_advanced_depth() {
+        let t = Tavily::new(Arc::new(AppContext::new(AppConfig::default())));
+        for mode in SPEC.modes {
+            assert_eq!(t.sent_cost(*mode), ADVANCED_MICROS);
+        }
     }
 }

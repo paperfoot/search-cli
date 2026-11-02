@@ -61,6 +61,8 @@ pub(crate) struct Request<'a> {
 /// What one provider call produced.
 enum Outcome {
     Done(Output),
+    /// A 2xx the mode would not accept (chain); paid for all the same.
+    Rejected(ProviderFailure, Output),
     Failed(ProviderFailure),
     /// Still running at the mode deadline.
     TimedOut,
@@ -84,6 +86,13 @@ pub(crate) async fn execute_with(
     }
 
     let names: Vec<&'static str> = plan.iter().map(|a| a.name()).collect();
+    // What a sent-but-unanswered call costs in this mode: billed providers
+    // bill on send. Taken now, before the adapters move into their tasks.
+    let sent_costs: HashMap<&'static str, u64> = plan
+        .iter()
+        .filter(|a| a.spec().billed_on_send)
+        .map(|a| (a.name(), a.sent_cost(mode)))
+        .collect();
     let mut transport: BTreeMap<String, String> = plan
         .iter()
         .map(|a| {
@@ -113,22 +122,26 @@ pub(crate) async fn execute_with(
     for (name, outcome) in outcomes {
         queried.push(name.to_string());
         let spec = providers::find(name);
-        // What a sent-but-unanswered call cost: billed providers bill on send.
-        let sent_cost = spec
-            .filter(|s| s.billed_on_send)
-            .map(|s| s.price.estimate(0));
+        let sent_cost = sent_costs.get(name).copied();
+        // An answered call: the upstream's own figure, else the estimate.
+        let answered_cost = |out: &Output| {
+            out.cost_micros
+                .unwrap_or_else(|| spec.map_or(0, |s| s.price.estimate(out.results.len() as u16)))
+        };
         match outcome {
             Outcome::Done(out) => {
-                let cost = out.cost_micros.unwrap_or_else(|| {
-                    spec.map_or(0, |s| s.price.estimate(out.results.len() as u16))
-                });
-                by_provider.insert(name.to_string(), cost);
+                by_provider.insert(name.to_string(), answered_cost(&out));
                 answers.extend(out.answers);
                 buckets.push((name.to_string(), out.results));
             }
+            Outcome::Rejected(f, out) => {
+                tracing::warn!("{name}: {}", f.reason);
+                by_provider.insert(name.to_string(), answered_cost(&out));
+                failures.push(f);
+            }
             Outcome::Failed(f) => {
                 tracing::warn!("{name}: {}", f.reason);
-                if f.category == FailureCategory::Timeout {
+                if providers::billed_failure(f.category) {
                     if let Some(c) = sent_cost {
                         by_provider.insert(name.to_string(), c);
                     }
@@ -376,7 +389,9 @@ async fn run_chain(
                     outcomes.push((name, Outcome::Done(out)));
                     break;
                 }
-                Err(reason) => outcomes.push((name, Outcome::Failed(rejected(name, reason)))),
+                Err(reason) => {
+                    outcomes.push((name, Outcome::Rejected(rejected(name, reason), out)))
+                }
             },
             other => outcomes.push((name, other)),
         }
@@ -623,6 +638,8 @@ mod tests {
         spec: &'static ProviderSpec,
         act: Act,
         log: Log,
+        /// Overrides `Adapter::sent_cost` (as Tavily and Brave deep do).
+        sent: Option<u64>,
     }
 
     #[async_trait::async_trait]
@@ -632,6 +649,9 @@ mod tests {
         }
         fn is_configured(&self) -> bool {
             true
+        }
+        fn sent_cost(&self, _mode: Mode) -> u64 {
+            self.sent.unwrap_or(self.spec.price.estimate(0))
         }
         async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
             self.log
@@ -695,6 +715,7 @@ mod tests {
                     spec,
                     act: act.clone(),
                     log: log.clone(),
+                    sent: None,
                 }) as Box<dyn Adapter>
             })
             .collect();
@@ -862,6 +883,66 @@ mod tests {
         assert_eq!(cost.micros, 25_000);
         assert!((cost.usd - 0.025).abs() < 1e-9);
         assert_eq!(r.metadata.transport["exa"], "direct");
+    }
+
+    /// A paid call whose 200 the mode rejected (a challenge page) was still
+    /// paid for: it counts, at the adapter's reported cost or the estimate.
+    #[tokio::test]
+    async fn rejected_billed_output_counts_as_spend() {
+        let challenge = Act::Ok {
+            delay_ms: 1,
+            urls: vec!["https://site.example/page".into()],
+            answer: None,
+            cost: Some(700),
+            snippet: "Just a moment...",
+        };
+        let (adapters, _) = fakes(&[(&jina::SPEC, challenge), (&firecrawl::SPEC, ok(1, 1, "fc"))]);
+        let r = search(adapters, Mode::Extract, 1, None, 2_000)
+            .await
+            .unwrap();
+        let cost = r.metadata.cost.unwrap();
+        assert_eq!(cost.by_provider["jina"], 700);
+        assert_eq!(cost.by_provider["firecrawl"], 5_000);
+    }
+
+    /// A 2xx whose body did not parse was billed upstream.
+    #[tokio::test]
+    async fn parse_failure_on_a_billed_provider_counts_as_spend() {
+        let (adapters, _) = fakes(&[
+            (&serper::SPEC, ok(1, 2, "s")),
+            (&exa::SPEC, Act::Fail(FailureCategory::Parse)),
+        ]);
+        let r = search(adapters, Mode::General, 5, None, 2_000)
+            .await
+            .unwrap();
+        let cost = r.metadata.cost.unwrap();
+        assert_eq!(cost.by_provider["exa"], 7_000);
+        assert_eq!(cost.by_provider["serper"], 1_000);
+    }
+
+    /// A call still running at the deadline is priced at what was sent for
+    /// the mode (Tavily always sends the advanced depth: 16,000), not the
+    /// base rate.
+    #[tokio::test]
+    async fn timeouts_are_priced_at_the_adapters_sent_cost() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let adapters: Vec<Box<dyn Adapter>> = vec![
+            Box::new(Fake {
+                spec: &serper::SPEC,
+                act: ok(1, 2, "s"),
+                log: log.clone(),
+                sent: None,
+            }),
+            Box::new(Fake {
+                spec: &tavily::SPEC,
+                act: ok(5_000, 2, "t"),
+                log,
+                sent: Some(16_000),
+            }),
+        ];
+        let r = search(adapters, Mode::General, 5, None, 300).await.unwrap();
+        assert_eq!(r.metadata.providers_timed_out, vec!["tavily".to_string()]);
+        assert_eq!(r.metadata.cost.unwrap().by_provider["tavily"], 16_000);
     }
 
     fn urls(urls: &[&str], snippet: &'static str) -> Act {
