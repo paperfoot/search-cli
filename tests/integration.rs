@@ -6,22 +6,51 @@ fn search_cmd() -> Command {
     Command::cargo_bin("search").unwrap()
 }
 
-/// Check if any provider key is configured (reads from config file)
+/// Providers configured on this machine, from `config check --json` (env or
+/// config file). Empty when the command fails or prints something unexpected.
+fn configured_providers() -> Vec<String> {
+    let output = search_cmd()
+        .args(["config", "check", "--json"])
+        .output()
+        .unwrap();
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|v| v["configured"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| p.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Live tests make paid upstream calls, so they run only when asked for
+/// explicitly: `SEARCH_LIVE_TESTS=1`. A machine that merely has keys (every
+/// developer laptop) must not spend money on a plain `cargo test`.
+fn live_tests_enabled() -> bool {
+    std::env::var("SEARCH_LIVE_TESTS").is_ok_and(|v| v == "1")
+}
+
 fn has_any_provider() -> bool {
-    let output = search_cmd().args(["config", "check"]).output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.contains("[+]") || stdout.contains("OK")
+    live_tests_enabled() && !configured_providers().is_empty()
 }
 
 fn has_provider(name: &str) -> bool {
-    let output = search_cmd().args(["config", "check"]).output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains(name) && (line.contains("[+]") || line.contains("OK")) {
-            return true;
-        }
-    }
-    false
+    live_tests_enabled() && configured_providers().iter().any(|p| p == name)
+}
+
+#[test]
+fn test_config_check_json_lists_configured_providers() {
+    let output = search_cmd()
+        .args(["config", "check", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["configured"].is_array());
+    assert!(json["unconfigured"].is_array());
+    assert_eq!(
+        json["configured_count"].as_u64().unwrap() as usize,
+        json["configured"].as_array().unwrap().len()
+    );
 }
 
 // =============================================================================
@@ -176,7 +205,7 @@ fn test_parse_error_json_on_stdout() {
 #[test]
 fn test_real_general_search() {
     if !has_any_provider() {
-        eprintln!("SKIP: no providers configured");
+        eprintln!("SKIP: set SEARCH_LIVE_TESTS=1 with a provider configured");
         return;
     }
 
@@ -399,7 +428,7 @@ fn test_real_freshness_filter() {
 #[test]
 fn test_real_last_cache() {
     if !has_any_provider() {
-        eprintln!("SKIP: no providers");
+        eprintln!("SKIP: set SEARCH_LIVE_TESTS=1 with a provider configured");
         return;
     }
 
@@ -437,7 +466,7 @@ fn test_real_last_cache() {
 #[test]
 fn test_performance_benchmark() {
     if !has_any_provider() {
-        eprintln!("SKIP: no providers for benchmark");
+        eprintln!("SKIP: set SEARCH_LIVE_TESTS=1 with a provider configured");
         return;
     }
 
