@@ -22,6 +22,18 @@ fn configured_providers() -> Vec<String> {
         .collect()
 }
 
+/// A fused search that returned results is a pass even if one configured
+/// provider failed (`partial_success`): the live tests check the CLI, not the
+/// health of every upstream on the day.
+fn assert_has_answer_status(json: &serde_json::Value) {
+    let status = json["status"].as_str().unwrap_or("");
+    assert!(
+        matches!(status, "success" | "partial_success"),
+        "unexpected status {status:?}: {}",
+        json["metadata"]["provider_failures"]
+    );
+}
+
 /// Live tests make paid upstream calls, so they run only when asked for
 /// explicitly: `SEARCH_LIVE_TESTS=1`. A machine that merely has keys (every
 /// developer laptop) must not spend money on a plain `cargo test`.
@@ -230,7 +242,7 @@ fn test_real_general_search() {
     );
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["status"], "success");
+    assert_has_answer_status(&json);
     assert_eq!(json["mode"], "general");
 
     let results = json["results"].as_array().unwrap();
@@ -446,7 +458,7 @@ fn test_real_last_cache() {
 
     assert!(output2.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
-    assert_eq!(json["status"], "success");
+    assert_has_answer_status(&json);
     assert!(!json["results"].as_array().unwrap().is_empty());
 
     // Cache replay should be near-instant (< 100ms)
