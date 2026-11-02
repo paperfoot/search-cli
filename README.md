@@ -2,7 +2,7 @@
 
 # search: web search for AI agents
 
-**One command searches 13 engines, fuses the results, and tells you what each search cost.**
+**One command queries a dozen search engines, fuses the results, and tells you what each search cost.**
 
 [![Crates.io](https://img.shields.io/crates/v/agent-search?style=for-the-badge&logo=rust&logoColor=white&label=crates.io)](https://crates.io/crates/agent-search)
 [![Downloads](https://img.shields.io/crates/d/agent-search?style=for-the-badge&logo=rust&logoColor=white)](https://crates.io/crates/agent-search)
@@ -29,7 +29,7 @@ curl -fsSL https://metasearch.sh/install | sh         # macOS and Linux, x86_64 
 
 The install script downloads the release binary for your platform and checks it against the release's `SHA256SUMS` before installing. `search update` replaces the binary the same way.
 
-The Linux binaries are built without the `stealth` scraper (its BoringSSL dependency does not link there yet); on Linux the extract chain skips that step. To build from source without it: `cargo install agent-search --no-default-features`.
+The Linux binaries are built without the `stealth` fetcher, whose BoringSSL dependency does not link there yet, so on Linux the extract chain skips that step. On Linux, build from source with `cargo install agent-search --no-default-features`.
 
 ## No keys? `search login`
 

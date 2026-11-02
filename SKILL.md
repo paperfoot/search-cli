@@ -2,11 +2,11 @@
 name: search
 description: >
   Web search, news, papers, people, X posts, images, places, patents and page
-  extraction through the `search` CLI, which queries up to 13 engines and fuses
-  the results. Use when you need current information from the web, sources for
-  a claim, the text of a URL, or a person's or company's public profile. The
-  mode defaults to auto and is reported; every result envelope carries its
-  cost. Run `search agent-info` for the full manifest.
+  extraction through the `search` CLI, which queries a dozen search engines
+  and fuses the results. Use when you need current information from the web,
+  sources for a claim, the text of a URL, or a person's or company's public
+  profile. The mode defaults to auto and is reported; every result envelope
+  carries its cost. Run `search agent-info` for the full manifest.
 ---
 
 ## search
