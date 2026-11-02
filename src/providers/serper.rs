@@ -363,6 +363,22 @@ mod tests {
         assert_eq!(body["num"], 5);
     }
 
+    /// Google ANDs bare `site:` operators, so two `-d` domains must be ORed
+    /// or Serper returns nothing and still bills the credit.
+    #[test]
+    fn two_include_domains_are_ored_and_excludes_stay_negated() {
+        let opts = SearchOpts {
+            include_domains: vec!["wikipedia.org".into(), "britannica.com".into()],
+            exclude_domains: vec!["pinterest.com".into()],
+            ..SearchOpts::default()
+        };
+        let (_, body) = built(Mode::General, 10, &opts);
+        assert_eq!(
+            body["q"],
+            "coffee site:wikipedia.org OR site:britannica.com -site:pinterest.com"
+        );
+    }
+
     #[test]
     fn vertical_requests_send_only_the_query() {
         for (mode, path) in [
