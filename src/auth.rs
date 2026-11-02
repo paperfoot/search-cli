@@ -21,6 +21,11 @@ const MAX_WAIT: Duration = Duration::from_secs(900);
 const MIN_INTERVAL_SECS: u64 = 2;
 /// Consecutive transport errors tolerated while polling before giving up.
 const MAX_TRANSPORT_FAILURES: u32 = 10;
+/// Whole-request cap for every metasearch.sh call made here. The shared
+/// client has only a connect timeout and a 90 s read backstop, sized for
+/// slow upstream searches; a stalled login server must fail in seconds.
+/// A timed-out device poll counts as a transport failure and is retried.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Deserialize)]
 struct DeviceCodeResponse {
@@ -214,6 +219,7 @@ pub async fn login(
             "client_version": env!("CARGO_PKG_VERSION"),
             "hostname": hostname(),
         }))
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| api_error(format!("could not reach {base}: {e}")))?;
@@ -276,6 +282,7 @@ pub async fn login(
         let resp = match client
             .post(format!("{base}/api/v1/device/token"))
             .json(&serde_json::json!({ "device_code": start.device_code }))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
         {
@@ -397,6 +404,7 @@ pub async fn logout(
         let resp = client
             .delete(format!("{base}/api/v1/me"))
             .bearer_auth(&token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await;
         revoked = matches!(resp, Ok(r) if r.status().is_success());
@@ -448,6 +456,7 @@ pub async fn whoami(
     let resp = client
         .get(format!("{base}/api/v1/me"))
         .bearer_auth(&token)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| api_error(format!("could not reach {base}: {e}")))?;
