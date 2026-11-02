@@ -8,11 +8,10 @@ permissions:
   contents: write
 
 env:
-  # Cargo flags for every Linux target. The stealth feature (wreq/BoringSSL)
-  # does not link on Linux runners yet, so Linux ships without it and the
-  # extract chain skips that step. Set to "" once ci.yml's linux-default job
-  # is green.
-  LINUX_FLAGS: "--no-default-features"
+  # Cargo flags for every Linux target. Empty: Linux ships with the stealth
+  # feature (wreq/BoringSSL), which ci.yml's linux-default job builds and
+  # tests on both Linux arches. "--no-default-features" drops it again.
+  LINUX_FLAGS: ""
 
 jobs:
   build:

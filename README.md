@@ -29,7 +29,7 @@ curl -fsSL https://metasearch.sh/install | sh         # macOS and Linux, x86_64 
 
 The install script downloads the release binary for your platform and checks it against the release's `SHA256SUMS` before installing. `search update` downloads the latest GitHub release and replaces the binary, without that check.
 
-The Linux binaries are built without the `stealth` fetcher, whose BoringSSL dependency does not link there yet, so on Linux the extract chain skips that step. On Linux, build from source with `cargo install agent-search --no-default-features`.
+The Linux binaries include the `stealth` fetcher, as the macOS ones do. To build from source on Linux, install `cmake`, `clang`, `libclang-dev`, `perl` and `pkg-config` first (BoringSSL needs them), or drop the fetcher with `cargo install agent-search --no-default-features`.
 
 ## No keys? `search login`
 

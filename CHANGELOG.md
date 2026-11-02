@@ -108,6 +108,8 @@
   and a `timeout` left in an old file is ignored.
 
 ### Install
+- The Linux binaries now include the stealth fetch, so `extract` on Linux
+  tries it before the paid renderers, as on macOS.
 - Prebuilt binaries for Linux arm64 (aarch64). `curl -fsSL
   https://metasearch.sh/install | sh` works on macOS and Linux, x86_64 and
   arm64, and checks the download against `SHA256SUMS`.

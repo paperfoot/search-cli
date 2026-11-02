@@ -51,12 +51,15 @@ jobs:
       - name: Plugin skill matches SKILL.md
         run: diff SKILL.md plugins/search-cli/skills/search/SKILL.md
 
-  # Linux build WITH default features (stealth: wreq + BoringSSL). Allowed to
-  # fail for now: when it is green, release.yml's LINUX_FLAGS can drop
-  # --no-default-features and Linux binaries ship with the stealth step.
+  # Linux build WITH default features (stealth: wreq + BoringSSL), on both
+  # arches release.yml ships. Required: Linux release binaries carry stealth
+  # (release.yml LINUX_FLAGS is empty), so a red job here means a red release.
   linux-default:
-    runs-on: ubuntu-latest
-    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
