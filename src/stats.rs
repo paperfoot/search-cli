@@ -39,7 +39,11 @@ pub struct ProviderStats {
     pub failures: u64,
     pub cancelled: u64,
     pub results_contributed: u64,
+    /// All spend: list-price estimates for your own keys plus what
+    /// metasearch.sh charged for hosted calls.
     pub estimated_spend_usd: f64,
+    /// The part of the spend metasearch.sh charged (real money, not an estimate).
+    pub charged_spend_usd: f64,
     /// Times an extract/scrape later ran on a URL this provider returned —
     /// the closest local proxy for "an agent found this result useful".
     pub result_read_through: u64,
@@ -54,6 +58,8 @@ pub struct StatsReport {
     pub by_mode: BTreeMap<String, u64>,
     pub by_provider: BTreeMap<String, ProviderStats>,
     pub estimated_total_spend_usd: f64,
+    /// Charged by metasearch.sh across the window.
+    pub charged_total_usd: f64,
     pub top_queries: Vec<(String, u64)>,
     /// Latest known balance per provider from `search usage` snapshots,
     /// with the change across the window (negative = burn).
@@ -149,6 +155,7 @@ fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> S
                 .map(|p| base_provider(p).to_string())
                 .collect();
             let logged_cost = e.pointer("/cost/by_provider").and_then(|c| c.as_object());
+            let transport = e.get("transport").and_then(|t| t.as_object());
             for p in str_array(e, "providers_queried") {
                 let base = base_provider(&p).to_string();
                 let spend = match logged_cost {
@@ -160,9 +167,15 @@ fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> S
                     None if failed.contains(&base) => 0.0,
                     None => legacy_cost_per_call(&base),
                 };
+                let hosted = transport
+                    .and_then(|t| t.get(&p))
+                    .is_some_and(|t| t == "hosted");
                 let stat = by_provider.entry(base).or_default();
                 stat.calls += 1;
                 stat.estimated_spend_usd += spend;
+                if hosted {
+                    stat.charged_spend_usd += spend;
+                }
             }
             for base in failed {
                 by_provider.entry(base).or_default().failures += 1;
@@ -196,6 +209,7 @@ fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> S
     }
 
     let estimated_total_spend_usd = by_provider.values().map(|p| p.estimated_spend_usd).sum();
+    let charged_total_usd = by_provider.values().map(|p| p.charged_spend_usd).sum();
 
     let mut top_queries: Vec<(String, u64)> = query_counts.into_iter().collect();
     top_queries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -214,6 +228,7 @@ fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> S
         by_mode,
         by_provider,
         estimated_total_spend_usd,
+        charged_total_usd,
         top_queries,
         balances: BTreeMap::new(),
         log_files_read,
@@ -343,8 +358,8 @@ pub fn render_human(r: &StatsReport) {
         );
     }
     println!(
-        "\nestimated total spend: ${:.2} (estimates; run `search usage` for real balances)",
-        r.estimated_total_spend_usd
+        "\ntotal spend: ${:.2}, of which ${:.2} charged by metasearch.sh (the rest are list-price estimates for your own keys; `search usage` shows real balances)",
+        r.estimated_total_spend_usd, r.charged_total_usd
     );
     if !r.balances.is_empty() {
         println!("\nbalances (from usage snapshots):");
@@ -392,5 +407,22 @@ mod tests {
         assert_eq!(r.by_provider["brave"].estimated_spend_usd, 0.0);
         assert_eq!(r.by_provider["brave"].failures, 1);
         assert_eq!(r.by_provider["serper"].calls, 2);
+        assert_eq!(r.charged_total_usd, 0.0);
+    }
+
+    #[test]
+    fn hosted_calls_count_as_charged() {
+        let entries = vec![serde_json::json!({
+            "ts": 1, "mode": "general", "query": "a", "cached": false,
+            "providers_queried": ["exa", "serper"],
+            "providers_failed": [],
+            "transport": {"exa": "hosted", "serper": "direct"},
+            "cost": {"by_provider": {"exa": 10500, "serper": 1000}},
+        })];
+        let r = summarize(&entries, 7, 1);
+        assert!((r.by_provider["exa"].charged_spend_usd - 0.0105).abs() < 1e-9);
+        assert_eq!(r.by_provider["serper"].charged_spend_usd, 0.0);
+        assert!((r.charged_total_usd - 0.0105).abs() < 1e-9);
+        assert!((r.estimated_total_spend_usd - 0.0115).abs() < 1e-9);
     }
 }

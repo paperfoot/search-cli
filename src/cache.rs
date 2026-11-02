@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CACHE_TTL_SECS: u64 = 300; // 5 minutes
 
-fn cache_dir() -> PathBuf {
+pub(crate) fn cache_dir() -> PathBuf {
     if let Some(proj) = ProjectDirs::from("", "", "search") {
         proj.cache_dir().to_path_buf()
     } else {
@@ -62,7 +62,7 @@ fn query_cache_path(query: &str, mode: &str) -> PathBuf {
 /// Write `bytes` to `path` via a temp file in the same directory and a rename,
 /// so a concurrent reader (parallel agents share the cache) sees either the
 /// old file or the new one, never a torn write.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;

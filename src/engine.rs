@@ -10,12 +10,13 @@
 //! `metadata.providers_timed_out`.
 
 use crate::context::AppContext;
-use crate::errors::SearchError;
-use crate::providers::{self, Adapter, Call, Output};
+use crate::errors::{redact_secrets, SearchError};
+use crate::hosted::{HostedAdapter, MetasearchClient, RerankItem, V1Manifest, RERANK_MAX};
+use crate::providers::{self, Adapter, Call, FilterSupport, Output, ProviderSpec};
 use crate::registry::{self, MergeKind};
 use crate::types::{
     Answer, CostSummary, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus,
-    SearchOpts, SearchResponse, SearchResult, ENVELOPE_VERSION,
+    Routing, SearchOpts, SearchResponse, SearchResult, Transport, ENVELOPE_VERSION,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -27,8 +28,34 @@ use tokio::task::JoinSet;
 /// provider's top pick.
 const RRF_K: f64 = 60.0;
 
+/// The metasearch.sh side of a run: the logged-in client and its manifest.
+pub struct Hosting {
+    pub client: Arc<MetasearchClient>,
+    /// `None` when the manifest could not be fetched and no copy is cached:
+    /// every provider is then offered for the modes it serves locally, and
+    /// the server answers 503 for any it does not.
+    pub manifest: Option<V1Manifest>,
+    /// `metasearch.max_providers`; default 3 per fused mode, deep 6.
+    pub max_providers: Option<u64>,
+    /// JEV rerank of fused results (off with `--no-rerank`).
+    pub rerank: bool,
+}
+
+impl Hosting {
+    /// Hosted fan-out cap for a fused mode without `-p`.
+    fn cap(&self, mode: Mode) -> usize {
+        match self.max_providers {
+            Some(n) => n.max(1) as usize,
+            None if mode == Mode::Deep => 6,
+            None => 3,
+        }
+    }
+}
+
 /// Main entry point (called by main.rs): run `mode` over the configured
-/// providers within the mode's deadline.
+/// providers within the mode's deadline. Each provider runs with your own key
+/// (direct), keyless on this machine (local), or through metasearch.sh when
+/// you are logged in and have no key for it (hosted).
 pub async fn run(
     ctx: Arc<AppContext>,
     query: &str,
@@ -36,6 +63,7 @@ pub async fn run(
     count: usize,
     only_providers: &Option<Vec<String>>,
     opts: &SearchOpts,
+    hosting: Option<&Hosting>,
 ) -> Result<SearchResponse, SearchError> {
     let request = Request {
         query,
@@ -44,8 +72,78 @@ pub async fn run(
         only: only_providers.as_deref(),
         opts,
         deadline: registry::spec(mode).deadline,
+        hosted_cap: hosting.map(|h| h.cap(mode)),
+        reranker: hosting.filter(|h| h.rerank).map(|h| h.client.as_ref()),
     };
-    execute_with(providers::build_providers(&ctx), &request).await
+    // Specs list extract, never its alias.
+    let served = match mode {
+        Mode::Scrape => Mode::Extract,
+        m => m,
+    };
+    let adapters = route(providers::build_providers(&ctx), served, hosting);
+    execute_with(adapters, &request).await
+}
+
+/// Swap every provider you have no key for, and that metasearch.sh offers in
+/// `mode`, for its hosted twin. Own keys always win (env > SEARCH_KEYS_* >
+/// file); keyless providers stay local.
+fn route(
+    adapters: Vec<Box<dyn Adapter>>,
+    mode: Mode,
+    hosting: Option<&Hosting>,
+) -> Vec<Box<dyn Adapter>> {
+    let Some(h) = hosting else {
+        return adapters;
+    };
+    adapters
+        .into_iter()
+        .map(|a| {
+            let spec = a.spec();
+            if a.is_configured() || spec.env_keys.is_empty() || !spec.modes.contains(&mode) {
+                return a;
+            }
+            match offer(h.manifest.as_ref(), spec, mode) {
+                Some((filters, max_count)) => Box::new(HostedAdapter {
+                    spec,
+                    client: h.client.clone(),
+                    filters,
+                    max_count,
+                }) as Box<dyn Adapter>,
+                None => a,
+            }
+        })
+        .collect()
+}
+
+/// What metasearch.sh offers for (provider, mode): its filters and count cap.
+fn offer(
+    manifest: Option<&V1Manifest>,
+    spec: &ProviderSpec,
+    mode: Mode,
+) -> Option<(Vec<String>, u16)> {
+    match manifest {
+        Some(m) => m.offer(spec.name, mode).map(|p| {
+            (
+                p.filters.clone(),
+                p.max_count.unwrap_or(spec.max_count).clamp(1, 20),
+            )
+        }),
+        None => {
+            let f = spec.filters;
+            let filters = [
+                (f.freshness, "freshness"),
+                (f.domains, "include_domains"),
+                (f.domains, "exclude_domains"),
+                (f.country, "country"),
+                (f.lang, "language"),
+            ]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| name.to_string())
+            .collect();
+            Some((filters, spec.max_count.clamp(1, 20)))
+        }
+    }
 }
 
 /// One search, independent of where adapters come from (tests pass fakes).
@@ -56,7 +154,26 @@ pub(crate) struct Request<'a> {
     pub only: Option<&'a [String]>,
     pub opts: &'a SearchOpts,
     pub deadline: Duration,
+    /// Most hosted providers a fused mode queries without `-p`.
+    pub hosted_cap: Option<usize>,
+    /// Rerank fused results through metasearch.sh (logged in, not `--no-rerank`).
+    pub reranker: Option<&'a MetasearchClient>,
 }
+
+/// True for modes whose fused results a logged-in run reranks.
+pub fn reranks(mode: Mode) -> bool {
+    RERANK_MODES.contains(&mode)
+}
+
+/// Modes whose results JEV may reorder (ROUTING.md "Rerank").
+const RERANK_MODES: &[Mode] = &[
+    Mode::General,
+    Mode::News,
+    Mode::Academic,
+    Mode::Scholar,
+    Mode::People,
+    Mode::Deep,
+];
 
 /// What one provider call produced.
 enum Outcome {
@@ -80,12 +197,36 @@ pub(crate) async fn execute_with(
         m => m,
     };
     let mode_spec = registry::spec(mode);
-    let plan = plan(adapters, mode, mode_spec.providers, req.only)?;
+    let mut plan = plan(adapters, mode, mode_spec.providers, req.only)?;
     if plan.is_empty() {
         return Err(no_providers_error(mode, req.only));
     }
+    let mut warnings: Vec<String> = Vec::new();
+    // Every hosted call is charged, so a fused mode without -p sends only the
+    // first few in registry order and names the rest.
+    if let (MergeKind::Fused, None, Some(cap)) = (mode_spec.merge, req.only, req.hosted_cap) {
+        let hosted: Vec<&'static str> = plan
+            .iter()
+            .filter(|a| a.transport() == Transport::Hosted)
+            .map(|a| a.name())
+            .collect();
+        if hosted.len() > cap {
+            let (kept, left) = hosted.split_at(cap);
+            plan.retain(|a| a.transport() != Transport::Hosted || kept.contains(&a.name()));
+            warnings.push(format!(
+                "hosted: queried {}; add -p to choose others (not queried: {})",
+                kept.join(", "),
+                left.join(", ")
+            ));
+        }
+    }
 
     let names: Vec<&'static str> = plan.iter().map(|a| a.name()).collect();
+    // The filters each call really sends (a hosted call: the manifest's list).
+    let applied: HashMap<&'static str, FilterSupport> = plan
+        .iter()
+        .map(|a| (a.name(), a.applied_filters(req.opts)))
+        .collect();
     // What a sent-but-unanswered call costs in this mode: billed providers
     // bill on send. Taken now, before the adapters move into their tasks.
     let sent_costs: HashMap<&'static str, u64> = plan
@@ -95,14 +236,7 @@ pub(crate) async fn execute_with(
         .collect();
     let mut transport: BTreeMap<String, String> = plan
         .iter()
-        .map(|a| {
-            let how = if a.spec().env_keys.is_empty() {
-                "local"
-            } else {
-                "direct"
-            };
-            (a.name().to_string(), how.to_string())
-        })
+        .map(|a| (a.name().to_string(), a.transport().as_str().to_string()))
         .collect();
 
     let mut outcomes: Vec<(&'static str, Outcome)> = match mode_spec.merge {
@@ -135,12 +269,12 @@ pub(crate) async fn execute_with(
                 buckets.push((name.to_string(), out.results));
             }
             Outcome::Rejected(f, out) => {
-                tracing::warn!("{name}: {}", f.reason);
+                tracing::warn!("{name}: {}", redact_secrets(&f.reason));
                 by_provider.insert(name.to_string(), answered_cost(&out));
                 failures.push(f);
             }
             Outcome::Failed(f) => {
-                tracing::warn!("{name}: {}", f.reason);
+                tracing::warn!("{name}: {}", redact_secrets(&f.reason));
                 if providers::billed_failure(f.category) {
                     if let Some(c) = sent_cost {
                         by_provider.insert(name.to_string(), c);
@@ -161,6 +295,15 @@ pub(crate) async fn execute_with(
 
     // A chain that stopped early never reached the rest.
     transport.retain(|name, _| queried.contains(name));
+    let cost = (!by_provider.is_empty()).then(|| {
+        let hosted = transport.values().filter(|t| *t == "hosted").count();
+        let basis = match hosted {
+            0 => "estimate",
+            n if n == transport.len() => "charged",
+            _ => "mixed",
+        };
+        CostSummary::with_basis(by_provider, basis)
+    });
 
     let provider_results: BTreeMap<String, usize> = buckets
         .iter()
@@ -177,7 +320,6 @@ pub(crate) async fn execute_with(
             buckets.into_iter().flat_map(|(_, items)| items).collect()
         }
     };
-    results.truncate(req.count);
 
     // Total failure is an error, not a success-shaped envelope. Zero results
     // with at least one clean answer is `no_results`.
@@ -186,8 +328,22 @@ pub(crate) async fn execute_with(
         && !failures.is_empty()
         && failures.len() == queried.len()
     {
-        return Err(SearchError::AllProvidersFailed { failed: failures });
+        return Err(SearchError::AllProvidersFailed {
+            failed: failures,
+            cost,
+        });
     }
+
+    // Rerank the fused pool once, before -c cuts it: a pinned single
+    // provider keeps its own order.
+    let pinned_to_one = req.only.is_some_and(|l| l.len() == 1);
+    let mut reranked = None;
+    if let Some(client) = req.reranker {
+        if RERANK_MODES.contains(&mode) && results.len() >= 3 && !pinned_to_one {
+            reranked = Some(rerank(client, req.query, &mut results).await);
+        }
+    }
+    results.truncate(req.count);
 
     if mode == Mode::Extract {
         // Scraped page content is untrusted input for the consuming agent —
@@ -216,7 +372,10 @@ pub(crate) async fn execute_with(
         metadata: ResponseMetadata {
             elapsed_ms: start.elapsed().as_millis(),
             result_count: results.len(),
-            warnings: filter_warnings(mode, &queried, req.opts),
+            warnings: {
+                warnings.extend(filter_warnings(mode, &queried, &applied, req.opts));
+                warnings
+            },
             providers_queried: queried,
             providers_failed,
             providers_cancelled: Vec::new(),
@@ -226,7 +385,12 @@ pub(crate) async fn execute_with(
             cache_age_secs: None,
             provider_failures: failures,
             transport,
-            cost: (!by_provider.is_empty()).then(|| CostSummary::estimate(by_provider)),
+            cost,
+            routing: reranked.map(|r| Routing {
+                auto: None,
+                reranked: Some(r),
+            }),
+            notes: Vec::new(),
         },
         results,
         answers,
@@ -288,11 +452,67 @@ fn per_call_count(adapter: &dyn Adapter, count: usize) -> u16 {
     (count.min(u16::MAX as usize) as u16).clamp(1, adapter.spec().max_count)
 }
 
+/// A direct call gets min(provider timeout, deadline left). A hosted call
+/// gets the whole deadline left: the server runs the provider under its own
+/// timeout and its deadline is 5 s shorter than ours.
 fn time_left(deadline: Instant, adapter: &dyn Adapter) -> Duration {
-    adapter
-        .spec()
-        .timeout
-        .min(deadline.saturating_duration_since(Instant::now()))
+    let left = deadline.saturating_duration_since(Instant::now());
+    match adapter.transport() {
+        Transport::Hosted => left,
+        _ => adapter.spec().timeout.min(left),
+    }
+}
+
+/// Reorder `results` by JEV relevance through metasearch.sh. Fail-open: on any
+/// failure the order stays and the answer is false.
+async fn rerank(client: &MetasearchClient, query: &str, results: &mut Vec<SearchResult>) -> bool {
+    let head = results.len().min(RERANK_MAX);
+    let items: Vec<RerankItem> = results[..head]
+        .iter()
+        .enumerate()
+        .map(|(i, r)| RerankItem {
+            id: format!("r{i}"),
+            title: r.title.clone(),
+            snippet: r.snippet.clone(),
+            url: r.url.clone(),
+        })
+        .collect();
+    let Some(answer) = client.rerank(query, &items).await else {
+        return false;
+    };
+    let mut pool: Vec<Option<SearchResult>> = results.drain(..head).map(Some).collect();
+    let mut ordered: Vec<(usize, SearchResult)> = Vec::with_capacity(head);
+    for id in &answer.order {
+        let i = id.strip_prefix('r').and_then(|n| n.parse::<usize>().ok());
+        if let Some((i, r)) = i.and_then(|i| pool.get_mut(i).and_then(Option::take).map(|r| (i, r)))
+        {
+            ordered.push((i, r));
+        }
+    }
+    // Anything the answer left out keeps its fused order, after the rest.
+    ordered.extend(
+        pool.into_iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|r| (i, r))),
+    );
+    let mut ordered: Vec<SearchResult> = ordered
+        .into_iter()
+        .map(|(i, mut r)| {
+            if let Some(p) = answer.relevance.get(&format!("r{i}")) {
+                let extra = r.extra.get_or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = extra.as_object_mut() {
+                    obj.insert(
+                        "relevance".to_string(),
+                        serde_json::json!((p.clamp(0.0, 1.0) * 100.0).round() / 100.0),
+                    );
+                }
+            }
+            r
+        })
+        .collect();
+    ordered.append(results);
+    *results = ordered;
+    true
 }
 
 async fn run_one(
@@ -326,16 +546,18 @@ async fn run_fused(
 ) -> Vec<(&'static str, Outcome)> {
     let mut set: JoinSet<(&'static str, Outcome)> = JoinSet::new();
     let mut pending: Vec<&'static str> = Vec::new();
+    let mut task_names: HashMap<tokio::task::Id, &'static str> = HashMap::new();
     for adapter in plan {
         let name = adapter.name();
         pending.push(name);
         let query = req.query.to_string();
         let opts = req.opts.clone();
         let count = req.count;
-        set.spawn(async move {
+        let handle = set.spawn(async move {
             let outcome = run_one(adapter.as_ref(), mode, &query, count, &opts, deadline).await;
             (name, outcome)
         });
+        task_names.insert(handle.id(), name);
     }
 
     let mut outcomes = Vec::new();
@@ -345,7 +567,24 @@ async fn run_fused(
                 pending.retain(|n| *n != name);
                 outcomes.push((name, outcome));
             }
-            Ok(Some(Err(e))) => tracing::error!("provider task failed: {e}"),
+            // A crashed adapter is a failure of that provider, not a timeout,
+            // and its cost is unknown, so nothing is charged for it.
+            Ok(Some(Err(e))) => {
+                if let Some(name) = task_names.get(&e.id()).copied() {
+                    pending.retain(|n| *n != name);
+                    outcomes.push((
+                        name,
+                        Outcome::Failed(ProviderFailure {
+                            provider: name.to_string(),
+                            category: FailureCategory::Other,
+                            http_status: None,
+                            code: "crashed".to_string(),
+                            reason: format!("{name} crashed inside the CLI"),
+                            retryable: false,
+                        }),
+                    ));
+                }
+            }
             Ok(None) => break,
             Err(_) => {
                 // Deadline: nothing more will be waited for.
@@ -507,7 +746,12 @@ fn fuse_rrf(buckets: Vec<(String, Vec<SearchResult>)>) -> Vec<SearchResult> {
 /// Honesty notes for filtered searches: one per queried provider that drops
 /// a requested filter, so filtered results stay auditable. Never excludes a
 /// provider — the caller decides whether unfiltered results are acceptable.
-fn filter_warnings(mode: Mode, queried: &[String], opts: &SearchOpts) -> Vec<String> {
+fn filter_warnings(
+    mode: Mode,
+    queried: &[String],
+    applied: &HashMap<&'static str, FilterSupport>,
+    opts: &SearchOpts,
+) -> Vec<String> {
     let wants_freshness = opts.freshness.is_some();
     let wants_domains = !opts.include_domains.is_empty() || !opts.exclude_domains.is_empty();
     let wants_country = opts.country.is_some();
@@ -522,7 +766,7 @@ fn filter_warnings(mode: Mode, queried: &[String], opts: &SearchOpts) -> Vec<Str
     }
     let mut warnings = Vec::new();
     for name in queried {
-        let Some(f) = providers::find(name).map(|s| s.filters) else {
+        let Some(f) = applied.get(name.as_str()).copied() else {
             continue;
         };
         let missing: Vec<&str> = [
@@ -540,7 +784,8 @@ fn filter_warnings(mode: Mode, queried: &[String], opts: &SearchOpts) -> Vec<Str
                 missing.join(" or ")
             ));
         }
-        if wants_domains {
+        // The caveat describes what happens to domains that were sent.
+        if wants_domains && f.domains {
             if let Some(note) = registry::filter_support(name).note {
                 warnings.push(note.to_string());
             }
@@ -737,6 +982,8 @@ mod tests {
             only,
             opts: &opts,
             deadline: Duration::from_millis(deadline_ms),
+            hosted_cap: None,
+            reranker: None,
         };
         execute_with(adapters, &req).await
     }
@@ -1179,13 +1426,48 @@ mod tests {
             country: Some("gb".into()),
             ..SearchOpts::default()
         };
-        let w = filter_warnings(Mode::General, &["jina".into(), "serper".into()], &opts);
+        let specs: HashMap<&'static str, FilterSupport> = providers::all()
+            .iter()
+            .map(|s| (s.name, s.filters))
+            .collect();
+        let w = filter_warnings(
+            Mode::General,
+            &["jina".into(), "serper".into()],
+            &specs,
+            &opts,
+        );
         assert_eq!(w.len(), 1);
         assert!(w[0].starts_with("jina does not apply -f freshness or --country"));
-        let w = filter_warnings(Mode::Places, &["serper".into()], &opts);
+        let w = filter_warnings(Mode::Places, &["serper".into()], &specs, &opts);
         assert!(w[0].contains("mode 'places' does not apply"));
-        assert!(
-            filter_warnings(Mode::General, &["jina".into()], &SearchOpts::default()).is_empty()
+        assert!(filter_warnings(
+            Mode::General,
+            &["jina".into()],
+            &specs,
+            &SearchOpts::default()
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn filter_warnings_follow_what_was_sent_not_the_spec() {
+        // xai deep through metasearch.sh: the manifest lists freshness only,
+        // so -d is dropped and the X-handle caveat would be false.
+        let opts = SearchOpts {
+            include_domains: vec!["nature.com".into()],
+            ..SearchOpts::default()
+        };
+        let sent = FilterSupport {
+            freshness: true,
+            domains: false,
+            country: false,
+            lang: false,
+        };
+        let applied = HashMap::from([("xai", sent)]);
+        let w = filter_warnings(Mode::Deep, &["xai".into()], &applied, &opts);
+        assert_eq!(
+            w,
+            vec!["xai does not apply -d/--exclude-domain; its results are unfiltered".to_string()]
         );
     }
 }

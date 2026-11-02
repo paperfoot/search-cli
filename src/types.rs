@@ -10,7 +10,7 @@ pub const ENVELOPE_VERSION: &str = "1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// Broad multi-provider web search, rank-fused. Default when no `-m` is given
+    /// Broad multi-provider web search, rank-fused
     General,
     /// News and current events (pair with -f day/week)
     News,
@@ -205,8 +205,9 @@ pub struct ResponseMetadata {
     /// `timeout` entry in `provider_failures`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers_timed_out: Vec<String>,
-    /// How each queried provider was reached: "direct" (own key) or "local"
-    /// (keyless, runs on this machine).
+    /// How each queried provider was reached: "direct" (own key), "local"
+    /// (keyless, runs on this machine) or "hosted" (through metasearch.sh,
+    /// charged to the account balance).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub transport: std::collections::BTreeMap<String, String>,
     /// What this search cost upstream, per provider.
@@ -228,6 +229,41 @@ pub struct ResponseMetadata {
     /// Per-provider failure detail (category, HTTP status, reason, retryable).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_failures: Vec<ProviderFailure>,
+    /// Automatic decisions: the mode `auto` resolved to, and whether results
+    /// were reranked. Absent when nothing was decided for the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Routing>,
+    /// Plain one-line notes for the caller (not problems; see `warnings`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+/// What the CLI decided on the caller's behalf (ROUTING.md).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Routing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<AutoDecision>,
+    /// True when JEV reordered the results (each then has `extra.relevance`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranked: Option<bool>,
+}
+
+/// How `auto` resolved. `source`: "rule" (a decisive pattern), "jev"
+/// (metasearch.sh's model), "heuristic" (a local signal pattern) or
+/// "fallback" (nothing matched: general).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoDecision {
+    pub mode: String,
+    pub source: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probabilities: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters_applied: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
 }
 
 /// Cost of one search in micro-USD (1 USD = 1,000,000).
@@ -242,14 +278,34 @@ pub struct CostSummary {
 }
 
 impl CostSummary {
-    /// Estimated cost from per-provider micro-USD amounts.
-    pub fn estimate(by_provider: std::collections::BTreeMap<String, u64>) -> Self {
+    pub fn with_basis(by_provider: std::collections::BTreeMap<String, u64>, basis: &str) -> Self {
         let micros = by_provider.values().sum();
         Self {
             micros,
             usd: micros as f64 / 1_000_000.0,
-            basis: "estimate".to_string(),
+            basis: basis.to_string(),
             by_provider,
+        }
+    }
+}
+
+/// How a provider call reaches its upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// Your own key, straight to the provider.
+    Direct,
+    /// Keyless, runs on this machine.
+    Local,
+    /// Through metasearch.sh, charged to your balance.
+    Hosted,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Local => "local",
+            Self::Hosted => "hosted",
         }
     }
 }
@@ -284,6 +340,9 @@ pub struct ErrorDetail {
     /// same per-provider detail the success envelope would.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_failures: Vec<ProviderFailure>,
+    /// What the failed run still cost (billed timeouts, rejected pages).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostSummary>,
 }
 
 #[cfg(test)]

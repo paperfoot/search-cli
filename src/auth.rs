@@ -4,11 +4,14 @@
 //! `search login` asks the server for a pair of codes, opens the browser at
 //! the short one, and polls until the human approves. What comes back is a
 //! normal `ms_live_…` API key, stored in the same 0600 config file as the
-//! per-provider keys. Nothing here changes how searches are dispatched — the
-//! key is credentials only.
+//! per-provider keys. From then on, engines without your own key run through
+//! metasearch.sh (see `hosted.rs`). Every call here goes through
+//! `MetasearchClient`, so the host guard runs for login, whoami and revoke.
 
 use crate::config::{config_set, config_unset, AppConfig};
+use crate::context::AppContext;
 use crate::errors::SearchError;
+use crate::hosted::MetasearchClient;
 use crate::output::Ctx;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -20,12 +23,9 @@ pub const DEFAULT_BASE_URL: &str = "https://metasearch.sh";
 const MAX_WAIT: Duration = Duration::from_secs(900);
 const MIN_INTERVAL_SECS: u64 = 2;
 /// Consecutive transport errors tolerated while polling before giving up.
+/// (Every call has a 15 s cap, `hosted::ACCOUNT_TIMEOUT`; a timed-out poll
+/// counts as a transport failure and is retried.)
 const MAX_TRANSPORT_FAILURES: u32 = 10;
-/// Whole-request cap for every metasearch.sh call made here. The shared
-/// client has only a connect timeout and a 90 s read backstop, sized for
-/// slow upstream searches; a stalled login server must fail in seconds.
-/// A timed-out device poll counts as a transport failure and is retried.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Deserialize)]
 struct DeviceCodeResponse {
@@ -55,26 +55,6 @@ struct ErrorResponse {
     error: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Identity {
-    #[serde(default)]
-    pub email: Option<String>,
-    #[serde(default)]
-    pub balance_usd: f64,
-    #[serde(default)]
-    pub key: IdentityKey,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct IdentityKey {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub prefix: Option<String>,
-    #[serde(default)]
-    pub last_used_at: Option<String>,
-}
-
 /// Account base URL: `METASEARCH_URL` > config > metasearch.sh.
 pub fn resolve_base_url(config: &AppConfig) -> String {
     if let Ok(v) = std::env::var("METASEARCH_URL") {
@@ -102,7 +82,7 @@ const OVERRIDE_VAR: &str = "METASEARCH_ALLOW_INSECURE_HOST";
 /// `--url` — and the next login delivers the key to whoever asked. Anything
 /// but the known hosts now needs deliberate consent, and plain http is
 /// refused outright: a bearer token must not cross the wire in clear.
-fn assert_login_host_allowed(base: &str) -> Result<(), SearchError> {
+pub(crate) fn assert_login_host_allowed(base: &str) -> Result<(), SearchError> {
     let parsed = url::Url::parse(base)
         .map_err(|e| SearchError::Config(format!("'{base}' is not a valid URL: {e}")))?;
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
@@ -198,8 +178,7 @@ fn open_browser(url: &str) -> bool {
 
 /// `search login` — device flow, then persist the key.
 pub async fn login(
-    config: &AppConfig,
-    client: &reqwest::Client,
+    app: &AppContext,
     ctx: &Ctx,
     url_override: Option<String>,
     no_browser: bool,
@@ -208,21 +187,20 @@ pub async fn login(
 
     let base = match url_override {
         Some(u) => u.trim_end_matches('/').to_string(),
-        None => resolve_base_url(config),
+        None => resolve_base_url(&app.config),
     };
-    assert_login_host_allowed(&base)?;
+    let account = MetasearchClient::with_base(app.client.clone(), base.clone(), String::new())?;
 
-    let start = client
-        .post(format!("{base}/api/v1/device/code"))
+    let start = account
+        .post_anonymous("/api/v1/device/code")
         .json(&serde_json::json!({
             "client_name": "search-cli",
             "client_version": env!("CARGO_PKG_VERSION"),
             "hostname": hostname(),
         }))
-        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
-        .map_err(|e| api_error(format!("could not reach {base}: {e}")))?;
+        .map_err(|e| api_error(format!("could not reach {base}: {}", e.without_url())))?;
 
     if !start.status().is_success() {
         return Err(api_error(format!(
@@ -279,10 +257,9 @@ pub async fn login(
         // A poll can span minutes of idle time, so dropped keep-alive
         // connections, sleeping laptops, and wifi blips are all expected.
         // Keep waiting through them; only a persistent outage aborts.
-        let resp = match client
-            .post(format!("{base}/api/v1/device/token"))
+        let resp = match account
+            .post_anonymous("/api/v1/device/token")
             .json(&serde_json::json!({ "device_code": start.device_code }))
-            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
         {
@@ -293,7 +270,10 @@ pub async fn login(
             Err(e) => {
                 transport_failures += 1;
                 if transport_failures > MAX_TRANSPORT_FAILURES {
-                    return Err(api_error(format!("lost contact with {base}: {e}")));
+                    return Err(api_error(format!(
+                        "lost contact with {base}: {}",
+                        e.without_url()
+                    )));
                 }
                 continue;
             }
@@ -349,41 +329,30 @@ pub async fn login(
         }));
     } else if !ctx.suppress_human() {
         println!(
-            "\n  {} logged in as {}",
+            "\n  {} Logged in as {}. Engines without your own key now go through",
             "✓".green().bold(),
             token.email.as_deref().unwrap_or("unknown").bold()
         );
-        println!("  key      {}…", token.key_prefix.dimmed());
         println!(
-            "  balance  {}",
+            "  metasearch.sh and are charged to your balance ({}). Each result's cost",
             format!("${:.2}", token.balance_usd).green()
         );
+        println!("  is in metadata.cost.");
+        println!("\n  key      {}…", token.key_prefix.dimmed());
         println!(
-            "  config   {}",
+            "  config   {}\n",
             crate::config::config_path().display().to_string().dimmed()
         );
-        // Say it here rather than let someone find out at their first search:
-        // this release stores the credential, it does not route through it.
-        println!(
-            "\n  {} searches still use your own provider keys. Routing them",
-            "note".yellow()
-        );
-        println!("       through metasearch.sh lands in the next release.\n");
     }
 
     Ok(0)
 }
 
 /// `search logout` — drop the stored key, optionally revoking it server-side.
-pub async fn logout(
-    config: &AppConfig,
-    client: &reqwest::Client,
-    ctx: &Ctx,
-    revoke: bool,
-) -> Result<i32, SearchError> {
+pub async fn logout(app: &AppContext, ctx: &Ctx, revoke: bool) -> Result<i32, SearchError> {
     use owo_colors::OwoColorize;
 
-    let token = resolve_token(config);
+    let token = resolve_token(&app.config);
     if token.is_empty() {
         if ctx.is_json() {
             crate::output::json::render_value(&serde_json::json!({
@@ -400,14 +369,11 @@ pub async fn logout(
 
     let mut revoked = false;
     if revoke {
-        let base = resolve_base_url(config);
-        let resp = client
-            .delete(format!("{base}/api/v1/me"))
-            .bearer_auth(&token)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await;
-        revoked = matches!(resp, Ok(r) if r.status().is_success());
+        // The guard runs before the token goes anywhere; a refused host
+        // leaves the local credentials in place for the user to sort out.
+        if let Some(account) = MetasearchClient::new(app)? {
+            revoked = account.revoke().await;
+        }
     }
 
     // Always clear locally, even when revocation failed — leaving a key the
@@ -438,42 +404,16 @@ pub async fn logout(
 }
 
 /// `search whoami` — ask the server who the stored key belongs to.
-pub async fn whoami(
-    config: &AppConfig,
-    client: &reqwest::Client,
-    ctx: &Ctx,
-) -> Result<i32, SearchError> {
+pub async fn whoami(app: &AppContext, ctx: &Ctx) -> Result<i32, SearchError> {
     use owo_colors::OwoColorize;
 
-    let token = resolve_token(config);
-    if token.is_empty() {
+    let Some(account) = MetasearchClient::new(app)? else {
         return Err(SearchError::Config(
             "not logged in — run `search login`".to_string(),
         ));
-    }
-
-    let base = resolve_base_url(config);
-    let resp = client
-        .get(format!("{base}/api/v1/me"))
-        .bearer_auth(&token)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| api_error(format!("could not reach {base}: {e}")))?;
-
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(SearchError::Config(
-            "stored key is not valid — run `search login` again".to_string(),
-        ));
-    }
-    if !resp.status().is_success() {
-        return Err(api_error(format!("HTTP {}", resp.status().as_u16())));
-    }
-
-    let me: Identity = resp
-        .json()
-        .await
-        .map_err(|e| api_error(format!("malformed response: {e}")))?;
+    };
+    let base = account.base().to_string();
+    let me = account.me().await?;
 
     if ctx.is_json() {
         crate::output::json::render_value(&serde_json::json!({
@@ -485,6 +425,8 @@ pub async fn whoami(
                 "key_name": me.key.name,
                 "key_prefix": me.key.prefix,
                 "last_used_at": me.key.last_used_at,
+                "daily_cap_usd": me.key.daily_cap_usd,
+                "spent_today_usd": me.key.spent_today_usd,
                 "url": base,
             },
         }));

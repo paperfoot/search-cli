@@ -4,7 +4,7 @@
 //! sent to metasearch.sh instead of the upstream.
 
 use crate::errors::SearchError;
-use crate::types::{Answer, FailureCategory, Mode, SearchOpts, SearchResult};
+use crate::types::{Answer, FailureCategory, Mode, SearchOpts, SearchResult, Transport};
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -88,11 +88,23 @@ pub trait Adapter: Send + Sync {
     fn sent_cost(&self, _mode: Mode) -> u64 {
         self.spec().price.estimate(0)
     }
+    /// How this adapter reaches its upstream: own key (direct), keyless on
+    /// this machine (local); the hosted adapter overrides it.
+    fn transport(&self) -> Transport {
+        if self.spec().env_keys.is_empty() {
+            Transport::Local
+        } else {
+            Transport::Direct
+        }
+    }
+    /// Which of the caller's filters this adapter actually sends for `opts`;
+    /// the engine warns about every requested filter left out. Direct calls
+    /// follow the spec; the hosted adapter follows metasearch.sh's manifest.
+    fn applied_filters(&self, _opts: &SearchOpts) -> FilterSupport {
+        self.spec().filters
+    }
     fn name(&self) -> &'static str {
         self.spec().name
-    }
-    fn env_keys(&self) -> &'static [&'static str] {
-        self.spec().env_keys
     }
     fn capabilities(&self) -> Vec<&'static str> {
         self.spec().modes.iter().map(|m| mode_str(*m)).collect()

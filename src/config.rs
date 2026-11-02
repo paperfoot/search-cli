@@ -31,6 +31,40 @@ pub struct Metasearch {
     /// Override the API host (self-host or local dev). Empty = metasearch.sh.
     #[serde(default)]
     pub url: String,
+    /// Most providers one fused search sends through metasearch.sh without
+    /// `-p` (default 3, deep 6). Each hosted call is charged.
+    #[serde(
+        default,
+        deserialize_with = "de_opt_num",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_providers: Option<u64>,
+}
+
+/// An integer, or a string holding one: versions before 0.10 could save
+/// `settings.timeout = "30"`, which used to stop every command from loading.
+fn de_num<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Num {
+        Int(u64),
+        Text(String),
+    }
+    match Num::deserialize(d)? {
+        Num::Int(n) => Ok(n),
+        Num::Text(t) => t
+            .trim()
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format!("expected a number, got '{t}'"))),
+    }
+}
+
+fn de_opt_num<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    de_num(d).map(Some)
+}
+
+fn de_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+    de_num(d).map(|n| n as usize)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,15 +120,12 @@ impl ApiKeys {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    #[serde(default = "default_timeout")]
-    pub timeout: u64,
-    #[serde(default = "default_count")]
+    // `timeout` is gone since 0.10 (every call is bounded by its mode
+    // deadline); an old file's `timeout = ...` is ignored, whatever its type.
+    #[serde(default = "default_count", deserialize_with = "de_count")]
     pub count: usize,
 }
 
-fn default_timeout() -> u64 {
-    10
-}
 fn default_count() -> usize {
     10
 }
@@ -117,7 +148,6 @@ impl Default for AppConfig {
                 xai: String::new(),
             },
             settings: Settings {
-                timeout: default_timeout(),
                 count: default_count(),
             },
             metasearch: Metasearch::default(),
@@ -186,10 +216,10 @@ fn effective_keys(config: &AppConfig) -> Vec<(&'static crate::providers::Provide
 }
 
 /// Valid setting names for `config set settings.<name>`.
-pub const SETTING_KEYS: &[&str] = &["timeout", "count"];
+pub const SETTING_KEYS: &[&str] = &["count"];
 
 /// Valid field names for `config set metasearch.<name>`.
-pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
+pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url", "max_providers"];
 
 pub fn mask_key(key: &str) -> String {
     // Char-based: byte-slicing (`&key[..2]`) panics on multi-byte UTF-8 and
@@ -252,16 +282,10 @@ pub fn config_show(config: &AppConfig) {
     if c {
         println!(
             "    {:<10} {}",
-            "timeout".white(),
-            format!("{}s", config.settings.timeout).cyan()
-        );
-        println!(
-            "    {:<10} {}",
             "count".white(),
             config.settings.count.to_string().cyan()
         );
     } else {
-        println!("  timeout  = {}s", config.settings.timeout);
         println!("  count    = {}", config.settings.count);
     }
 
@@ -339,7 +363,18 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
                             METASEARCH_KEYS.join(", ")
                         )));
                     }
-                    toml::Value::String(value.to_string())
+                    if *name == "max_providers" {
+                        match value.parse::<u64>() {
+                            Ok(n) if (1..=8).contains(&n) => toml::Value::Integer(n as i64),
+                            _ => {
+                                return Err(SearchError::Config(format!(
+                                    "metasearch.max_providers must be 1-8, got '{value}'"
+                                )))
+                            }
+                        }
+                    } else {
+                        toml::Value::String(value.to_string())
+                    }
                 }
                 other => {
                     return Err(SearchError::Config(format!(
@@ -366,7 +401,7 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
         }
         _ => {
             return Err(SearchError::Config(format!(
-                "Invalid key '{key}'. Use a dotted form like 'keys.brave' or 'settings.timeout'."
+                "Invalid key '{key}'. Use a dotted form like 'keys.brave' or 'settings.count'."
             )));
         }
     }
@@ -424,7 +459,7 @@ fn write_config_atomic(path: &std::path::Path, doc: &toml::Table) -> Result<(), 
 /// `count` are integers; writing them as strings breaks deserialization.
 fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
     match name {
-        "timeout" | "count" => {
+        "count" => {
             let n: u64 = value.parse().map_err(|_| {
                 SearchError::Config(format!(
                     "settings.{name} must be a non-negative integer, got '{value}'"
@@ -526,14 +561,29 @@ mod tests {
     #[test]
     fn parse_setting_coerces_integers_and_rejects_bad_input() {
         assert!(matches!(
-            parse_setting("timeout", "30"),
-            Ok(toml::Value::Integer(30))
-        ));
-        assert!(matches!(
             parse_setting("count", "5"),
             Ok(toml::Value::Integer(5))
         ));
-        assert!(parse_setting("timeout", "abc").is_err());
+        assert!(parse_setting("count", "abc").is_err());
+        // Nothing reads settings.timeout any more.
+        assert!(parse_setting("timeout", "30").is_err());
         assert!(parse_setting("unknown_setting", "1").is_err());
+    }
+
+    /// Old versions wrote numbers as strings; loading must coerce, not fail.
+    #[test]
+    fn numeric_strings_from_old_versions_load() {
+        use figment::providers::Format;
+        let cfg: super::AppConfig = figment::Figment::new()
+            .merge(figment::providers::Serialized::defaults(
+                super::AppConfig::default(),
+            ))
+            .merge(figment::providers::Toml::string(
+                "[settings]\ntimeout = \"30\"\ncount = \"7\"\n[metasearch]\nmax_providers = \"4\"\n",
+            ))
+            .extract()
+            .unwrap();
+        assert_eq!(cfg.settings.count, 7);
+        assert_eq!(cfg.metasearch.max_providers, Some(4));
     }
 }

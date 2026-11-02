@@ -109,12 +109,26 @@ fn test_agent_info_json() {
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["name"], "search");
-    assert!(json["modes"].as_array().unwrap().len() >= 13);
+    // scrape is an alias of extract and is not listed twice.
+    assert!(json["modes"].as_array().unwrap().len() >= 12);
     assert!(json["providers"].as_array().unwrap().len() >= 5);
     assert_eq!(json["config"]["env_prefix"], "SEARCH_");
     assert_eq!(json["auto_json_when_piped"], true);
-    assert!(json["command_schemas"].is_object());
+    assert!(json["commands"].is_object());
     assert!(json["exit_codes"].is_object());
+    assert!(json["routing"].as_str().unwrap().contains("auto"));
+    for p in json["providers"].as_array().unwrap() {
+        assert!(
+            p["transport"].is_string() && p["usd_per_call"].is_number(),
+            "{p}"
+        );
+    }
+    // About half of the 0.9 manifest (21 KB): agents pay for every byte.
+    assert!(
+        output.stdout.len() < 13_000,
+        "{} bytes",
+        output.stdout.len()
+    );
 }
 
 #[test]
@@ -157,8 +171,8 @@ fn test_config_show() {
         .args(["config", "show"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("timeout"))
-        .stdout(predicate::str::contains("count"));
+        .stdout(predicate::str::contains("count"))
+        .stdout(predicate::str::contains("metasearch"));
 }
 
 /// The JSON-mode stream contract: one JSON document on stdout even on error,

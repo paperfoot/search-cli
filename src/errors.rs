@@ -1,5 +1,5 @@
 use crate::types::{
-    ErrorDetail, ErrorResponse, FailureCategory, ProviderFailure, ENVELOPE_VERSION,
+    CostSummary, ErrorDetail, ErrorResponse, FailureCategory, ProviderFailure, ENVELOPE_VERSION,
 };
 use thiserror::Error;
 
@@ -36,8 +36,13 @@ pub enum SearchError {
     #[error("Invalid input: {message}")]
     InvalidInput { message: String },
 
+    /// Every queried provider failed. `cost` still counts calls that were
+    /// billed anyway (a timed-out or rejected call is paid for).
     #[error("all {} provider(s) failed", .failed.len())]
-    AllProvidersFailed { failed: Vec<ProviderFailure> },
+    AllProvidersFailed {
+        failed: Vec<ProviderFailure>,
+        cost: Option<CostSummary>,
+    },
 
     #[error("DNS resolver error: {0}")]
     Resolver(String),
@@ -61,7 +66,7 @@ impl SearchError {
         match self {
             Self::Config(_) | Self::NoProviders(_) | Self::AuthMissing { .. } => 2,
             Self::InvalidInput { .. } => 3,
-            Self::AllProvidersFailed { failed } => exit_code_for_failures(failed),
+            Self::AllProvidersFailed { failed, .. } => exit_code_for_failures(failed),
             #[cfg(feature = "stealth")]
             Self::Wreq(_) => 1,
             Self::Api { .. } | Self::Upstream { .. } | Self::Http(_) | Self::Resolver(_) => 1,
@@ -72,7 +77,18 @@ impl SearchError {
     pub fn error_code(&self) -> &'static str {
         match self {
             Self::Api { code, .. } => code,
-            Self::Upstream { .. } => "api_error",
+            // The code follows the cause, so a 429 reads "rate_limited"
+            // again instead of a generic "api_error" for every non-2xx.
+            Self::Upstream { category, .. } => match category {
+                FailureCategory::Auth => "auth_failed",
+                FailureCategory::BillingQuota => "insufficient_credits",
+                FailureCategory::RateLimit => "rate_limited",
+                FailureCategory::Timeout => "timeout",
+                FailureCategory::Server => "server_error",
+                FailureCategory::BadRequest => "bad_request",
+                FailureCategory::Parse => "parse_error",
+                _ => "api_error",
+            },
             Self::AuthMissing { .. } => "auth_missing",
             Self::Config(_) => "config_error",
             Self::NoProviders(_) => "no_providers",
@@ -156,11 +172,10 @@ impl SearchError {
                 provider
             )),
             Self::NoProviders(mode) => Some(format!(
-                "No providers configured for mode '{}'. Run: search config check",
-                mode
+                "No provider can serve mode '{mode}'. Run `search login` to use any engine on metasearch.sh credit, or add a key (search config check)"
             )),
             Self::InvalidInput { .. } => Some("Check arguments with: search --help".to_string()),
-            Self::AllProvidersFailed { failed } => Some(suggestion_for_failures(failed)),
+            Self::AllProvidersFailed { failed, .. } => Some(suggestion_for_failures(failed)),
             Self::Resolver(_) => Some(
                 "DNS resolver could not be initialized. Check /etc/resolv.conf or network config."
                     .to_string(),
@@ -170,9 +185,9 @@ impl SearchError {
     }
 
     pub fn to_error_response(&self) -> ErrorResponse {
-        let provider_failures = match self {
-            Self::AllProvidersFailed { failed } => failed.clone(),
-            _ => Vec::new(),
+        let (provider_failures, cost) = match self {
+            Self::AllProvidersFailed { failed, cost } => (failed.clone(), cost.clone()),
+            _ => (Vec::new(), None),
         };
         ErrorResponse {
             version: ENVELOPE_VERSION.to_string(),
@@ -182,6 +197,7 @@ impl SearchError {
                 message: redact_secrets(&self.to_string()),
                 suggestion: self.suggestion(),
                 provider_failures,
+                cost,
             },
         }
     }
@@ -210,7 +226,6 @@ pub fn classify_body(status: u16, body: &str) -> Option<FailureCategory> {
         return None;
     }
     let b = message_text(body).to_ascii_lowercase();
-    const BILLING: &[&str] = &["quota", "credits", "funds", "insufficient", "balance"];
     if BILLING.iter().any(|w| b.contains(w)) {
         return Some(FailureCategory::BillingQuota);
     }
@@ -218,6 +233,15 @@ pub fn classify_body(status: u16, body: &str) -> Option<FailureCategory> {
         return Some(FailureCategory::Auth);
     }
     None
+}
+
+const BILLING: &[&str] = &["quota", "credits", "funds", "insufficient", "balance"];
+
+/// True when an error body's message text talks about quota or credit, at
+/// any status: such an answer is never worth re-sending, even as a 503.
+pub fn quota_text(body: &str) -> bool {
+    let b = message_text(body).to_ascii_lowercase();
+    BILLING.iter().any(|w| b.contains(w))
 }
 
 /// The human-readable part of an error body: every string value of a JSON
@@ -281,11 +305,42 @@ pub fn category_for_status(status: u16) -> FailureCategory {
     }
 }
 
-/// Scrub credential values from user-visible strings. Transport errors can
-/// embed full request URLs (SerpApi authenticates via `?api_key=` in the
-/// query string), and provider error bodies sometimes echo the caller's key.
+/// Secret values known to this process (provider keys, the metasearch.sh
+/// token), registered once at startup so an upstream that echoes a key back
+/// in any shape is still scrubbed.
+static KNOWN_SECRETS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+pub fn register_secrets(values: impl IntoIterator<Item = String>) {
+    let list: Vec<String> = values.into_iter().filter(|v| v.len() >= 8).collect();
+    let _ = KNOWN_SECRETS.set(list);
+}
+
+/// Prefixes of credential formats the CLI handles; a word that starts with
+/// one is a key whatever the surrounding text says.
+const KEY_PREFIXES: &[&str] = &[
+    "ms_live_", "ms_test_", "sk-", "tvly-", "xai-", "fc-", "pplx-", "jina_", "lsv2_", "BSA",
+];
+
+/// Scrub credential values from user-visible strings: the one redaction every
+/// error string goes through (envelopes, tracing warnings, doctor, usage,
+/// hosted). Covers `api_key=`-style query and body parameters, `Bearer`
+/// tokens, words in a known key format, and every key registered at startup.
 pub fn redact_secrets(s: &str) -> String {
-    const MARKERS: &[&str] = &["api_key=", "apikey=", "apiKey=", "token=", "key="];
+    let mut out = redact_markers(s);
+    if let Some(known) = KNOWN_SECRETS.get() {
+        for k in known {
+            if out.contains(k.as_str()) {
+                out = out.replace(k.as_str(), "REDACTED");
+            }
+        }
+    }
+    redact_words(&out)
+}
+
+fn redact_markers(s: &str) -> String {
+    const MARKERS: &[&str] = &[
+        "api_key=", "apikey=", "apiKey=", "token=", "key=", "Bearer ", "bearer ",
+    ];
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     // Earliest marker wins each pass; ties resolve to the longer marker so
@@ -298,12 +353,38 @@ pub fn redact_secrets(s: &str) -> String {
         out.push_str(&rest[..pos + mlen]);
         let value = &rest[pos + mlen..];
         let end = value
-            .find(['&', ' ', '"', '\'', '\n'])
+            .find(['&', ' ', '"', '\'', '\n', ',', ';'])
             .unwrap_or(value.len());
-        out.push_str("REDACTED");
+        if end > 0 {
+            out.push_str("REDACTED");
+        }
         rest = &value[end..];
     }
     out.push_str(rest);
+    out
+}
+
+fn redact_words(s: &str) -> String {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mut out = String::with_capacity(s.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        let secret = word.len() >= 16
+            && KEY_PREFIXES
+                .iter()
+                .any(|p| word.starts_with(p) && word.len() > p.len() + 8);
+        out.push_str(if secret { "REDACTED" } else { word.as_str() });
+        word.clear();
+    };
+    for c in s.chars() {
+        if is_word(c) {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
     out
 }
 
@@ -357,6 +438,36 @@ mod tests {
             "body: {\"token=REDACTED def\"}"
         );
         assert_eq!(redact_secrets("no secrets here"), "no secrets here");
+        assert_eq!(
+            redact_secrets("Authorization: Bearer ms_live_abcdef123456 sent"),
+            "Authorization: Bearer REDACTED sent"
+        );
+        assert_eq!(
+            redact_secrets("key ms_live_0123456789abcdef was revoked"),
+            "key REDACTED was revoked"
+        );
+        assert_eq!(
+            redact_secrets("bad tvly-dev-AbCdEf0123456789xyz!"),
+            "bad REDACTED!"
+        );
+        // Short look-alikes stay: "sk-learn" is a library, not a key.
+        assert_eq!(redact_secrets("use sk-learn"), "use sk-learn");
+    }
+
+    #[test]
+    fn upstream_code_follows_category() {
+        let e = |category| SearchError::Upstream {
+            provider: "x",
+            status: 429,
+            category,
+            message: "m".into(),
+        };
+        assert_eq!(e(FailureCategory::RateLimit).error_code(), "rate_limited");
+        assert_eq!(e(FailureCategory::Auth).error_code(), "auth_failed");
+        assert_eq!(
+            e(FailureCategory::BillingQuota).error_code(),
+            "insufficient_credits"
+        );
     }
 
     fn api(status: u16) -> SearchError {
@@ -391,12 +502,20 @@ mod tests {
     fn all_providers_failed_exit_code_reflects_cause() {
         let auth = vec![api(401).to_provider_failure("a")];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed: auth }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed: auth,
+                cost: None
+            }
+            .exit_code(),
             2
         );
         let rate = vec![api(429).to_provider_failure("a")];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed: rate }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed: rate,
+                cost: None
+            }
+            .exit_code(),
             4
         );
         let mixed = vec![
@@ -404,7 +523,11 @@ mod tests {
             api(401).to_provider_failure("b"),
         ];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed: mixed }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed: mixed,
+                cost: None
+            }
+            .exit_code(),
             1
         );
     }
@@ -449,7 +572,10 @@ mod tests {
             message: "m".into(),
         }
         .to_provider_failure("brave")];
-        assert_eq!(SearchError::AllProvidersFailed { failed }.exit_code(), 4);
+        assert_eq!(
+            SearchError::AllProvidersFailed { failed, cost: None }.exit_code(),
+            4
+        );
         // A key named like a credential is not an auth message either.
         assert_eq!(
             classify_http(None, 400, r#"{"invalid_token_count":0,"detail":"bad q"}"#),
