@@ -19,6 +19,37 @@ pub struct Hit {
     pub query: Option<String>,
 }
 
+/// An explicit `-p` is obeyed exactly (ROUTING.md principle 1), so auto
+/// never resolves to a mode the pinned providers cannot serve: when one of
+/// them cannot serve `mode` and all of them serve general, general it is,
+/// reported as a fallback (the server does the same). `None` keeps `mode`.
+pub fn fit_pinned(mode: Mode, pinned: &[String]) -> Option<AutoDecision> {
+    let specs: Vec<_> = pinned
+        .iter()
+        .filter_map(|p| crate::providers::find(p))
+        .collect();
+    let cannot: Vec<&str> = specs
+        .iter()
+        .filter(|s| !s.modes.contains(&mode))
+        .map(|s| s.name)
+        .collect();
+    if cannot.is_empty() || !specs.iter().all(|s| s.modes.contains(&Mode::General)) {
+        return None;
+    }
+    Some(AutoDecision {
+        mode: Mode::General.to_string(),
+        source: "fallback".to_string(),
+        reason: format!(
+            "{} cannot serve {mode}, so general was used.",
+            cannot.join(", ")
+        ),
+        probabilities: None,
+        filters_applied: None,
+        model: None,
+        latency_ms: None,
+    })
+}
+
 /// Rules 1-5. The first match decides.
 pub fn decisive(query: &str) -> Option<Hit> {
     let q = query.trim();
@@ -371,6 +402,25 @@ mod tests {
     fn local(q: &str) -> (String, String) {
         let (d, _) = resolve_local(q);
         (d.mode, d.source)
+    }
+
+    #[test]
+    fn pinned_providers_keep_auto_to_modes_they_serve() {
+        let p = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let d = fit_pinned(Mode::Academic, &p(&["brave"])).expect("brave has no academic");
+        assert_eq!(
+            (d.mode.as_str(), d.source.as_str()),
+            ("general", "fallback")
+        );
+        assert_eq!(
+            d.reason,
+            "brave cannot serve academic, so general was used."
+        );
+        assert!(fit_pinned(Mode::Places, &p(&["exa"])).is_some());
+        assert!(fit_pinned(Mode::People, &p(&["serper"])).is_some());
+        // A mode every pinned provider serves stays; so does general itself.
+        assert!(fit_pinned(Mode::Places, &p(&["serper"])).is_none());
+        assert!(fit_pinned(Mode::General, &p(&["exa"])).is_none());
     }
 
     /// Mirrors the server's vectors: (query, mode, source) without JEV.

@@ -587,7 +587,17 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         query = q;
                     }
                     let mode = router::auto_mode(&decision.mode).unwrap_or(types::Mode::General);
-                    (mode, Some(decision))
+                    match args
+                        .providers
+                        .as_deref()
+                        .and_then(|pinned| router::fit_pinned(mode, pinned))
+                    {
+                        Some(fallback) => {
+                            query = args.query.clone();
+                            (types::Mode::General, Some(fallback))
+                        }
+                        None => (mode, Some(decision)),
+                    }
                 }
             };
             let mut auto = auto;

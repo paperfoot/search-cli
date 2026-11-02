@@ -523,6 +523,47 @@ fn route_failure_falls_back_to_local_signal_rules() {
 }
 
 #[test]
+fn auto_never_picks_a_mode_the_pinned_provider_cannot_serve() {
+    // /route says news; exa serves no news, so auto falls back to general
+    // instead of failing a search that ran before auto existed.
+    let mock = start(
+        "pinnedauto",
+        Arc::new(|req: &Req, i| match req.path.as_str() {
+            "/api/v1/route" => Reply::Json(
+                200,
+                json!({ "auto": { "mode": "news", "source": "jev", "reason": "News (p 0.9); used news." } }),
+            ),
+            _ => handler(|r, _| search_ok(r))(req, i),
+        }),
+    );
+    let (code, v) = run_json(mock.cmd().args([
+        "search",
+        "-q",
+        "latest x",
+        "-p",
+        "exa",
+        "--json",
+        "--no-rerank",
+    ]));
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["mode"], "general");
+    let auto = &v["metadata"]["routing"]["auto"];
+    assert_eq!(auto["source"], "fallback", "{auto}");
+    assert_eq!(auto["mode"], "general");
+    assert!(
+        auto["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("exa cannot serve news"),
+        "{auto}"
+    );
+    let reqs = mock.requests("/api/v1/search");
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].body["mode"], "general");
+    assert_eq!(reqs[0].body["providers"], json!(["exa"]));
+}
+
+#[test]
 fn p_lifts_the_cap() {
     let mock = start("plift", handler(|r, _| search_ok(r)));
     let (code, v) = run_json(mock.cmd().args([
