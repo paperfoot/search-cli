@@ -120,33 +120,57 @@ fn test_config_show() {
         .stdout(predicate::str::contains("count"));
 }
 
+/// The JSON-mode stream contract: one JSON document on stdout even on error,
+/// bad input exits 3, and stderr carries no ANSI escapes when it is a pipe.
 #[test]
-fn test_no_providers_error_json() {
-    // Use a fake provider name to ensure no providers match
+fn test_json_error_goes_to_stdout_without_ansi() {
     let output = search_cmd()
-        .args(["search", "-q", "test", "-p", "nonexistent", "--json"])
+        .args(["search", "-q", "x", "-p", "nosuch", "--json"])
         .output()
         .unwrap();
 
-    assert_ne!(output.status.code().unwrap(), 0);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let json: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "unknown provider is bad input"
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must hold exactly one JSON document");
     assert_eq!(json["status"], "error");
-    assert!(json["error"]["code"].as_str().is_some());
-    assert!(json["error"]["message"].as_str().is_some());
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("nosuch"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains('\x1b'),
+        "ANSI escape on piped stderr: {stderr:?}"
+    );
 }
 
 #[test]
-fn test_exit_code_no_providers() {
+fn test_verify_without_emails_is_bad_input() {
+    let output = search_cmd().args(["verify", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "error");
+}
+
+/// Parse errors from clap follow the same contract as runtime errors.
+#[test]
+fn test_parse_error_json_on_stdout() {
     let output = search_cmd()
-        .args(["search", "-q", "test", "-p", "nonexistent", "--json"])
+        .args(["search", "--no-such-flag", "--json"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code().unwrap(), 2); // config error
+    assert_eq!(output.status.code(), Some(3));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "error");
 }
 
 // =============================================================================
-// Real API tests (require configured providers)
+// Real API tests (paid calls: need configured providers AND SEARCH_LIVE_TESTS=1)
 // =============================================================================
 
 #[test]

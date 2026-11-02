@@ -321,11 +321,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 ];
                 for p in providers {
                     if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(p)) {
-                        let err = errors::SearchError::Config(format!(
-                            "Unknown provider '{}'. Valid: {}",
-                            p,
-                            KNOWN.join(", ")
-                        ));
+                        // A misspelt -p is bad input (exit 3), not broken setup.
+                        let err = errors::SearchError::InvalidInput {
+                            message: format!(
+                                "Unknown provider '{}'. Valid: {}",
+                                p,
+                                KNOWN.join(", ")
+                            ),
+                        };
                         if ctx.is_json() {
                             output::json::render_error(&err);
                         } else {
@@ -957,15 +960,16 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             }
 
             if emails.is_empty() {
-                let err = errors::SearchError::Config(
-                    "No email addresses provided. Usage: search verify user@example.com".into(),
-                );
+                let err = errors::SearchError::InvalidInput {
+                    message: "No email addresses provided. Usage: search verify user@example.com"
+                        .into(),
+                };
                 if ctx.is_json() {
                     output::json::render_error(&err);
                 } else {
                     eprintln!("Error: {err}");
                 }
-                return Ok(2);
+                return Ok(err.exit_code());
             }
 
             let start = std::time::Instant::now();
