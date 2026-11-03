@@ -243,17 +243,21 @@ pub struct ResponseMetadata {
 pub struct Routing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<AutoDecision>,
-    /// True when JEV reordered the results (each then has `extra.relevance`).
+    /// True when the relevance rerank reordered the results (each then has
+    /// `extra.relevance`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reranked: Option<bool>,
 }
 
-/// How `auto` resolved. `source`: "rule" (a decisive pattern), "jev"
-/// (metasearch.sh's model), "heuristic" (a local signal pattern) or
-/// "fallback" (nothing matched: general).
+/// How `auto` resolved. `source`: "rule" (a decisive pattern), "model"
+/// (metasearch.sh's routing model), "heuristic" (a local signal pattern)
+/// or "fallback" (nothing matched, or a `-p` that cannot serve auto's pick:
+/// general). No model id is carried: the server no longer sends one, and an
+/// older server's is ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoDecision {
     pub mode: String,
+    #[serde(deserialize_with = "de_source")]
     pub source: String,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,9 +265,21 @@ pub struct AutoDecision {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters_applied: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
+}
+
+/// The sources an envelope may show. Anything else (an older server named
+/// its routing model, and envelopes cached by 0.10.0 repeat it) reads as
+/// "model", the only source that comes from the server's model.
+const SOURCES: [&str; 4] = ["rule", "model", "heuristic", "fallback"];
+
+fn de_source<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(if SOURCES.contains(&s.as_str()) {
+        s
+    } else {
+        "model".to_string()
+    })
 }
 
 /// Cost of one search in micro-USD (1 USD = 1,000,000).
@@ -347,7 +363,7 @@ pub struct ErrorDetail {
 
 #[cfg(test)]
 mod tests {
-    use super::{FailureCategory, ResponseStatus};
+    use super::{AutoDecision, FailureCategory, ResponseStatus};
 
     #[test]
     fn status_ladder() {
@@ -373,5 +389,29 @@ mod tests {
     fn category_serializes_snake_case() {
         let j = serde_json::to_string(&FailureCategory::BillingQuota).unwrap();
         assert_eq!(j, "\"billing_quota\"");
+    }
+
+    #[test]
+    fn an_unknown_routing_source_reads_as_model_and_no_model_id_is_kept() {
+        let d: AutoDecision = serde_json::from_value(serde_json::json!({
+            "mode": "general", "source": "vendor-x", "reason": "r",
+            "model": "vendor-x-1.13.0", "latency_ms": 300
+        }))
+        .unwrap();
+        assert_eq!(d.source, "model");
+        assert_eq!(d.latency_ms, Some(300));
+        let out = serde_json::to_string(&d).unwrap();
+        assert!(!out.contains("vendor"), "{out}");
+    }
+
+    #[test]
+    fn known_sources_pass_through() {
+        for source in super::SOURCES {
+            let d: AutoDecision = serde_json::from_value(
+                serde_json::json!({ "mode": "news", "source": source, "reason": "r" }),
+            )
+            .unwrap();
+            assert_eq!(d.source, source);
+        }
     }
 }

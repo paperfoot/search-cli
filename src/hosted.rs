@@ -198,8 +198,6 @@ pub struct RerankAnswer {
     pub order: Vec<String>,
     #[serde(default)]
     pub relevance: std::collections::HashMap<String, f64>,
-    #[serde(default)]
-    pub model: Option<String>,
 }
 
 impl MetasearchClient {
@@ -434,7 +432,8 @@ impl MetasearchClient {
     }
 
     /// `POST /api/v1/rerank` (free). Fail-open: `None` on any error, after
-    /// 1.5 s, or when the server answers without a model (its own fail-open).
+    /// 1.5 s, or when the server answers without relevance scores (its own
+    /// fail-open returns the input order and no scores).
     pub async fn rerank(&self, query: &str, items: &[RerankItem]) -> Option<RerankAnswer> {
         let resp = self
             .http
@@ -449,7 +448,7 @@ impl MetasearchClient {
             return None;
         }
         let answer: RerankAnswer = resp.json().await.ok()?;
-        answer.model.is_some().then_some(answer)
+        (!answer.relevance.is_empty()).then_some(answer)
     }
 }
 

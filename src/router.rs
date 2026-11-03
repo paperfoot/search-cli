@@ -1,8 +1,8 @@
 //! `auto` mode: the deterministic rules of ROUTING.md, as a pure function.
 //!
-//! Rules 1-5 are decisive (the first match decides, JEV is skipped). Rules
-//! 6-10 are signals: without JEV (not logged in) the first one in table order
-//! decides; with JEV, metasearch.sh decides. Auto never picks `deep`, and
+//! Rules 1-5 are decisive (the first match decides, the routing model is
+//! skipped). Rules 6-10 are signals: when not logged in the first one in table
+//! order decides; logged in, metasearch.sh's routing model decides. Auto never picks `deep`, and
 //! picks `social` only on an explicit X/Twitter cue. The server runs the same
 //! patterns; the table tests below mirror its vectors.
 
@@ -45,7 +45,6 @@ pub fn fit_pinned(mode: Mode, pinned: &[String]) -> Option<AutoDecision> {
         ),
         probabilities: None,
         filters_applied: None,
-        model: None,
         latency_ms: None,
     })
 }
@@ -155,7 +154,7 @@ const SIGNALS: &[(u8, Mode, &[&str])] = &[
     ),
 ];
 
-/// Rules 6-10 that fire, in table order (names go to JEV as hints).
+/// Rules 6-10 that fire, in table order (names go to the routing model as hints).
 pub fn signals(query: &str) -> Vec<Hit> {
     let lower = query.trim().to_lowercase();
     SIGNALS
@@ -193,7 +192,7 @@ pub fn freshness(query: &str) -> Option<(&'static str, String)> {
         .find_map(|(value, words)| first_phrase(&lower, words).map(|w| (*value, w)))
 }
 
-/// The decision without JEV: decisive rules, then the first signal, then general.
+/// The decision without the routing model: decisive rules, then the first signal, then general.
 pub fn resolve_local(query: &str) -> (AutoDecision, Option<String>) {
     if let Some(h) = decisive(query) {
         return (decision_for(&h, "rule"), h.query);
@@ -208,7 +207,6 @@ pub fn resolve_local(query: &str) -> (AutoDecision, Option<String>) {
             reason: "No routing rule matched; used general.".to_string(),
             probabilities: None,
             filters_applied: None,
-            model: None,
             latency_ms: None,
         },
         None,
@@ -228,7 +226,6 @@ pub fn decision_for(h: &Hit, source: &str) -> AutoDecision {
         reason: format!("{why} (rule {}); used {}.", h.rule, h.mode),
         probabilities: None,
         filters_applied: None,
-        model: None,
         latency_ms: None,
     }
 }
@@ -814,7 +811,7 @@ mod tests {
         }
     }
 
-    /// Mirrors the server's vectors: (query, mode, source) without JEV.
+    /// Mirrors the server's vectors: (query, mode, source) without the routing model.
     #[test]
     fn rule_table() {
         let cases: &[(&str, &str, &str)] = &[

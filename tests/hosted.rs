@@ -210,14 +210,14 @@ fn search_ok(req: &Req) -> Reply {
     )
 }
 
-/// Manifest, a JEV route to general, a reversing rerank, and `search` from `on_search`.
+/// Manifest, a model route to general, a reversing rerank, and `search` from `on_search`.
 fn handler(on_search: impl Fn(&Req, usize) -> Reply + Send + Sync + 'static) -> Handler {
     Arc::new(move |req, i| match req.path.as_str() {
         "/api/v1/manifest" => Reply::Json(200, manifest()),
         "/api/v1/route" => Reply::Json(
             200,
-            json!({ "auto": { "mode": "general", "source": "jev", "reason": "Anything else (p 0.81); used general.",
-                              "probabilities": { "general": 0.81 }, "model": "jev-1.13.0", "latency_ms": 300 },
+            json!({ "auto": { "mode": "general", "source": "model", "reason": "Anything else (p 0.81); used general.",
+                              "probabilities": { "general": 0.81 }, "latency_ms": 300 },
                     "providers": GENERAL }),
         ),
         "/api/v1/rerank" => {
@@ -235,7 +235,7 @@ fn handler(on_search: impl Fn(&Req, usize) -> Reply + Send + Sync + 'static) -> 
             let order: Vec<String> = ids.into_iter().rev().collect();
             Reply::Json(
                 200,
-                json!({ "order": order, "relevance": relevance, "model": "jev-1.13.0", "latency_ms": 200 }),
+                json!({ "order": order, "relevance": relevance, "latency_ms": 200 }),
             )
         }
         "/api/v1/search" => on_search(req, i),
@@ -508,10 +508,10 @@ fn zero_keys_auto_general_is_charged_capped_routed_and_reranked() {
         "{warning}"
     );
     assert!(warning.contains("brave"));
-    // JEV routing reported.
-    assert_eq!(m["routing"]["auto"]["source"], "jev");
+    // Model routing reported, with no model id.
+    assert_eq!(m["routing"]["auto"]["source"], "model");
     assert_eq!(m["routing"]["auto"]["mode"], "general");
-    assert_eq!(m["routing"]["auto"]["model"], "jev-1.13.0");
+    assert!(m["routing"]["auto"].get("model").is_none());
     assert_eq!(mock.requests("/api/v1/route").len(), 1);
     // Reranked: the mock reverses the order it was sent.
     assert_eq!(m["routing"]["reranked"], true);
@@ -552,6 +552,69 @@ fn rerank_failure_keeps_the_fused_order() {
     assert!(v["metadata"]["routing"].is_null());
 }
 
+/// The server's own fail-open answers 200 with the input order and no
+/// scores: that is not a rerank.
+#[test]
+fn rerank_without_scores_is_not_a_rerank() {
+    let mock = start(
+        "rerankopen",
+        Arc::new(|req: &Req, i| match req.path.as_str() {
+            "/api/v1/rerank" => {
+                let ids: Vec<Value> = req.body["results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["id"].clone())
+                    .rev()
+                    .collect();
+                Reply::Json(200, json!({ "order": ids, "relevance": {}, "model": null }))
+            }
+            _ => handler(|r, _| search_ok(r))(req, i),
+        }),
+    );
+    let (code, v) = run_json(
+        mock.cmd()
+            .args(["search", "-q", "rust", "-m", "general", "--json"]),
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["metadata"]["routing"]["reranked"], false);
+    assert!(v["results"][0]["extra"]["relevance"].is_null());
+}
+
+/// An older server named its routing model in `source` and sent a model id:
+/// the envelope says "model" and carries no id.
+#[test]
+fn an_older_servers_route_answer_reads_as_model_without_an_id() {
+    let mock = start(
+        "routeold",
+        Arc::new(|req: &Req, i| match req.path.as_str() {
+            "/api/v1/route" => Reply::Json(
+                200,
+                json!({ "auto": { "mode": "general", "source": "vendor-x", "reason": "Anything else; used general.",
+                                  "model": "vendor-x-1.13.0", "latency_ms": 300 } }),
+            ),
+            _ => handler(|r, _| search_ok(r))(req, i),
+        }),
+    );
+    let out = mock
+        .cmd()
+        .args([
+            "search",
+            "-q",
+            "rust async runtime",
+            "--json",
+            "--no-rerank",
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let auto = &v["metadata"]["routing"]["auto"];
+    assert_eq!(auto["source"], "model", "{auto}");
+    assert!(auto.get("model").is_none(), "{auto}");
+    assert!(!text.contains("vendor-x"), "{text}");
+}
+
 #[test]
 fn route_failure_falls_back_to_local_signal_rules() {
     let mock = start(
@@ -588,7 +651,7 @@ fn routing_auto_reports_only_the_freshness_that_was_sent() {
         Arc::new(|req: &Req, i| match req.path.as_str() {
             "/api/v1/route" => Reply::Json(
                 200,
-                json!({ "auto": { "mode": "general", "source": "jev",
+                json!({ "auto": { "mode": "general", "source": "model",
                                   "reason": "Anything else (p 0.9); used general with freshness week.",
                                   "filters_applied": { "freshness": "week" } } }),
             ),
@@ -634,7 +697,7 @@ fn auto_never_picks_a_mode_the_pinned_provider_cannot_serve() {
         Arc::new(|req: &Req, i| match req.path.as_str() {
             "/api/v1/route" => Reply::Json(
                 200,
-                json!({ "auto": { "mode": "news", "source": "jev", "reason": "News (p 0.9); used news." } }),
+                json!({ "auto": { "mode": "news", "source": "model", "reason": "News (p 0.9); used news." } }),
             ),
             _ => handler(|r, _| search_ok(r))(req, i),
         }),
