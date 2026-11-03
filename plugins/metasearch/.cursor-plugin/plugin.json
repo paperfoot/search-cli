@@ -1,0 +1,14 @@
+{
+  "name": "metasearch",
+  "displayName": "metasearch.sh",
+  "version": "1.1.0",
+  "description": "Search the web, news, papers, people, places, patents and X posts, and read any page, from Cursor's agent. Sign in to metasearch.sh on first use; searches are charged to the organisation you choose.",
+  "author": {
+    "name": "Paperfoot AI"
+  },
+  "homepage": "https://metasearch.sh/docs/mcp/cursor",
+  "repository": "https://github.com/paperfoot/search-cli",
+  "license": "MIT",
+  "keywords": ["search", "web-search", "mcp", "research", "news", "papers"],
+  "logo": "icon.png"
+}

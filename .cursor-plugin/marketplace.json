@@ -1,0 +1,17 @@
+{
+  "name": "paperfoot",
+  "owner": {
+    "name": "Paperfoot AI"
+  },
+  "metadata": {
+    "description": "Web search for AI agents from metasearch.sh."
+  },
+  "plugins": [
+    {
+      "name": "metasearch",
+      "source": "plugins/metasearch",
+      "description": "Search the web, news, papers, people, places, patents and X posts, and read any page. Sign in to metasearch.sh on first use.",
+      "category": "productivity"
+    }
+  ]
+}
