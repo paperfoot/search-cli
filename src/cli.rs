@@ -24,6 +24,7 @@ use clap::{Parser, Subcommand};
           linkup     High-accuracy agent search (SimpleQA leader)\n  \
           firecrawl  JS-rendered page scraping + structured extraction\n  \
           tavily     RAG-oriented search: general, news, academic, deep\n  \
+          keenable   Independent web index built for agents\n  \
           serpapi    Many engines (Google, Bing, YouTube, Baidu, Scholar)\n  \
           perplexity Ranked web results with dates (Perplexity Search API)\n  \
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
@@ -195,7 +196,7 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai)
+    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,keenable,serpapi,perplexity,browserless,direct,stealth,xai)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 
