@@ -1,6 +1,6 @@
 [package]
 name = "agent-search"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 description = "Web search CLI for AI agents: ten search engines in one binary, auto mode routing, rank fusion, page extraction and the cost of every search"
 license = "MIT"

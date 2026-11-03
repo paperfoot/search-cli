@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.1 — 2026-11-03
+
+- `metadata.routing.auto.source` is one of `rule`, `model`, `heuristic` or
+  `fallback`. A decision from metasearch.sh's routing model reads `model`,
+  whatever an older server calls it, and `routing.auto` no longer carries a
+  model id.
+- Reranking keeps working when metasearch.sh stops sending a model id with
+  `/rerank`: an answer counts as a rerank when it has relevance scores.
+- New accounts on metasearch.sh start with no credit. Logging in is free, and
+  so are model routing and reranking; searches are paid from the balance you
+  top up. The docs, the install script and the MCP plugin no longer promise
+  starting credit.
+- The crates.io description matches what the crate does.
+
 ## 0.10.0 — 2026-11-02
 
 ### Search without your own keys
