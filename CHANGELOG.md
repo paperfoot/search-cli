@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.11.0 — 2026-11-03
+
+- Piped JSON is one compact line, about a seventh smaller than the indented
+  form agents paid for before; `--pretty` indents it, and a terminal still
+  gets tables.
+- `--help` and `--version` print plain text even when piped; `--json` still
+  wraps them in an envelope. `search agent-info` remains the machine map.
+- `NO_COLOR` (and `TERM=dumb`) turns colour off everywhere, logs included.
+- `METASEARCH_API_KEY`, the name metasearch.sh's docs use, works as the
+  account key alongside `METASEARCH_TOKEN`, which wins when both are set.
+  `agent-info` lists both.
+- `search skill install` writes Codex's copy to `~/.agents/skills/search`,
+  the folder Codex reads now and Gemini CLI reads as well, instead of
+  `~/.codex/skills` and `~/.gemini/skills`. It removes old copies it can
+  safely remove and names the rest; `search skill status` reports them.
+- Every description says ten search engines: the README, both SKILL.md
+  copies, the plugin and marketplace entries, the crate and `--help`. A test
+  ties the figure to the provider list.
+- The plugin skill declares `compatibility` and `allowed-tools:
+  Bash(search:*)`, so Claude runs `search` from the skill without a
+  permission prompt, and its description names the requests it serves.
+- Both plugins carry an icon for directory listings and point support at
+  metasearch.sh/contact; the metasearch plugin requires its API key.
+- `plugins/search-cli/evals/` holds a `claude plugin eval` suite: seven
+  requests the skill should take and one it should leave alone. The skill
+  fired on every one of the seven and stayed out of the coding task.
+
 ## 0.10.1 — 2026-11-03
 
 - `metadata.routing.auto.source` is one of `rule`, `model`, `heuristic` or
