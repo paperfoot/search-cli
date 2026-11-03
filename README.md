@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/paperfoot/search-cli/ci.yml?style=for-the-badge&logo=github)](https://github.com/paperfoot/search-cli/actions)
 
-[Install](#install) · [No keys?](#no-keys-search-login) · [Modes](#modes) · [Cost](#what-a-search-costs) · [Extract](#reading-a-page) · [Agents](#for-agents) · [Claude plugins](#claude-code-plugins)
+[Install](#install) · [No keys?](#no-keys-search-login) · [Modes](#modes) · [Cost](#what-a-search-costs) · [Extract](#reading-a-page) · [Agents](#for-agents) · [Plugins and MCP](#plugins-and-mcp)
 
 </div>
 
@@ -168,17 +168,30 @@ Each attempt is checked before it counts: a bot challenge, a JavaScript shell wi
 | 3 | Bad input | Fix the arguments |
 | 4 | Rate limited | Wait, then retry |
 
-## Claude Code plugins
+## Plugins and MCP
 
-This repo is a Claude Code plugin marketplace with two plugins:
+The metasearch.sh MCP server gives any assistant two tools, `search` and `fetch`, at `https://metasearch.sh/mcp`. Add the URL and the assistant asks you to sign in to metasearch.sh and choose the organisation whose balance pays; no key to copy.
+
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=metasearch&config=eyJ1cmwiOiJodHRwczovL21ldGFzZWFyY2guc2gvbWNwIn0=)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_metasearch-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=metasearch&config=%7B%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fmetasearch.sh%2Fmcp%22%7D)
+
+```bash
+claude mcp add --transport http metasearch https://metasearch.sh/mcp   # Claude Code; then /mcp to sign in
+codex mcp add metasearch --url https://metasearch.sh/mcp && codex mcp login metasearch
+gemini extensions install https://github.com/paperfoot/search-cli      # Gemini CLI extension
+```
+
+claude.ai, Claude Desktop and ChatGPT take the same URL as a custom connector. Setup for every host, and the API-key variant for CI: [metasearch.sh/docs/mcp](https://metasearch.sh/docs/mcp).
+
+This repo is also a plugin marketplace for Claude Code and Cursor:
 
 ```bash
 claude plugin marketplace add paperfoot/search-cli
 claude plugin install search-cli@paperfoot    # the skill that teaches Claude to use the search CLI
-claude plugin install metasearch@paperfoot    # the metasearch.sh MCP server: search and fetch tools
+claude plugin install metasearch@paperfoot    # the metasearch.sh MCP server with its own skill
 ```
 
-The `metasearch` plugin asks for a metasearch.sh API key when you enable it and keeps it in your system's credential store. Copy a key from the [dashboard](https://metasearch.sh/dashboard). Other MCP clients connect to `https://metasearch.sh/mcp` with the header `Authorization: Bearer <key>`; [metasearch.sh/docs/mcp](https://metasearch.sh/docs/mcp) has setup for Cursor, VS Code and Codex.
+The `metasearch` plugin (in [`plugins/metasearch`](plugins/metasearch)) bundles the server with a skill for when to search and which mode to ask for. The `search-cli` plugin needs the `search` binary from [Install](#install).
 
 ## Other commands
 
