@@ -4,6 +4,7 @@ pub mod direct;
 pub mod exa;
 pub mod firecrawl;
 pub mod jina;
+pub mod keenable;
 pub mod linkup;
 pub mod parallel;
 pub mod perplexity;
@@ -34,6 +35,7 @@ static ALL: &[&ProviderSpec] = &[
     &linkup::SPEC,
     &parallel::SPEC,
     &tavily::SPEC,
+    &keenable::SPEC,
     &perplexity::SPEC,
     &serpapi::SPEC,
     &xai::SPEC,
@@ -63,6 +65,7 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Adapter>> {
         Box::new(linkup::Linkup::new(ctx.clone())),
         Box::new(parallel::Parallel::new(ctx.clone())),
         Box::new(tavily::Tavily::new(ctx.clone())),
+        Box::new(keenable::Keenable::new(ctx.clone())),
         Box::new(perplexity::Perplexity::new(ctx.clone())),
         Box::new(serpapi::SerpApi::new(ctx.clone())),
         Box::new(xai::Xai::new(ctx.clone())),
