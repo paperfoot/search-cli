@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The `metasearch` plugin connects by URL alone: Claude Code asks you to sign
+  in to metasearch.sh and choose the organisation that pays, so there is no
+  key to paste. It ships a `metasearch` skill for when to search and which
+  mode to ask for.
+- The repo is a Gemini CLI extension (`gemini-extension.json`) and a Cursor
+  plugin marketplace (`.cursor-plugin/`), both pointing at the same server.
+- The README's plugin section covers every host, with Cursor and VS Code
+  install links.
+
 ## 0.11.0 — 2026-11-03
 
 - Piped JSON is one compact line, about a seventh smaller than the indented

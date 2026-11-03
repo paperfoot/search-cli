@@ -1,0 +1,11 @@
+{
+  "name": "metasearch",
+  "version": "1.1.0",
+  "description": "Search the web, news, papers, people, places, patents and X posts, and read any page, through metasearch.sh. Sign in on first use with /mcp auth metasearch; searches are charged to the organisation you choose.",
+  "mcpServers": {
+    "metasearch": {
+      "httpUrl": "https://metasearch.sh/mcp"
+    }
+  },
+  "contextFileName": "plugins/metasearch/skills/metasearch/SKILL.md"
+}

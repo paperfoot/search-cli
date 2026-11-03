@@ -15,7 +15,7 @@
     },
     {
       "name": "metasearch",
-      "description": "The metasearch.sh MCP server: search and fetch tools over ten search engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
+      "description": "The metasearch.sh MCP server: search the web, news, papers, people, places, patents and X posts, and read any page, with a skill for when to search and which mode to ask for. Sign in to metasearch.sh on first use; searches are charged to the organisation you choose.",
       "source": "./plugins/metasearch",
       "category": "productivity"
     }

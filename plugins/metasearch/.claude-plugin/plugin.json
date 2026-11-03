@@ -1,8 +1,8 @@
 {
   "name": "metasearch",
   "displayName": "metasearch.sh",
-  "version": "1.0.0",
-  "description": "The metasearch.sh MCP server: search and fetch tools over ten search engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
+  "version": "1.1.0",
+  "description": "The metasearch.sh MCP server: search the web, news, papers, people, places, patents and X posts, and read any page, with a skill for when to search and which mode to ask for. Sign in to metasearch.sh on first use; searches are charged to the organisation you choose.",
   "author": {
     "name": "Paperfoot AI",
     "url": "https://paperfoot.si"
@@ -17,18 +17,9 @@
     "scraping",
     "research"
   ],
-  "documentationUrl": "https://metasearch.sh/docs/mcp",
+  "documentationUrl": "https://metasearch.sh/docs/mcp/claude",
   "supportUrl": "https://metasearch.sh/contact",
-  "privacyPolicyUrl": "https://metasearch.sh/privacy",
-  "termsOfServiceUrl": "https://metasearch.sh/terms",
-  "userConfig": {
-    "api_key": {
-      "type": "string",
-      "title": "metasearch.sh API key",
-      "description": "An ms_live_ key from https://metasearch.sh/dashboard. Searches are paid from your topped-up balance.",
-      "sensitive": true,
-      "required": true
-    }
-  },
+  "privacyPolicyUrl": "https://metasearch.sh/privacy#assistants",
+  "termsOfServiceUrl": "https://metasearch.sh/terms#assistants",
   "icon": "./icon.png"
 }
