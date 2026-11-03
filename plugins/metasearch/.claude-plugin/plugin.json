@@ -2,7 +2,7 @@
   "name": "metasearch",
   "displayName": "metasearch.sh",
   "version": "1.0.0",
-  "description": "The metasearch.sh MCP server: search and fetch tools over 13 engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
+  "description": "The metasearch.sh MCP server: search and fetch tools over ten search engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
   "author": {
     "name": "Paperfoot AI",
     "url": "https://paperfoot.si"
@@ -26,7 +26,9 @@
       "type": "string",
       "title": "metasearch.sh API key",
       "description": "An ms_live_ key from https://metasearch.sh/dashboard. Searches are paid from your topped-up balance.",
-      "sensitive": true
+      "sensitive": true,
+      "required": true
     }
-  }
+  },
+  "icon": "./icon.png"
 }

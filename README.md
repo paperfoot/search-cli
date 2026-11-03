@@ -2,7 +2,7 @@
 
 # search: web search for AI agents
 
-**One command queries up to eight search engines at once, fuses the results, and tells you what each search cost.**
+**One command sends a query to several of ten search engines at once, fuses the results, and tells you what each search cost.**
 
 [![Crates.io](https://img.shields.io/crates/v/agent-search?style=for-the-badge&logo=rust&logoColor=white&label=crates.io)](https://crates.io/crates/agent-search)
 [![Downloads](https://img.shields.io/crates/d/agent-search?style=for-the-badge&logo=rust&logoColor=white)](https://crates.io/crates/agent-search)
@@ -50,6 +50,8 @@ search "rust async runtimes"
 search whoami             # account, balance and key
 search logout --revoke    # forget the key here and revoke it on the server
 ```
+
+On a CI runner or in a container, export a key from the dashboard instead: `METASEARCH_API_KEY=ms_live_...` (or `METASEARCH_TOKEN`, which wins when both are set).
 
 ## Your own keys
 
@@ -150,13 +152,13 @@ Each attempt is checked before it counts: a bot challenge, a JavaScript shell wi
 ## For agents
 
 - `search agent-info` prints a JSON manifest of every command, flag, mode (`auto` first), engine and exit code.
-- Output is JSON when piped and a table in a terminal; `--json` forces JSON. In JSON mode stdout carries exactly one document, errors included; diagnostics go to stderr.
+- Output is JSON when piped and a table in a terminal; `--json` forces JSON. In JSON mode stdout carries exactly one document, errors included, as one compact line; `--pretty` indents it. Diagnostics go to stderr. `--help` and `--version` stay plain text. `NO_COLOR` turns colour off.
 - A result envelope's `mode` is the mode that ran (for example `news`), never `auto`; metasearch.sh's own API echoes `auto` in that field, the CLI does not. `metadata.routing.auto` repeats it and adds `source` (`rule`, `model`, `heuristic` or `fallback`), a one-sentence `reason`, and `filters_applied` when a time word set `-f`.
 - AI-written text (Tavily's answer, xAI's summary of the X posts) is in `answers[]`, apart from `results[]`.
 - `metadata.provider_failures` gives each failed engine's category (`auth`, `billing_quota`, `rate_limit`, `timeout`, `rejected`, …) and message; `metadata.warnings` lists filters an engine did not apply and hosted engines the cap left out.
 - Results are cached for 5 minutes and replays are marked `cached: true`; `--no-cache` forces a fresh search.
 - `--max-chars N` caps each snippet, to protect your context window.
-- `search skill install` copies [SKILL.md](SKILL.md) into the skill folders of Claude Code, Codex CLI and Gemini CLI.
+- `search skill install` copies [SKILL.md](SKILL.md) to `~/.claude/skills/search` (Claude Code) and `~/.agents/skills/search` (Codex CLI, and Gemini CLI, which reads that folder too). It removes copies an older version left in `~/.codex/skills` or `~/.gemini/skills` and reports any it cannot remove safely; `search skill status` shows them.
 
 | Exit code | Meaning | What to do |
 |-----------|---------|------------|

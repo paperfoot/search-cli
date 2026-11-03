@@ -15,7 +15,7 @@
     },
     {
       "name": "metasearch",
-      "description": "The metasearch.sh MCP server: search and fetch tools over 13 engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
+      "description": "The metasearch.sh MCP server: search and fetch tools over ten search engines, billed to your metasearch.sh balance. Needs a metasearch.sh API key.",
       "source": "./plugins/metasearch",
       "category": "productivity"
     }

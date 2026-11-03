@@ -2,19 +2,23 @@
 name: search
 description: >
   Web search, news, papers, people, X posts, images, places, patents and page
-  extraction through the `search` CLI, which queries up to eight search
-  engines at once and fuses the results. Use when you need current
-  information from the web, sources for a claim, the text of a URL, or a
-  person's or company's public profile. The mode defaults to auto and is
-  reported; every result envelope carries its cost. Run `search agent-info`
-  for the full manifest.
+  extraction through the `search` CLI, which sends a query to several of its
+  ten search engines at once and fuses the results. Use when you need to look
+  something up, get current information or the latest news, find sources or
+  papers for a claim, read the text of a URL, see what people say on X, or
+  research a person or company. The mode defaults to auto and is reported;
+  every result envelope carries its cost. Run `search agent-info` for the
+  full manifest.
+compatibility: Requires the search binary (brew install paperfoot/tap/search-cli) and network access
+allowed-tools: Bash(search:*)
 ---
 
 ## search
 
 `search "query"` picks a mode, queries that mode's engines and returns one JSON
-document (when piped, or with `--json`). Run `search agent-info` for every
-command, flag, mode, engine and exit code.
+document: a single compact line when piped or with `--json`, indented with
+`--pretty`. Run `search agent-info` for every command, flag, mode, engine and
+exit code.
 
 ## Choosing a mode
 
@@ -47,8 +51,8 @@ Pass `-m` when auto is not what you want:
 | Prior art | `-m patents` |
 | Wide coverage, cost no object | `-m deep -c 30` (several times the price of general) |
 
-Bare `search "…"` takes only the global flags (`--json`, `--quiet`, `--x`,
-`--last`, `--debug`). A search flag after it (`-m`, `-p`, `-c`, `-f`, `-d`,
+Bare `search "…"` takes only the global flags (`--json`, `--pretty`,
+`--quiet`, `--x`, `--last`, `--debug`). A search flag after it (`-m`, `-p`, `-c`, `-f`, `-d`,
 `--no-cache` and the rest) exits 3; use the full form:
 `search search -q "…" -m news -f week`. `-f` takes `day`, `week`, `month` or
 `year`; anything else exits 3.
@@ -80,6 +84,8 @@ Examples:
   and deep).
 - Without login, `metadata.notes` says "log in for model routing and reranking
   (free)": keyword rules route the query and nothing is reranked.
+- A metasearch.sh key in `METASEARCH_API_KEY` (or `METASEARCH_TOKEN`) works
+  like `search login`, for CI and containers.
 - Not logged in and no keys: only `extract` works (the local fetchers). Tell the
   user to run `search login` or set a key; `search config check` shows which
   engines are configured.

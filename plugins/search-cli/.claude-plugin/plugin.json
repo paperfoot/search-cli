@@ -20,5 +20,6 @@
   "documentationUrl": "https://github.com/paperfoot/search-cli#readme",
   "supportUrl": "https://github.com/paperfoot/search-cli/issues",
   "privacyPolicyUrl": "https://metasearch.sh/privacy",
-  "termsOfServiceUrl": "https://metasearch.sh/terms"
+  "termsOfServiceUrl": "https://metasearch.sh/terms",
+  "icon": "./icon.png"
 }
