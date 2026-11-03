@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.1 — 2026-11-03
 
 - The `metasearch` plugin connects by URL alone: Claude Code asks you to sign
   in to metasearch.sh and choose the organisation that pays, so there is no

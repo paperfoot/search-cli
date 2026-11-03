@@ -1,7 +1,7 @@
 {
   "name": "search-cli",
   "displayName": "search CLI",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Teaches Claude to use the search CLI: auto or explicit modes over ten search engines, page extraction, cost in every result. Needs the search binary (brew install paperfoot/tap/search-cli).",
   "author": {
     "name": "Paperfoot AI",
