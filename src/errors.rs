@@ -172,7 +172,7 @@ impl SearchError {
                 provider
             )),
             Self::NoProviders(mode) => Some(format!(
-                "No provider can serve mode '{mode}'. Run `search login` to use any engine on metasearch.sh credit, or add a key (search config check)"
+                "No provider can serve mode '{mode}'. Run `search login` to use any engine on your metasearch.sh balance, or add a key (search config check)"
             )),
             Self::InvalidInput { .. } => Some("Check arguments with: search --help".to_string()),
             Self::AllProvidersFailed { failed, .. } => Some(suggestion_for_failures(failed)),

@@ -87,6 +87,6 @@ case ":${PATH}:" in
 esac
 
 echo "Get started:"
-echo "  search login              # no keys needed; new accounts get \$1 of credit"
+echo "  search login              # no keys needed; top up a balance at metasearch.sh"
 echo "  search \"your question\""
 echo "  search config check       # or use your own provider keys"

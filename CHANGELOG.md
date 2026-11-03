@@ -5,8 +5,7 @@
 ### Search without your own keys
 - After `search login`, engines you have no key for run through metasearch.sh
   and are charged to your balance; engines you have a key for still go direct.
-  A new account starts with $1 of credit, so a machine with no keys gets
-  results on the first try. A fused search sends at most 3 hosted engines
+  A machine with no keys gets results once the account has a balance. A fused search sends at most 3 hosted engines
   (6 for `deep`) and names the rest in a warning; `-p` or
   `metasearch.max_providers` (1-8, one cap for every fused mode) changes
   that.
@@ -20,8 +19,8 @@
 
 ### Auto mode
 - With no `-m`, the mode is `auto`: fixed rules for URLs, X, similar-site
-  requests, patents and images, then JEV when logged in (keyword rules if it
-  does not answer within 1.2 s), else keyword rules, else `general`. The
+  requests, patents and images, then metasearch.sh's routing model when logged
+  in (keyword rules if it does not answer within 1.2 s), else keyword rules, else `general`. The
   envelope's `mode` is the mode that ran, and `metadata.routing.auto` gives
   its source and reason. Auto never picks `deep`, and picks `social` only on
   an X cue; code at-words (`@property`, `@types/node`), "Twitter card" and

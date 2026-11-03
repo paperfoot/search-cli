@@ -22,8 +22,8 @@ The mode defaults to `auto`: fixed rules first (a lone URL is `extract`;
 "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social`, but
 never code like `@property` or an email; `similar to <URL>` is `similar`;
 "patent" or "prior art" is `patents`, never "patent leather"; "images of" is
-`images`, never Docker or VM images), then JEV when logged in, else keyword
-rules, else `general`. In `news` and `social`, a time word sets `-f` unless
+`images`, never Docker or VM images), then metasearch.sh's routing model when
+logged in, else keyword rules, else `general`. In `news` and `social`, a time word sets `-f` unless
 you passed one ("today", "yesterday" → `day`;
 "this week", "latest", "breaking" → `week`; "this month", "this year" →
 `month`, `year`). Auto never picks `deep`, and picks `social` only on an X
@@ -65,10 +65,11 @@ Examples:
 ## Keys, login and cost
 
 - Engines with the user's own key go direct (env vars beat the config file).
-- After `search login` (free, $1 of starting credit), engines without a key go
-  through metasearch.sh and are charged to the account. A fused search sends at
-  most 3 hosted engines (6 for `deep`); `-p` chooses others. Login also adds
-  JEV routing and relevance reranking at no charge.
+- After `search login` (free; searches are paid from a topped-up balance),
+  engines without a key go through metasearch.sh and are charged to the
+  account. A fused search sends at most 3 hosted engines (6 for `deep`); `-p`
+  chooses others. Login also adds model routing and relevance reranking at no
+  charge.
 - Read `metadata.cost`: `usd`, `micros`, `by_provider`, and `basis`
   (`estimate` when nothing went through metasearch.sh, `charged` when every
   engine did, `mixed` for both). `metadata.transport` says how each engine
@@ -77,7 +78,7 @@ Examples:
   per call: `usd_per_call`, and `usd_per_call_where_different` for modes
   priced otherwise (deep on Exa, Brave, Linkup, Parallel; Tavily's academic
   and deep).
-- Without login, `metadata.notes` says "log in for JEV routing and reranking
+- Without login, `metadata.notes` says "log in for model routing and reranking
   (free)": keyword rules route the query and nothing is reranked.
 - Not logged in and no keys: only `extract` works (the local fetchers). Tell the
   user to run `search login` or set a key; `search config check` shows which
@@ -86,7 +87,7 @@ Examples:
 ## Reading the envelope
 
 - `mode` is the mode that ran (e.g. `news`), never `auto`.
-  `metadata.routing.auto` repeats it with `source` (`rule`, `jev`,
+  `metadata.routing.auto` repeats it with `source` (`rule`, `model`,
   `heuristic`, `fallback`), a one-sentence `reason` and any `filters_applied`.
 - `results[]` are deduplicated and, in fused modes, ranked by agreement:
   `extra.also_found_by` lists the engines that also returned a URL. Logged

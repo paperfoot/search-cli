@@ -186,7 +186,7 @@ pub struct SearchArgs {
     #[arg(short, long, default_value = "auto", value_parser = parse_mode_arg)]
     pub mode: ModeArg,
 
-    /// Keep the fused order: skip the JEV relevance rerank that runs for
+    /// Keep the fused order: skip the relevance rerank that runs for
     /// logged-in users in general, news, academic, scholar, people and deep
     #[arg(long)]
     pub no_rerank: bool,

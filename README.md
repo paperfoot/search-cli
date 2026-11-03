@@ -38,13 +38,13 @@ search login          # prints a code and opens metasearch.sh in your browser
 search "rust async runtimes"
 ```
 
-`search login` signs you in to [metasearch.sh](https://metasearch.sh) with a device code; `--no-browser` prints the URL for SSH sessions. A new account comes with $1 of free credit. After that:
+`search login` signs you in to [metasearch.sh](https://metasearch.sh) with a device code; `--no-browser` prints the URL for SSH sessions. Logging in is free; searches on metasearch.sh are paid from the balance you top up. After that:
 
 - Engines you have your own key for go direct, as before. Your keys always win.
 - Engines you have no key for go through metasearch.sh and are charged to your balance.
 - Each search reports its cost in `metadata.cost` and how each engine was reached in `metadata.transport` (`direct`, `local` or `hosted`).
 - A fused search sends at most 3 hosted engines (6 for `deep`), in the mode's order, and a warning names the ones left out. Name engines with `-p` to choose others, or set one cap for every fused mode, `deep` included, with `search config set metasearch.max_providers 5` (1 to 8, config file only).
-- Logging in also turns on JEV routing and relevance reranking, which are free.
+- Logging in also turns on model routing and relevance reranking, which are free.
 
 ```bash
 search whoami             # account, balance and key
@@ -67,7 +67,7 @@ Precedence: `<PROVIDER>_API_KEY` env, then `SEARCH_KEYS_<PROVIDER>` env, then th
 
 ## Modes
 
-With no `-m`, the mode is `auto`, in `search "…"` and `search search -q "…"` alike. Auto applies fixed rules first: a lone URL is `extract`; "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social`; `similar to <URL>` (or "sites like", "alternatives to") is `similar`; "patent" (not "patent leather"), "prior art" or a patent number such as `US 10123456` or `EP1234567` is `patents`; "images of" or "logo for" is `images`, except system images such as Docker, container or VM images. Web-development uses ("Twitter card", "embed a tweet"), "on X axis", code at-words (`@property`, `@media`, `@types/node`) and email addresses are not X cues. When you are logged in, JEV, a small classification model run by metasearch.sh, picks among the remaining modes. Without login, or when JEV does not answer within 1.2 s, keyword rules decide (places, scholar, academic, people, then news), and anything else is `general`. Auto never picks `deep`, and picks `social` only on an X cue: those two cost far more and must be asked for.
+With no `-m`, the mode is `auto`, in `search "…"` and `search search -q "…"` alike. Auto applies fixed rules first: a lone URL is `extract`; "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social`; `similar to <URL>` (or "sites like", "alternatives to") is `similar`; "patent" (not "patent leather"), "prior art" or a patent number such as `US 10123456` or `EP1234567` is `patents`; "images of" or "logo for" is `images`, except system images such as Docker, container or VM images. Web-development uses ("Twitter card", "embed a tweet"), "on X axis", code at-words (`@property`, `@media`, `@types/node`) and email addresses are not X cues. When you are logged in, metasearch.sh's routing model, a small classification model, picks among the remaining modes. Without login, or when the model does not answer within 1.2 s, keyword rules decide (places, scholar, academic, people, then news), and anything else is `general`. Auto never picks `deep`, and picks `social` only on an X cue: those two cost far more and must be asked for.
 
 In `news` and `social`, auto turns a time word into a freshness filter when you gave no `-f`: "today" and "yesterday" mean `day`; "this week", "latest" and "breaking" mean `week`; "this month" and "this year" mean `month` and `year`. The decision, its `source` and its `reason` are in `metadata.routing.auto`.
 
@@ -92,7 +92,7 @@ Pass `-m` to choose the mode yourself; an explicit `-m` or `-p` is always obeyed
 
 Fused modes (`general`, `news`, `academic`, `scholar`, `deep`) query their engines at once and rank with reciprocal rank fusion: a URL that several engines return ranks above any one engine's top hit, and `extra.also_found_by` shows which engines agreed. A fused search waits for every engine until the mode's deadline, because an engine that received the query bills for it whether or not the CLI waits; engines still running at the deadline are listed in `metadata.providers_timed_out`. `extract` tries engines in order and stops at the first real page. The other modes use one engine. `search agent-info` prints this table from the same registry the engine uses.
 
-When you are logged in, results in `general`, `news`, `academic`, `scholar`, `people` and `deep` are reranked by relevance once there are at least 3: `metadata.routing.reranked` is `true` and each result carries `extra.relevance` (0 to 1). A search pinned to one engine with `-p` keeps that engine's order, `--no-rerank` keeps the fused order, and a failed rerank keeps it too (`reranked: false`). Without login, auto and rerank-mode searches carry the note "log in for JEV routing and reranking (free)" in `metadata.notes`.
+When you are logged in, results in `general`, `news`, `academic`, `scholar`, `people` and `deep` are reranked by relevance once there are at least 3: `metadata.routing.reranked` is `true` and each result carries `extra.relevance` (0 to 1). A search pinned to one engine with `-p` keeps that engine's order, `--no-rerank` keeps the fused order, and a failed rerank keeps it too (`reranked: false`). Without login, auto and rerank-mode searches carry the note "log in for model routing and reranking (free)" in `metadata.notes`.
 
 ```bash
 search "who is the CEO of Anthropic"                       # auto picks people
@@ -151,7 +151,7 @@ Each attempt is checked before it counts: a bot challenge, a JavaScript shell wi
 
 - `search agent-info` prints a JSON manifest of every command, flag, mode (`auto` first), engine and exit code.
 - Output is JSON when piped and a table in a terminal; `--json` forces JSON. In JSON mode stdout carries exactly one document, errors included; diagnostics go to stderr.
-- A result envelope's `mode` is the mode that ran (for example `news`), never `auto`; metasearch.sh's own API echoes `auto` in that field, the CLI does not. `metadata.routing.auto` repeats it and adds `source` (`rule`, `jev`, `heuristic` or `fallback`), a one-sentence `reason`, and `filters_applied` when a time word set `-f`.
+- A result envelope's `mode` is the mode that ran (for example `news`), never `auto`; metasearch.sh's own API echoes `auto` in that field, the CLI does not. `metadata.routing.auto` repeats it and adds `source` (`rule`, `model`, `heuristic` or `fallback`), a one-sentence `reason`, and `filters_applied` when a time word set `-f`.
 - AI-written text (Tavily's answer, xAI's summary of the X posts) is in `answers[]`, apart from `results[]`.
 - `metadata.provider_failures` gives each failed engine's category (`auth`, `billing_quota`, `rate_limit`, `timeout`, `rejected`, …) and message; `metadata.warnings` lists filters an engine did not apply and hosted engines the cap left out.
 - Results are cached for 5 minutes and replays are marked `cached: true`; `--no-cache` forces a fresh search.

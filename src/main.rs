@@ -393,7 +393,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "input": "query or url",
         "merge": "resolves to one of the modes below before anything runs",
         "providers": "those of the resolved mode",
-        "about": "The default. Rules 1-5 (URL, X cue, similar to <url>, patents (not patent leather), images of (not docker/vm images)), then metasearch.sh's JEV model when logged in, then signal rules 6-10, then general. Never deep; social only on an explicit X cue. metadata.routing.auto reports mode, source and reason.",
+        "about": "The default. Rules 1-5 (URL, X cue, similar to <url>, patents (not patent leather), images of (not docker/vm images)), then metasearch.sh's routing model when logged in, then signal rules 6-10, then general. Never deep; social only on an explicit X cue. metadata.routing.auto reports mode, source and reason.",
         "use": "Leave -m off unless you know the mode; pass -m deep or -m social to pay for those.",
     });
     let modes_info: Vec<serde_json::Value> = std::iter::once(auto_info)
@@ -436,9 +436,9 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         },
         "global_flags": "--json --quiet --last --debug --x (= -m social -p xai)",
         "exit_codes": {"0": "success", "1": "transient: retry", "2": "config, auth or credit: fix setup or top up", "3": "bad input", "4": "rate limited: wait"},
-        "routing": "-m defaults to auto: a URL -> extract; an explicit X cue (twitter/tweets, 'on X' with a capital X, x.com/, a lone @handle; never code like @types/node, @property, 'twitter bootstrap', 'x axis') -> social; 'similar to <url>' -> similar; patent words or a patent number (US/EP 7-8 digits, WO year+6; never 'patent leather' or a phone number) -> patents; 'images of' -> images (never docker, container, iso or vm images); else, logged in, metasearch.sh's JEV model picks; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/yesterday/this week/latest/breaking/this month/this year also set -f unless you passed one. Never deep. Top-level mode is the mode that ran; metadata.routing.auto gives mode, source (rule|jev|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general.",
+        "routing": "-m defaults to auto: a URL -> extract; an explicit X cue (twitter/tweets, 'on X' with a capital X, x.com/, a lone @handle; never code like @types/node, @property, 'twitter bootstrap', 'x axis') -> social; 'similar to <url>' -> similar; patent words or a patent number (US/EP 7-8 digits, WO year+6; never 'patent leather' or a phone number) -> patents; 'images of' -> images (never docker, container, iso or vm images); else, logged in, metasearch.sh's routing model picks; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/yesterday/this week/latest/breaking/this month/this year also set -f unless you passed one. Never deep. Top-level mode is the mode that ran; metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general.",
         "transport": "Per provider: your own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted through metasearch.sh and charged to your balance; else not used. Without -p a fused mode sends at most 3 providers hosted (deep 6; metasearch.max_providers), named in warnings.",
-        "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a JEV rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls are never cancelled; stragglers go in providers_timed_out.",
+        "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls are never cancelled; stragglers go in providers_timed_out.",
         "envelope": {
             "success": "{ version, status: success|partial_success|no_results, query, mode, results[{title,url,snippet,source,published?,image_url?,extra?}], answers?[{provider,text}], metadata{ elapsed_ms, result_count, providers_queried, providers_failed, providers_timed_out?, provider_results?, provider_failures?[{provider,category,http_status?,code,reason,retryable}], transport{name:direct|local|hosted}, cost?{micros,usd,basis:estimate|charged|mixed,by_provider}, routing?{auto?,reranked?}, warnings?, notes?, cached?, cache_age_secs? } }",
             "error": "{ version, status: error, error{ code, message, suggestion?, provider_failures?, cost? } }",
@@ -666,9 +666,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 }
             }
 
-            // auto: decisive rules here, then metasearch.sh's JEV when logged
-            // in, then the local signal rules, then general. An explicit -m
-            // never asks anyone.
+            // auto: decisive rules here, then metasearch.sh's routing model
+            // when logged in, then the local signal rules, then general. An
+            // explicit -m never asks anyone.
             let mut query = args.query.clone();
             let (mode, auto) = match args.mode {
                 cli::ModeArg::Fixed(m) => (m, None),
@@ -817,7 +817,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 response
                     .metadata
                     .notes
-                    .push("log in for JEV routing and reranking (free)".to_string());
+                    .push("log in for model routing and reranking (free)".to_string());
             }
 
             // Don't cache empty results — a transient no_results shouldn't be

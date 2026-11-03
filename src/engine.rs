@@ -37,7 +37,7 @@ pub struct Hosting {
     pub manifest: Option<V1Manifest>,
     /// `metasearch.max_providers`; default 3 per fused mode, deep 6.
     pub max_providers: Option<u64>,
-    /// JEV rerank of fused results (off with `--no-rerank`).
+    /// Relevance rerank of fused results (off with `--no-rerank`).
     pub rerank: bool,
 }
 
@@ -165,7 +165,7 @@ pub fn reranks(mode: Mode) -> bool {
     RERANK_MODES.contains(&mode)
 }
 
-/// Modes whose results JEV may reorder (ROUTING.md "Rerank").
+/// Modes whose results the relevance rerank may reorder (ROUTING.md "Rerank").
 const RERANK_MODES: &[Mode] = &[
     Mode::General,
     Mode::News,
@@ -463,7 +463,7 @@ fn time_left(deadline: Instant, adapter: &dyn Adapter) -> Duration {
     }
 }
 
-/// Reorder `results` by JEV relevance through metasearch.sh. Fail-open: on any
+/// Reorder `results` by relevance through metasearch.sh. Fail-open: on any
 /// failure the order stays and the answer is false.
 async fn rerank(client: &MetasearchClient, query: &str, results: &mut Vec<SearchResult>) -> bool {
     let head = results.len().min(RERANK_MAX);
