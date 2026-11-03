@@ -238,9 +238,8 @@ pub fn mask_key(key: &str) -> String {
 }
 
 pub fn config_show(config: &AppConfig) {
-    use owo_colors::OwoColorize;
-    use std::io::IsTerminal;
-    let c = std::io::stdout().is_terminal();
+    use crate::output::style::Paint;
+    let c = crate::output::use_color();
 
     if c {
         println!("\n{}  Configuration\n", "search".bold().cyan());
@@ -475,9 +474,8 @@ fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
 }
 
 pub fn config_check(config: &AppConfig) {
-    use owo_colors::OwoColorize;
-    use std::io::IsTerminal;
-    let c = std::io::stdout().is_terminal();
+    use crate::output::style::Paint;
+    let c = crate::output::use_color();
 
     let all = effective_keys(config);
 

@@ -851,3 +851,48 @@ fn without_login_or_keys_the_error_points_at_login() {
         .contains("search login"));
     assert!(mock.log.lock().unwrap().is_empty(), "no token, no calls");
 }
+
+#[test]
+fn metasearch_api_key_is_accepted_and_metasearch_token_wins() {
+    let mock = start("apikey", handler(|r, _| search_ok(r)));
+    let args = [
+        "search",
+        "-q",
+        "rust async",
+        "-m",
+        "general",
+        "-p",
+        "exa",
+        "--json",
+    ];
+    let (code, v) = run_json(
+        mock.cmd()
+            .env_remove("METASEARCH_TOKEN")
+            .env("METASEARCH_API_KEY", "ms_live_alias")
+            .args(args),
+    );
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = run_json(
+        mock.cmd()
+            .env("METASEARCH_API_KEY", "ms_live_alias")
+            .args(args),
+    );
+    assert_eq!(code, 0, "{v}");
+    let reqs = mock.requests("/api/v1/search");
+    assert_eq!(reqs[0].headers["authorization"], "Bearer ms_live_alias");
+    assert_eq!(reqs[1].headers["authorization"], format!("Bearer {TOKEN}"));
+}
+
+#[test]
+fn piped_json_is_one_compact_line_and_pretty_indents_it() {
+    let mock = start("compact", handler(|r, _| search_ok(r)));
+    let args = ["search", "-q", "rust async", "-m", "general", "-p", "exa"];
+    let out = mock.cmd().args(args).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.trim_end().lines().count(), 1, "{text}");
+    serde_json::from_str::<Value>(&text).unwrap();
+    let out = mock.cmd().args(args).arg("--pretty").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.lines().count() > 5, "{text}");
+    serde_json::from_str::<Value>(&text).unwrap();
+}

@@ -112,14 +112,19 @@ pub(crate) fn assert_login_host_allowed(base: &str) -> Result<(), SearchError> {
     Ok(())
 }
 
-/// Account API key: `METASEARCH_TOKEN` > config. Empty means "not logged in".
+/// Env vars that carry the account key, first wins. `METASEARCH_API_KEY` is
+/// the name metasearch.sh's own docs use; `METASEARCH_TOKEN` is the CLI's
+/// original one and beats it when both are set.
+pub const TOKEN_ENV: &[&str] = &["METASEARCH_TOKEN", "METASEARCH_API_KEY"];
+
+/// Account API key: `METASEARCH_TOKEN` > `METASEARCH_API_KEY` > config.
+/// Empty means "not logged in".
 pub fn resolve_token(config: &AppConfig) -> String {
-    if let Ok(v) = std::env::var("METASEARCH_TOKEN") {
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    config.metasearch.token.clone()
+    TOKEN_ENV
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|v| !v.is_empty())
+        .unwrap_or_else(|| config.metasearch.token.clone())
 }
 
 fn api_error(message: impl Into<String>) -> SearchError {
@@ -183,7 +188,7 @@ pub async fn login(
     url_override: Option<String>,
     no_browser: bool,
 ) -> Result<i32, SearchError> {
-    use owo_colors::OwoColorize;
+    use crate::output::style::Paint;
 
     let base = match url_override {
         Some(u) => u.trim_end_matches('/').to_string(),
@@ -350,7 +355,7 @@ pub async fn login(
 
 /// `search logout` — drop the stored key, optionally revoking it server-side.
 pub async fn logout(app: &AppContext, ctx: &Ctx, revoke: bool) -> Result<i32, SearchError> {
-    use owo_colors::OwoColorize;
+    use crate::output::style::Paint;
 
     let token = resolve_token(&app.config);
     if token.is_empty() {
@@ -405,7 +410,7 @@ pub async fn logout(app: &AppContext, ctx: &Ctx, revoke: bool) -> Result<i32, Se
 
 /// `search whoami` — ask the server who the stored key belongs to.
 pub async fn whoami(app: &AppContext, ctx: &Ctx) -> Result<i32, SearchError> {
-    use owo_colors::OwoColorize;
+    use crate::output::style::Paint;
 
     let Some(account) = MetasearchClient::new(app)? else {
         return Err(SearchError::Config(
@@ -481,7 +486,7 @@ mod tests {
         let cfg = AppConfig::default();
         // Only meaningful when the ambient env is clean; skip if a real login
         // is exported into this shell.
-        if std::env::var("METASEARCH_TOKEN").is_err() {
+        if super::TOKEN_ENV.iter().all(|n| std::env::var(n).is_err()) {
             assert!(resolve_token(&cfg).is_empty());
         }
     }

@@ -37,6 +37,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[derive(Default, Clone, Copy)]
 struct GlobalFlags {
     json: bool,
+    pretty: bool,
     quiet: bool,
     last: bool,
     x_only: bool,
@@ -52,6 +53,7 @@ fn scan_global_flags() -> GlobalFlags {
         }
         match arg.to_str() {
             Some("--json") => f.json = true,
+            Some("--pretty") => f.pretty = true,
             Some("--quiet") => f.quiet = true,
             Some("--last") => f.last = true,
             Some("--x") => f.x_only = true,
@@ -64,7 +66,15 @@ fn scan_global_flags() -> GlobalFlags {
 
 /// Global-flag tokens to strip from a bare query that `trailing_var_arg`
 /// captured, so `search foo --json` searches "foo", not "foo --json".
-const GLOBAL_FLAG_TOKENS: &[&str] = &["--json", "--quiet", "--last", "--x", "--debug", "--verbose"];
+const GLOBAL_FLAG_TOKENS: &[&str] = &[
+    "--json",
+    "--pretty",
+    "--quiet",
+    "--last",
+    "--x",
+    "--debug",
+    "--verbose",
+];
 
 /// `search` subcommand flags. After a shorthand query they are not parsed:
 /// they would become query words, and `search "q" -p exa` would quietly fan
@@ -117,7 +127,7 @@ fn init_tracing(debug: bool) {
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
+        .with_ansi(std::io::stderr().is_terminal() && !output::no_color_env())
         .with_target(false)
         .without_time()
         .try_init();
@@ -136,29 +146,29 @@ async fn main() {
     //    query, plus the help/version/error paths). Init tracing immediately.
     let flags = scan_global_flags();
     init_tracing(flags.debug);
+    output::set_pretty(flags.pretty);
     let json_flag = flags.json;
 
     // CLI parsing — use try_parse so we own error handling
     let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
+            // Help and version are text for a reader, piped or not; only an
+            // explicit --json wraps them in an envelope. `agent-info` is the
+            // machine-readable map.
             if matches!(
                 e.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
-                let format = OutputFormat::detect(json_flag);
-                match format {
-                    OutputFormat::Json => {
-                        let envelope = serde_json::json!({
-                            "version": "1",
-                            "status": "success",
-                            "data": { "usage": e.to_string().trim_end() },
-                        });
-                        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
-                        std::process::exit(0);
-                    }
-                    OutputFormat::Table => e.exit(),
+                if json_flag {
+                    output::json::render_value(&serde_json::json!({
+                        "version": "1",
+                        "status": "success",
+                        "data": { "usage": e.to_string().trim_end() },
+                    }));
+                    std::process::exit(0);
                 }
+                e.exit();
             }
 
             // Parse errors — route through the typed error model (exit 3) so the
@@ -434,7 +444,9 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
             "skill": "install | status (agent skill file)",
             "update": "Self-update (--check to only check)",
         },
-        "global_flags": "--json --quiet --last --debug --x (= -m social -p xai)",
+        "global_flags": "--json --pretty --quiet --last --debug --x (= -m social -p xai)",
+        "output": "Piped: one compact JSON line (--pretty indents it). Terminal: tables. --help and --version are plain text (with --json, an envelope). NO_COLOR or TERM=dumb turns colour off.",
+        "search_engines": providers::SEARCH_ENGINES,
         "exit_codes": {"0": "success", "1": "transient: retry", "2": "config, auth or credit: fix setup or top up", "3": "bad input", "4": "rate limited: wait"},
         "routing": "-m defaults to auto: a URL -> extract; an explicit X cue (twitter/tweets, 'on X' with a capital X, x.com/, a lone @handle; never code like @types/node, @property, 'twitter bootstrap', 'x axis') -> social; 'similar to <url>' -> similar; patent words or a patent number (US/EP 7-8 digits, WO year+6; never 'patent leather' or a phone number) -> patents; 'images of' -> images (never docker, container, iso or vm images); else, logged in, metasearch.sh's routing model picks; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/yesterday/this week/latest/breaking/this month/this year also set -f unless you passed one. Never deep. Top-level mode is the mode that ran; metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general.",
         "transport": "Per provider: your own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted through metasearch.sh and charged to your balance; else not used. Without -p a fused mode sends at most 3 providers hosted (deep 6; metasearch.max_providers), named in warnings.",
@@ -447,7 +459,12 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         },
         "modes": modes_info,
         "providers": providers_info,
-        "metasearch": { "logged_in": logged_in, "url": base },
+        "metasearch": {
+            "logged_in": logged_in,
+            "url": base,
+            "key_env": auth::TOKEN_ENV,
+            "key_precedence": "METASEARCH_TOKEN > METASEARCH_API_KEY > config (search login)",
+        },
         "config": {
             "path": config::config_path().to_string_lossy(),
             "env_prefix": "SEARCH_",
@@ -490,15 +507,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         Commands::Search(default_search_args(query))
     } else {
         use clap::CommandFactory;
-        if ctx.is_json() {
+        if cli.json {
             let mut buf = Vec::new();
             Cli::command().write_long_help(&mut buf).ok();
-            let envelope = serde_json::json!({
+            output::json::render_value(&serde_json::json!({
                 "version": "1",
                 "status": "success",
                 "data": { "usage": String::from_utf8_lossy(&buf).trim_end() },
-            });
-            println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+            }));
         } else {
             Cli::command().print_help().ok();
             println!();
@@ -946,7 +962,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     } else if !ctx.suppress_human() {
                         println!("{}", p.display());
                         if !p.exists() {
-                            use owo_colors::OwoColorize;
+                            use crate::output::style::Paint;
                             println!("  {}", "(file does not exist, using defaults)".dimmed());
                         }
                     }
@@ -1036,7 +1052,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     "note": "informational only — the CLI never disables a provider based on balance",
                 }));
             } else if !ctx.suppress_human() {
-                use owo_colors::OwoColorize;
+                use crate::output::style::Paint;
                 for u in &usages {
                     if !u.configured && u.transport == "hosted" {
                         println!(

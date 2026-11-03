@@ -38,7 +38,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "5"
 async-trait = "0.1"
-owo-colors = "4"
 indicatif = "0.17"
 # No default features: they pull native-tls, a second TLS stack and an
 # OpenSSL link on Linux.

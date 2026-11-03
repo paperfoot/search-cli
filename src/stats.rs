@@ -328,7 +328,7 @@ pub fn prune_logs(days: u64) -> usize {
 }
 
 pub fn render_human(r: &StatsReport) {
-    use owo_colors::OwoColorize;
+    use crate::output::style::Paint;
     eprintln!(
         "\n{}  last {} days — {} searches, {:.0}% cache hits\n",
         "stats".bold().cyan(),

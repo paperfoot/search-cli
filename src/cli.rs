@@ -6,15 +6,16 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Aggregates 14 providers (12 search APIs plus keyless direct and stealth\n\
-        fetchers) across 13 modes.\n\
+    long_about = "Ten search engines across 13 modes, plus page extraction (local\n\
+        fetchers first, then Jina Reader, Firecrawl or Browserless).\n\
         With no -m the mode is auto: a URL extracts, an X/Twitter cue searches\n\
         X, and so on; the decision is reported in metadata.routing.auto. An\n\
         explicit -m or -p is always obeyed. Auto never picks deep.\n\
         Engines without your own key run through metasearch.sh after\n\
         `search login`, charged to your balance; each result's cost is in\n\
         metadata.cost. Run `search agent-info` for the machine-readable map.\n\
-        Outputs colored tables for humans, JSON when piped to other tools.\n\n\
+        Prints tables on a terminal and one compact JSON line when piped\n\
+        (--pretty indents it). NO_COLOR turns colour off.\n\n\
         PROVIDERS:\n  \
           parallel   Agent-native search (Parallel AI): LLM-ready excerpts\n  \
           brave      Independent web index (not Google/Bing) + LLM grounding\n  \
@@ -52,6 +53,10 @@ pub struct Cli {
     /// Output as JSON (auto-enabled when piped)
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Indent JSON output (it is one compact line when piped)
+    #[arg(long, global = true)]
+    pub pretty: bool,
 
     /// Suppress non-essential output
     #[arg(long, global = true)]
@@ -294,13 +299,21 @@ pub enum SkillAction {
 
 pub mod skill {
     use crate::output::Ctx;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     const SKILL_CONTENT: &str = include_str!("../SKILL.md");
 
     struct Target {
         name: &'static str,
         path: PathBuf,
+    }
+
+    /// A place an older `search skill install` wrote to that no agent should
+    /// read any more.
+    struct Stale {
+        name: &'static str,
+        path: PathBuf,
+        why: &'static str,
     }
 
     fn home() -> PathBuf {
@@ -310,27 +323,83 @@ pub mod skill {
             .unwrap_or_else(|_| PathBuf::from("."))
     }
 
-    fn targets() -> Vec<Target> {
-        let h = home();
+    /// Claude Code reads `~/.claude/skills`. Codex reads `~/.agents/skills`,
+    /// and Gemini CLI reads it as an alias of `~/.gemini/skills`, so one copy
+    /// there serves both.
+    fn targets(h: &Path) -> Vec<Target> {
         vec![
             Target {
                 name: "Claude Code",
                 path: h.join(".claude/skills/search"),
             },
             Target {
-                name: "Codex CLI",
-                path: h.join(".codex/skills/search"),
-            },
-            Target {
-                name: "Gemini CLI",
-                path: h.join(".gemini/skills/search"),
+                name: "Codex CLI, Gemini CLI",
+                path: h.join(".agents/skills/search"),
             },
         ]
     }
 
+    fn stale_locations(h: &Path) -> Vec<Stale> {
+        vec![
+            Stale {
+                name: "Codex CLI (old path)",
+                path: h.join(".codex/skills/search"),
+                why: "Codex reads ~/.agents/skills now",
+            },
+            Stale {
+                name: "Gemini CLI (old path)",
+                path: h.join(".gemini/skills/search"),
+                why: "Gemini also reads ~/.agents/skills, so this loads the skill twice",
+            },
+        ]
+    }
+
+    /// The stale path holds a `search` skill (a symlink to one, or a folder
+    /// with a SKILL.md named `search`).
+    fn is_search_skill(path: &Path) -> bool {
+        std::fs::read_to_string(path.join("SKILL.md"))
+            .is_ok_and(|c| c.lines().take(5).any(|l| l.trim() == "name: search"))
+    }
+
+    /// Safe to delete: a symlink, or a folder holding nothing but the
+    /// SKILL.md an install wrote (Finder's .DS_Store aside). Anything else
+    /// is someone's own work and is only reported.
+    fn removable(path: &Path) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() {
+            return true;
+        }
+        std::fs::read_dir(path).is_ok_and(|entries| {
+            entries.flatten().all(|e| {
+                let n = e.file_name();
+                n == "SKILL.md" || n == ".DS_Store"
+            })
+        })
+    }
+
+    fn stale_fix(path: &Path) -> String {
+        if removable(path) {
+            "`search skill install` removes it".to_string()
+        } else {
+            format!("it holds other files; delete {} by hand", path.display())
+        }
+    }
+
+    fn remove(path: &Path) -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() || meta.is_file() {
+            std::fs::remove_file(path)
+        } else {
+            std::fs::remove_dir_all(path)
+        }
+    }
+
     pub fn install(ctx: &Ctx) {
+        let h = home();
         let mut results = Vec::new();
-        for t in &targets() {
+        for t in &targets(&h) {
             let skill_path = t.path.join("SKILL.md");
             // A failed install is reported in the result (JSON readers see it
             // on stdout), not only as a stderr line.
@@ -349,6 +418,29 @@ pub mod skill {
             results.push((t.name, skill_path.display().to_string(), status, error));
         }
 
+        let mut stale = Vec::new();
+        for s in stale_locations(&h) {
+            if std::fs::symlink_metadata(&s.path).is_err() || !is_search_skill(&s.path) {
+                continue;
+            }
+            let (status, hint) = if removable(&s.path) {
+                match remove(&s.path) {
+                    Ok(()) => ("removed", None),
+                    Err(e) => ("left", Some(format!("could not remove it: {e}"))),
+                }
+            } else {
+                (
+                    "left",
+                    Some(format!(
+                        "it holds other files; delete {} by hand ({})",
+                        s.path.display(),
+                        s.why
+                    )),
+                )
+            };
+            stale.push((s.name, s.path.display().to_string(), status, s.why, hint));
+        }
+
         if ctx.is_json() {
             let items: Vec<serde_json::Value> = results
                 .iter()
@@ -360,6 +452,18 @@ pub mod skill {
                     }
                     item
                 })
+                .chain(stale.iter().map(|(name, path, status, why, hint)| {
+                    let mut item = serde_json::json!({
+                        "platform": name,
+                        "path": path,
+                        "status": if *status == "removed" { "stale_removed" } else { "stale_left" },
+                        "reason": why,
+                    });
+                    if let Some(h) = hint {
+                        item["suggestion"] = serde_json::json!(h);
+                    }
+                    item
+                }))
                 .collect();
             let any_ok = results.iter().any(|r| r.2 != "failed");
             let all_ok = results.iter().all(|r| r.2 != "failed");
@@ -369,7 +473,7 @@ pub mod skill {
                 "data": items,
             }));
         } else if !ctx.suppress_human() {
-            use owo_colors::OwoColorize;
+            use crate::output::style::Paint;
             for (name, path, status, error) in &results {
                 if let Some(e) = error {
                     eprintln!("  Failed {name}: {e}");
@@ -378,12 +482,25 @@ pub mod skill {
                 let marker = if *status == "installed" { "+" } else { "=" };
                 println!(" {} {} -> {}", marker.green(), name.bold(), path.dimmed());
             }
+            for (name, path, status, why, hint) in &stale {
+                if *status == "removed" {
+                    println!(
+                        " {} {} {} ({why})",
+                        "-".yellow(),
+                        name.bold(),
+                        path.dimmed()
+                    );
+                } else if let Some(h) = hint {
+                    eprintln!("  {name}: {h}");
+                }
+            }
         }
     }
 
     pub fn status(ctx: &Ctx) {
+        let h = home();
         let mut results = Vec::new();
-        for t in &targets() {
+        for t in &targets(&h) {
             let skill_path = t.path.join("SKILL.md");
             let (installed, current) = if skill_path.exists() {
                 let current =
@@ -392,15 +509,28 @@ pub mod skill {
             } else {
                 (false, false)
             };
-            results.push((t.name, installed, current));
+            results.push((t.name, skill_path.display().to_string(), installed, current));
         }
+        let stale: Vec<Stale> = stale_locations(&h)
+            .into_iter()
+            .filter(|s| std::fs::symlink_metadata(&s.path).is_ok() && is_search_skill(&s.path))
+            .collect();
 
         if ctx.is_json() {
             let items: Vec<serde_json::Value> = results
                 .iter()
-                .map(|(name, installed, current)| {
-                    serde_json::json!({"platform": name, "installed": installed, "current": current})
+                .map(|(name, path, installed, current)| {
+                    serde_json::json!({"platform": name, "path": path, "installed": installed, "current": current})
                 })
+                .chain(stale.iter().map(|s| {
+                    serde_json::json!({
+                        "platform": s.name,
+                        "path": s.path.display().to_string(),
+                        "stale": true,
+                        "reason": s.why,
+                        "suggestion": stale_fix(&s.path),
+                    })
+                }))
                 .collect();
             crate::output::json::render_value(&serde_json::json!({
                 "version": "1",
@@ -408,16 +538,26 @@ pub mod skill {
                 "data": items,
             }));
         } else if !ctx.suppress_human() {
-            use owo_colors::OwoColorize;
-            for (name, installed, current) in &results {
+            use crate::output::style::Paint;
+            for (name, _, installed, current) in &results {
                 let status = if *current {
-                    "current".green().to_string()
+                    "current".green()
                 } else if *installed {
-                    "outdated".yellow().to_string()
+                    "outdated".yellow()
                 } else {
-                    "not installed".red().to_string()
+                    "not installed".red()
                 };
                 println!("  {} {}", name.bold(), status);
+            }
+            for s in &stale {
+                println!(
+                    "  {} {} {} ({}; {})",
+                    s.name.bold(),
+                    "stale".yellow(),
+                    s.path.display().to_string().dimmed(),
+                    s.why,
+                    stale_fix(&s.path)
+                );
             }
         }
     }

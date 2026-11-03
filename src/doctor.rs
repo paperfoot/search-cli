@@ -195,7 +195,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub fn render_human(checks: &[Check]) {
-    use owo_colors::OwoColorize;
+    use crate::output::style::Paint;
     eprintln!("\n{}  provider health\n", "doctor".bold().cyan());
     for c in checks {
         if c.provider == "metasearch" && c.ok {

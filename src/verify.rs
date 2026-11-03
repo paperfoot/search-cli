@@ -1,7 +1,6 @@
+use crate::output::style::Paint;
 use hickory_resolver::Resolver;
-use owo_colors::OwoColorize;
 use serde::Serialize;
-use std::io::IsTerminal;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -389,7 +388,7 @@ fn make_result(
 }
 
 pub fn render_table(results: &[VerifyResult]) {
-    let use_color = std::io::stdout().is_terminal();
+    let use_color = crate::output::use_color();
 
     if use_color {
         eprintln!("\n{}  Email Verification\n", "search".bold().cyan());
@@ -398,12 +397,12 @@ pub fn render_table(results: &[VerifyResult]) {
     for r in results {
         let verdict_display = if use_color {
             match r.verdict.as_str() {
-                "valid" => format!("{}", "VALID".green().bold()),
-                "invalid" => format!("{}", "INVALID".red().bold()),
-                "catch_all" => format!("{}", "CATCH-ALL".yellow().bold()),
-                "unreachable" => format!("{}", "UNREACHABLE".red()),
-                "timeout" => format!("{}", "TIMEOUT".yellow()),
-                "syntax_error" => format!("{}", "SYNTAX ERROR".red()),
+                "valid" => "VALID".green().bold(),
+                "invalid" => "INVALID".red().bold(),
+                "catch_all" => "CATCH-ALL".yellow().bold(),
+                "unreachable" => "UNREACHABLE".red(),
+                "timeout" => "TIMEOUT".yellow(),
+                "syntax_error" => "SYNTAX ERROR".red(),
                 _ => r.verdict.clone(),
             }
         } else {

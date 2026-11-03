@@ -44,6 +44,12 @@ static ALL: &[&ProviderSpec] = &[
     &direct::SPEC,
 ];
 
+/// How many search engines the binary has: providers serving any mode but
+/// extract. The README, both SKILL.md copies, the plugin and marketplace
+/// entries, the crate description and `--help` say it in words
+/// ("ten"); a test fails when either drifts.
+pub const SEARCH_ENGINES: usize = 10;
+
 pub fn all() -> &'static [&'static ProviderSpec] {
     ALL
 }
@@ -312,6 +318,75 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn search_engine_count_matches_the_provider_list() {
+        let engines = ALL
+            .iter()
+            .filter(|s| s.modes.iter().any(|m| *m != crate::types::Mode::Extract))
+            .count();
+        assert_eq!(engines, SEARCH_ENGINES);
+    }
+
+    /// Every "<number> engines" / "<number> search engines" phrase in the
+    /// public text states [`SEARCH_ENGINES`], so the count cannot drift
+    /// between copies again.
+    #[test]
+    fn every_public_engine_count_is_the_canonical_one() {
+        const SEARCH_ENGINES_WORD: &str = "ten";
+        const NUMBERS: &[&str] = &[
+            "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+            "twelve", "thirteen", "fourteen", "fifteen",
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let files = [
+            "README.md",
+            "SKILL.md",
+            "Cargo.toml",
+            "src/cli.rs",
+            ".claude-plugin/marketplace.json",
+            "plugins/search-cli/.claude-plugin/plugin.json",
+            "plugins/search-cli/skills/search/SKILL.md",
+            "plugins/metasearch/.claude-plugin/plugin.json",
+        ];
+        let digits = SEARCH_ENGINES.to_string();
+        let mut seen = 0;
+        for f in files {
+            let text = std::fs::read_to_string(root.join(f))
+                .unwrap()
+                .to_lowercase();
+            let words: Vec<String> = text
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect();
+            for i in 0..words.len() {
+                if words[i] != "engines" && words[i] != "providers" {
+                    continue;
+                }
+                let j = if i >= 2 && words[i - 1] == "search" {
+                    i - 2
+                } else {
+                    i.wrapping_sub(1)
+                };
+                let Some(n) = words.get(j) else { continue };
+                let is_number = NUMBERS.contains(&n.as_str()) || n.parse::<u32>().is_ok();
+                if !is_number {
+                    continue;
+                }
+                assert!(
+                    n == SEARCH_ENGINES_WORD || *n == digits,
+                    "{f}: \"{n} {}\" should say {SEARCH_ENGINES_WORD}",
+                    words[i]
+                );
+                seen += 1;
+            }
+        }
+        assert!(
+            seen >= 6,
+            "the count should appear in each description ({seen})"
+        );
+    }
 
     #[test]
     fn augment_query_ors_include_domains_and_negates_excludes() {

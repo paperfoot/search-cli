@@ -75,7 +75,9 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Aggregates 14 providers"))
+        .stdout(predicate::str::contains("Ten search engines"))
+        // Piped help is plain text, not a JSON envelope.
+        .stdout(predicate::str::starts_with("{").not())
         .stdout(predicate::str::contains("brave"))
         .stdout(predicate::str::contains("serper"))
         .stdout(predicate::str::contains("exa"));
@@ -87,7 +89,67 @@ fn test_version() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("search 0."));
+        .stdout(predicate::str::starts_with("search 0."));
+}
+
+#[test]
+fn test_help_and_version_take_an_envelope_only_with_json() {
+    let out = search_cmd().args(["--version", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["data"]["usage"]
+        .as_str()
+        .unwrap()
+        .starts_with("search 0."));
+}
+
+#[test]
+fn test_skill_install_writes_claude_and_agents_and_clears_old_copies() {
+    let home = tempfile_home("skill");
+    let old_codex = home.join(".codex/skills/search");
+    std::fs::create_dir_all(&old_codex).unwrap();
+    std::fs::write(old_codex.join("SKILL.md"), "---\nname: search\n---\nold\n").unwrap();
+    let kept = home.join(".gemini/skills/search");
+    std::fs::create_dir_all(kept.join("scripts")).unwrap();
+    std::fs::write(kept.join("SKILL.md"), "---\nname: search\n---\nmine\n").unwrap();
+
+    let out = search_cmd()
+        .env("HOME", &home)
+        .args(["skill", "install"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let skill = std::fs::read_to_string(home.join(".agents/skills/search/SKILL.md")).unwrap();
+    assert!(skill.contains("name: search"));
+    assert!(home.join(".claude/skills/search/SKILL.md").exists());
+    // A copy that is only our SKILL.md goes; one holding other files stays,
+    // reported with a suggestion.
+    assert!(!old_codex.exists());
+    assert!(kept.join("scripts").exists());
+    let statuses: Vec<&str> = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["installed", "installed", "stale_removed", "stale_left"]
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+fn tempfile_home(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "search-cli-test-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[test]

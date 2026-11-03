@@ -1,6 +1,8 @@
 //! JSON mode stream contract: every command writes exactly one JSON document
 //! to stdout, success or error, so `search … --json | jq` always has something
-//! to parse. Diagnostics (tracing, progress) go to stderr only.
+//! to parse. Diagnostics (tracing, progress) go to stderr only. The document
+//! is one compact line when piped and indented on a terminal or with
+//! `--pretty` (see [`super::pretty`]).
 
 use crate::errors::SearchError;
 use crate::types::SearchResponse;
@@ -11,7 +13,12 @@ fn emit<T: Serialize + ?Sized>(value: &T) {
     let mut out = std::io::stdout().lock();
     // A closed pipe (`search … | head -c1`) must not panic the process the way
     // `println!` would; the reader has already gone, so there is no one to tell.
-    if serde_json::to_writer_pretty(&mut out, value).is_ok() {
+    let written = if super::pretty() {
+        serde_json::to_writer_pretty(&mut out, value)
+    } else {
+        serde_json::to_writer(&mut out, value)
+    };
+    if written.is_ok() {
         let _ = out.write_all(b"\n");
         let _ = out.flush();
     }

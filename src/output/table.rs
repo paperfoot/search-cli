@@ -1,10 +1,9 @@
+use crate::output::style::Paint;
 use crate::types::SearchResponse;
 use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, ContentArrangement, Table};
-use owo_colors::OwoColorize;
-use std::io::IsTerminal;
 
 pub fn render(response: &SearchResponse) {
-    let use_color = std::io::stdout().is_terminal();
+    let use_color = crate::output::use_color();
 
     if response.results.is_empty() && response.answers.is_empty() {
         if use_color {
@@ -184,7 +183,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub fn render_providers(providers: &[(String, bool, Vec<String>)]) {
-    let use_color = std::io::stdout().is_terminal();
+    let use_color = crate::output::use_color();
 
     if use_color {
         eprintln!("\n{}  Provider Status\n", "search".bold().cyan());
