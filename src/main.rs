@@ -41,8 +41,18 @@ struct GlobalFlags {
     quiet: bool,
     last: bool,
     x_only: bool,
+    /// `--tiktok`, `--instagram`, `--youtube`, `--threads`.
+    platform: Option<&'static str>,
     debug: bool,
 }
+
+/// The platform shorthand flags and the provider each pins.
+const PLATFORM_FLAGS: &[(&str, &str)] = &[
+    ("--tiktok", "tiktok"),
+    ("--instagram", "instagram"),
+    ("--youtube", "youtube"),
+    ("--threads", "threads"),
+];
 
 fn scan_global_flags() -> GlobalFlags {
     let mut f = GlobalFlags::default();
@@ -58,7 +68,12 @@ fn scan_global_flags() -> GlobalFlags {
             Some("--last") => f.last = true,
             Some("--x") => f.x_only = true,
             Some("--debug") | Some("--verbose") => f.debug = true,
-            _ => {}
+            Some(other) => {
+                if let Some((_, p)) = PLATFORM_FLAGS.iter().find(|(flag, _)| *flag == other) {
+                    f.platform = Some(p);
+                }
+            }
+            None => {}
         }
     }
     f
@@ -72,6 +87,10 @@ const GLOBAL_FLAG_TOKENS: &[&str] = &[
     "--quiet",
     "--last",
     "--x",
+    "--tiktok",
+    "--instagram",
+    "--youtube",
+    "--threads",
     "--debug",
     "--verbose",
 ];
@@ -191,6 +210,17 @@ async fn main() {
     cli.last |= flags.last;
     cli.x_only |= flags.x_only;
     cli.debug |= flags.debug;
+    for (flag, on) in [
+        ("tiktok", cli.tiktok),
+        ("instagram", cli.instagram),
+        ("youtube", cli.youtube),
+        ("threads", cli.threads),
+    ] {
+        if on {
+            cli.platform = Some(flag);
+        }
+    }
+    cli.platform = cli.platform.or(flags.platform);
 
     let ctx = Ctx::new(cli.json, cli.quiet);
 
@@ -380,7 +410,11 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
             if let Some(price) = manifest.as_ref().and_then(|m| m.price_from(spec.name)) {
                 entry["hosted_usd_per_call"] = json!(price);
             }
-            if !spec.env_keys.is_empty() {
+            // The platforms run through metasearch.sh; their key is not a
+            // user setting.
+            // The platforms run through metasearch.sh (see "social"): their
+            // key is not a user setting.
+            if !spec.env_keys.is_empty() && !providers::SOCIAL_PLATFORMS.contains(&spec.name) {
                 entry["env_key"] = json!(spec.env_keys[0]);
             }
             let fs = registry::filter_support(spec.name);
@@ -394,7 +428,9 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
             .filter(|(on, _)| *on)
             .map(|(_, name)| name)
             .collect();
-            entry["filters"] = json!(filters.join(","));
+            if !filters.is_empty() {
+                entry["filters"] = json!(filters.join(","));
+            }
             entry
         })
         .collect();
@@ -403,8 +439,8 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "input": "query or url",
         "merge": "resolves to one of the modes below before anything runs",
         "providers": "those of the resolved mode",
-        "about": "The default. Rules 1-5 and 11 (URL, X cue, community cue, similar to <url>, patents (not patent leather), images of (not docker/vm images)), then metasearch.sh's routing model when logged in, then signal rules 6-10, then general. Never deep; social only on an explicit X cue. metadata.routing.auto reports mode, source and reason.",
-        "use": "Leave -m off unless you know the mode; pass -m deep or -m social to pay for those.",
+        "about": "The default: decisive rules (URL, X or platform cue, community cue, similar to <url>, patents, images of), then metasearch.sh's routing model when logged in, then signal rules, then general. See routing.",
+        "use": "Leave -m off unless you know the mode.",
     });
     let modes_info: Vec<serde_json::Value> = std::iter::once(auto_info)
         .chain(
@@ -412,7 +448,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
                 .iter()
                 .filter(|s| s.mode != types::Mode::Scrape)
                 .map(|s| {
-                    json!({
+                    let mut m = json!({
                         "name": s.mode.to_string(),
                         "input": s.input.as_str(),
                         "merge": s.merge.as_str(),
@@ -420,7 +456,11 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
                         "providers": s.providers.join(","),
                         "about": s.description,
                         "use": s.when_to_use,
-                    })
+                    });
+                    if let Some(c) = s.straggler_cap {
+                        m["wait_s"] = json!(c.as_secs());
+                    }
+                    m
                 }),
         )
         .collect();
@@ -431,11 +471,11 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "usage": "search \"<query>\" | search search -q <query|url> [-m auto|<mode>] [-p a,b] [-c N] [-f day|week|month|year] [-d dom,..] [--exclude-domain dom,..] [--country cc] [--lang ll] [--no-cache] [--no-rerank] [--max-chars N] [--allow-private]",
         "commands": {
             "search": "Search (default). -q is a URL in extract/scrape/similar",
-            "login": "Sign in to metasearch.sh (device flow); engines without your own key then run through your balance",
+            "login": "Sign in to metasearch.sh; engines without your key then run on your balance",
             "whoami": "Account email and balance",
             "logout": "Forget the key here; --revoke also revokes it server-side",
-            "doctor": "One billed test call per configured provider, plus the metasearch.sh account",
-            "usage": "Remaining credit per provider and on metasearch.sh (informational; never gates)",
+            "doctor": "One billed test call per configured provider",
+            "usage": "Remaining credit per provider and on metasearch.sh",
             "stats": "Local spend and usage from the search logs (--days N, --prune N)",
             "verify": "SMTP check of email addresses (no key; use sparingly)",
             "config": "show | set <key> <value|-> | check | path (keys.<provider>, settings.count, metasearch.max_providers)",
@@ -444,15 +484,17 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
             "skill": "install | status (agent skill file)",
             "update": "Self-update (--check to only check)",
         },
-        "global_flags": "--json --pretty --quiet --last --debug --x (= -m social -p xai)",
+        "global_flags": "--json --pretty --quiet --last --debug; --x --tiktok --instagram --youtube --threads (= -m social -p xai|tiktok|...)",
         "output": "Piped: one compact JSON line (--pretty indents it). Terminal: tables. --help and --version are plain text (with --json, an envelope). NO_COLOR or TERM=dumb turns colour off.",
         "search_engines": providers::SEARCH_ENGINES,
         "community_sources": providers::COMMUNITY_SOURCES,
-        "community": "-m community: reddit + hackernews, no key, $0 here (hosted: hackernews at a per-call price; reddit not offered). Hits: extra.score|points, num_comments, subreddit, author. Extract a reddit.com/r/<sub>/comments/<id> or news.ycombinator.com/item?id=N URL for the whole thread: '[score] author (depth N): body' lines, extra.comments[{id,parent,author,score,depth,created,body}], extra.route (live|archive|live+archive). Reddit is paced (~10/min machine-wide; 7 min rest after a captcha); archive search needs r/<name>. SEARCH_REDDIT_ROUTE=archive|live.",
+        "social_platforms": providers::SOCIAL_PLATFORMS,
+        "social": "Platforms run through metasearch.sh (search login). A cue (twitter, on tiktok, instagram reels, youtube, on threads, facebook page) pins them; threads and facebook (page search) only on a cue or -p. Hits: extra.platform, author, followers, views, likes, num_comments, shares, duration_s. Extract a post, video or page URL: caption, stats, transcript, extra.comments[{author,likes,text}].",
+        "community": "-m community: reddit + hackernews, no key, $0 here. Hits: extra.score|points, num_comments, subreddit, author. Extract a Reddit or HN thread URL for every comment: extra.comments[{id,parent,author,score,depth,created,body}], extra.route (live|archive|live+archive). Reddit is paced (~10/min machine-wide); archive search needs r/<name>; a refused search without one falls back to Reddit-wide search (route global). SEARCH_REDDIT_ROUTE=archive|live.",
         "exit_codes": {"0": "success", "1": "transient: retry", "2": "config, auth or credit: fix setup or top up", "3": "bad input", "4": "rate limited: wait"},
-        "routing": "-m defaults to auto: a URL -> extract; an explicit X cue (twitter/tweets, 'on X' with a capital X, x.com/, a lone @handle; never code like @types/node, @property, 'twitter bootstrap', 'x axis') -> social; reddit, hacker news, HN, r/<name>, 'what do people say about', 'opinions on', 'experiences with' (not 'reddit api/stock') -> community; 'similar to <url>' -> similar; patent words or a patent number (US/EP 7-8 digits, WO year+6; never 'patent leather' or a phone number) -> patents; 'images of' -> images (never docker, container, iso or vm images); else, logged in, metasearch.sh's routing model picks; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/yesterday/this week/latest/breaking/this month/this year also set -f unless you passed one. Never deep. Top-level mode is the mode that ran; metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit/hackernews).",
-        "transport": "Per provider: your own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted through metasearch.sh and charged to your balance; else not used. Without -p a fused mode sends at most 3 providers hosted (deep 6; metasearch.max_providers), named in warnings.",
-        "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls are never cancelled; stragglers go in providers_timed_out.",
+        "routing": "-m defaults to auto: a URL -> extract; an X cue (twitter/tweets, 'on X', x.com/, a lone @handle; never @types/node, 'twitter bootstrap', 'x axis') or a platform cue (tiktok, instagram, youtube, on threads, facebook page; not '<platform> api/sdk/embed') -> social, pinned to those platforms; reddit, hacker news, 'on HN', r/<name> (not r/min), 'what do people say about', 'opinions about', 'experiences with' -> community; 'similar to <url>' -> similar; patent words or numbers (never 'patent leather') -> patents; 'images of' -> images (never docker/vm images); else, logged in, metasearch.sh's routing model; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/this week/latest/this month/this year also set -f unless you passed one. Never deep. metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit, social for -p tiktok).",
+        "transport": "Per provider: your own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted through metasearch.sh on your balance; else not used. Without -p a fused mode sends at most 3 providers hosted (deep 6, social 4; metasearch.max_providers), named in warnings.",
+        "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls run to the deadline (social: wait_s once one answered); stragglers go in providers_timed_out.",
         "envelope": {
             "success": "{ version, status: success|partial_success|no_results, query, mode, results[{title,url,snippet,source,published?,image_url?,extra?}], answers?[{provider,text}], metadata{ elapsed_ms, result_count, providers_queried, providers_failed, providers_timed_out?, provider_results?, provider_failures?[{provider,category,http_status?,code,reason,retryable}], transport{name:direct|local|hosted}, cost?{micros,usd,basis:estimate|charged|mixed,by_provider}, routing?{auto?,reranked?}, warnings?, notes?, cached?, cache_age_secs? } }",
             "error": "{ version, status: error, error{ code, message, suggestion?, provider_failures?, cost? } }",
@@ -473,7 +515,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
             "key_precedence": "<PROVIDER>_API_KEY env > SEARCH_KEYS_* env > config file",
         },
         "auto_json_when_piped": true,
-        "not_suited_for": "GitHub repos, code, issues and PRs: use `gh search repos|code|issues|prs` (GitHub's own index and metadata).",
+        "not_suited_for": "GitHub repos, code, issues and PRs: use `gh search repos|code|issues|prs`.",
     })
 }
 
@@ -530,6 +572,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             if cli.x_only {
                 args.mode = cli::ModeArg::Fixed(types::Mode::Social);
                 args.providers = Some(vec!["xai".to_string()]);
+            }
+            // --tiktok, --instagram, --youtube, --threads: that platform only.
+            if let Some(p) = cli.platform {
+                args.mode = cli::ModeArg::Fixed(types::Mode::Social);
+                args.providers = Some(vec![p.to_string()]);
             }
 
             if cli.last {

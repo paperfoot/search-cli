@@ -1,0 +1,36 @@
+{
+ "success": true,
+ "credits_remaining": 25089,
+ "credits_charged": 1,
+ "post": {
+  "pk": "4021992321235799605",
+  "code": "DfQ_LTsm841",
+  "like_count": 4,
+  "taken_at": 1793678868,
+  "url": "https://www.threads.com/@dad.life.gaming/post/DfQ_LTsm841",
+  "caption": {
+   "text": "🔥NEW VIDEO🔥\nThe Best Budget Mechanical Gaming Keyboard? | Redragon TERRAFLARE K762 PRO Review\nhttps://youtu.be/9VVMMf5ZdQk\n\nCheck out @redragon_usa"
+  },
+  "user": {
+   "username": "dad.life.gaming",
+   "full_name": "Christian Gonzalez",
+   "is_verified": true
+  }
+ },
+ "comments": [
+  {
+   "pk": "4022594356649767659",
+   "code": "DfTIEE3mbLr",
+   "like_count": 0,
+   "taken_at": 1793750637,
+   "caption": {
+    "text": "The rgb on this looks super crisp in the footage"
+   },
+   "user": {
+    "username": "specialli_urs",
+    "full_name": "Specialiie",
+    "is_verified": false
+   }
+  }
+ ]
+}

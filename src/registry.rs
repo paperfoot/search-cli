@@ -64,6 +64,11 @@ pub struct ModeSpec {
     /// never abandoned while the server still works on it (PLAN.md §3.5).
     /// Calls already sent are never cancelled before it.
     pub deadline: Duration,
+    /// Fused modes only: once this long has passed and one provider has
+    /// answered with something, stop waiting for the rest (they are
+    /// reported in `providers_timed_out`, and a billed one is counted as
+    /// spent). `None` waits for every provider until the deadline.
+    pub straggler_cap: Option<Duration>,
 }
 
 const fn secs(s: u64) -> Duration {
@@ -84,6 +89,15 @@ const EXTRACT_CHAIN: &[&str] = &[
     "browserless",
 ];
 
+/// The social fan-out without a platform cue: X, TikTok, Instagram,
+/// YouTube. Threads and Facebook (page search) run on their cue or `-p`.
+const SOCIAL_FAN_OUT: &[&str] = &["xai", "tiktok", "instagram", "youtube"];
+
+/// How long the social fan-out waits before it takes the answers it has:
+/// the platforms answer in 3 to 14 s (measured 4 Nov 2026) and X's median
+/// is 18 s, so 20 s keeps a typical X answer and drops only a straggler.
+pub const SOCIAL_WAIT: Duration = Duration::from_secs(20);
+
 pub const MODES: &[ModeSpec] = &[
     ModeSpec {
         mode: Mode::General,
@@ -102,6 +116,7 @@ pub const MODES: &[ModeSpec] = &[
         description: "Broad web search fused across all general-capable providers",
         when_to_use: "Default for any web lookup that doesn't fit a specialist mode.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::News,
@@ -109,8 +124,9 @@ pub const MODES: &[ModeSpec] = &[
         merge: MergeKind::Fused,
         providers: &["serper", "brave", "linkup", "parallel", "tavily", "perplexity"],
         description: "News-specific endpoints of the news-capable providers",
-        when_to_use: "Current events and anything where recency dominates; combine with -f day or -f week.",
+        when_to_use: "Current events; combine with -f day or -f week.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Academic,
@@ -118,8 +134,9 @@ pub const MODES: &[ModeSpec] = &[
         merge: MergeKind::Fused,
         providers: &["exa", "serper", "tavily", "perplexity"],
         description: "Papers, preprints, and studies on the open web (semantic + web search)",
-        when_to_use: "Finding research by topic. For Google Scholar records (citations, versions, PDFs) use scholar instead.",
+        when_to_use: "Research by topic; for Google Scholar records (citations, PDFs) use scholar.",
         deadline: secs(30),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::People,
@@ -129,6 +146,7 @@ pub const MODES: &[ModeSpec] = &[
         description: "Person and LinkedIn-profile search (Exa category search)",
         when_to_use: "Finding a specific person, their role, or their LinkedIn profile.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Deep,
@@ -145,17 +163,19 @@ pub const MODES: &[ModeSpec] = &[
             "xai",
         ],
         description: "Maximum-coverage fan-out (web + X/Twitter + Brave grounding)",
-        when_to_use: "Research where recall matters more than latency. Raise -c (e.g. -c 30) to keep more of the fused pool.",
+        when_to_use: "Recall over latency; raise -c (e.g. -c 30) to keep more of the pool.",
         deadline: secs(50),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Extract,
         input: InputKind::Url,
         merge: MergeKind::Chain,
         providers: EXTRACT_CHAIN,
-        description: "Full page content as markdown: a direct fetch that asks for markdown first, then (when the site refuses it) a local browser-fingerprint fetch, then Jina Reader, Firecrawl and Browserless until one returns real content",
-        when_to_use: "Reading one specific page, including JS-heavy or anti-bot pages. -q must be a full URL.",
+        description: "Full page as markdown: a direct fetch (markdown first), a browser-fingerprint fetch when refused, then Jina Reader, Firecrawl, Browserless. Reddit, HN and social post URLs go to their source first",
+        when_to_use: "One page, JS-heavy or anti-bot pages included; -q is a URL.",
         deadline: secs(65),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Similar,
@@ -165,6 +185,7 @@ pub const MODES: &[ModeSpec] = &[
         description: "Pages semantically similar to the given URL (Exa findSimilar)",
         when_to_use: "\"More like this page\": competitors, alternatives, related coverage. -q must be a full URL.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Scrape,
@@ -174,6 +195,7 @@ pub const MODES: &[ModeSpec] = &[
         description: "Alias of extract — identical provider chain and behavior",
         when_to_use: "Same as extract; the two names are interchangeable.",
         deadline: secs(65),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Scholar,
@@ -183,6 +205,7 @@ pub const MODES: &[ModeSpec] = &[
         description: "Google Scholar records (citations, versions, PDF links)",
         when_to_use: "Scholarly metadata for a known paper/author. For topic discovery use academic.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Patents,
@@ -192,6 +215,7 @@ pub const MODES: &[ModeSpec] = &[
         description: "Google Patents search",
         when_to_use: "Prior art, patent families, inventor/assignee lookups.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Images,
@@ -199,8 +223,9 @@ pub const MODES: &[ModeSpec] = &[
         merge: MergeKind::Single,
         providers: &["serper"],
         description: "Google Images search (returns image_url per result)",
-        when_to_use: "Finding images; check the image_url field of each result.",
+        when_to_use: "Images; see each result's image_url.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Places,
@@ -210,15 +235,17 @@ pub const MODES: &[ModeSpec] = &[
         description: "Local businesses and places (Google Maps data)",
         when_to_use: "Businesses, opening hours, addresses near a location.",
         deadline: secs(25),
+        straggler_cap: None,
     },
     ModeSpec {
         mode: Mode::Social,
         input: InputKind::Query,
-        merge: MergeKind::Single,
-        providers: &["xai"],
-        description: "Live X/Twitter search via xAI Grok — an X summary plus cited posts",
-        when_to_use: "What's being said on X, trending topics, account activity. Here -d/--exclude-domain filter X handles, not domains.",
+        merge: MergeKind::Fused,
+        providers: SOCIAL_FAN_OUT,
+        description: "X, TikTok, Instagram reels and YouTube at once, fused; a platform cue pins one (see social)",
+        when_to_use: "Trends, reviews, creators and reactions on social platforms. With xai, -d filters X handles.",
         deadline: secs(65),
+        straggler_cap: Some(SOCIAL_WAIT),
     },
     ModeSpec {
         mode: Mode::Community,
@@ -226,14 +253,18 @@ pub const MODES: &[ModeSpec] = &[
         merge: MergeKind::Fused,
         providers: &["reddit", "hackernews"],
         description: "What real people say: Reddit posts and Hacker News stories and comments, fused",
-        when_to_use: "Opinions, experiences and recommendations from real users. Extract a hit's URL to read the whole thread.",
+        when_to_use: "Opinions and experiences from real users. Extract a hit's URL for the whole thread.",
         deadline: secs(30),
+        straggler_cap: None,
     },
 ];
 
-/// The providers a mode tries for this input, in order. A Reddit or Hacker
-/// News thread URL in extract goes to its site's provider first (the whole
-/// thread with every comment), then the usual chain.
+/// The providers a mode tries for this input, in order.
+/// - extract: a Reddit or Hacker News thread URL goes to its site's
+///   provider first (the whole thread with every comment), a TikTok,
+///   Instagram, YouTube, Facebook or Threads post to its platform; then the
+///   usual chain.
+/// - social: a platform cue pins the call to the platforms it names.
 pub fn providers_for(mode: Mode, query: &str) -> Vec<&'static str> {
     let base = spec(mode).providers;
     if matches!(mode, Mode::Extract | Mode::Scrape) {
@@ -242,10 +273,16 @@ pub fn providers_for(mode: Mode, query: &str) -> Vec<&'static str> {
         } else if providers::hackernews::item_id(query).is_some() {
             Some("hackernews")
         } else {
-            None
+            providers::social_api::platform_of_url(query)
         };
         if let Some(first) = first {
             return std::iter::once(first).chain(base.iter().copied()).collect();
+        }
+    }
+    if mode == Mode::Social {
+        let pins = crate::router::social_pins(query);
+        if !pins.is_empty() {
+            return pins;
         }
     }
     base.to_vec()
@@ -607,6 +644,20 @@ mod tests {
         assert_eq!(
             providers_for(Mode::Community, "q"),
             ["reddit", "hackernews"]
+        );
+        let tiktok = providers_for(
+            Mode::Extract,
+            "https://www.tiktok.com/@jerryytech/video/7681548583702695181",
+        );
+        assert_eq!(tiktok[0], "tiktok");
+        assert_eq!(&tiktok[1..], spec(Mode::Extract).providers);
+        assert_eq!(
+            providers_for(Mode::Extract, "https://youtu.be/3rKPzh3Pr0o")[0],
+            "youtube"
+        );
+        assert_eq!(
+            providers_for(Mode::Extract, "https://www.facebook.com/keychron")[0],
+            "facebook"
         );
     }
 

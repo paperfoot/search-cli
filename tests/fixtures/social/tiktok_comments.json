@@ -1,0 +1,38 @@
+{
+ "success": true,
+ "credits_remaining": 25091,
+ "credits_charged": 1,
+ "comments": [
+  {
+   "text": "75% for life",
+   "digg_count": 339,
+   "create_time": 1788508592,
+   "reply_comment_total": 12,
+   "user": {
+    "unique_id": "adam070513",
+    "nickname": "Adam"
+   }
+  },
+  {
+   "text": "75% is sooo underrated",
+   "digg_count": 45,
+   "create_time": 1788539274,
+   "reply_comment_total": 0,
+   "user": {
+    "unique_id": "mr.botond96",
+    "nickname": "MR Botond"
+   }
+  },
+  {
+   "text": "as a 65% keyboard user, 75% is much better and more elegant",
+   "digg_count": 21,
+   "create_time": 1788548869,
+   "reply_comment_total": 1,
+   "user": {
+    "unique_id": "m7m90000",
+    "nickname": "𝕊𝕧𝕚𝕟✘🌹"
+   }
+  }
+ ],
+ "total": 263
+}

@@ -4,7 +4,9 @@
 //! model is skipped); rule 11, a community cue (Reddit, Hacker News, "what
 //! do people say about"), is checked right after rule 2. Rules 6-10 are signals: when not logged in the first one in table
 //! order decides; logged in, metasearch.sh's routing model decides. Auto never picks `deep`, and
-//! picks `social` only on an explicit X/Twitter cue. The server runs the same
+//! picks `social` only on an explicit platform cue: X/Twitter, TikTok,
+//! Instagram, YouTube, Threads or a Facebook page. The cue also pins the
+//! social call to the platforms it names ([`social_pins`]). The server runs the same
 //! patterns; the table tests below mirror its vectors.
 
 use crate::types::{AutoDecision, Mode};
@@ -18,6 +20,8 @@ pub struct Hit {
     pub cue: String,
     /// Rule 3 searches the captured URL, not the whole sentence.
     pub query: Option<String>,
+    /// Rule 2: the platforms named, for the reason ("X/Twitter", "TikTok").
+    pub label: Option<String>,
 }
 
 /// An explicit `-p` is obeyed exactly (ROUTING.md principle 1), so auto
@@ -37,11 +41,14 @@ pub fn fit_pinned(mode: Mode, pinned: &[String]) -> Option<AutoDecision> {
     if cannot.is_empty() {
         return None;
     }
-    // Pinned community sources (-p reddit, -p hackernews) search community.
+    // Pinned community sources (-p reddit, -p hackernews) search community;
+    // pinned platforms (-p tiktok) search social.
     let to = if specs.iter().all(|s| s.modes.contains(&Mode::General)) {
         Mode::General
     } else if specs.iter().all(|s| s.modes.contains(&Mode::Community)) {
         Mode::Community
+    } else if specs.iter().all(|s| s.modes.contains(&Mode::Social)) {
+        Mode::Social
     } else {
         return None;
     };
@@ -68,8 +75,8 @@ pub fn decisive(query: &str) -> Option<Hit> {
         h.query = Some(q.to_string());
         return Some(h);
     }
-    if let Some(cue) = x_cue(q) {
-        return Some(hit(2, Mode::Social, &cue));
+    if let Some(h) = social_hit(q) {
+        return Some(h);
     }
     if let Some(cue) = community_cue(q) {
         return Some(hit(11, Mode::Community, &cue));
@@ -228,7 +235,11 @@ pub fn resolve_local(query: &str) -> (AutoDecision, Option<String>) {
 pub fn decision_for(h: &Hit, source: &str) -> AutoDecision {
     let why = match h.rule {
         1 => "The query is a URL".to_string(),
-        2 => format!("Mentions X/Twitter ('{}')", h.cue),
+        2 => format!(
+            "Mentions {} ('{}')",
+            h.label.as_deref().unwrap_or("X/Twitter"),
+            h.cue
+        ),
         3 => "Asked for sites similar to a URL".to_string(),
         11 => format!("Asks what people say ('{}')", h.cue),
         _ => format!("Matched '{}'", h.cue),
@@ -272,6 +283,7 @@ fn hit(rule: u8, mode: Mode, cue: &str) -> Hit {
         mode,
         cue: cue.to_string(),
         query: None,
+        label: None,
     }
 }
 
@@ -596,6 +608,197 @@ fn lone_handle(q: &str) -> Option<String> {
     None
 }
 
+/// Rule 2's platform cues: (provider, name, phrases). A phrase matches as
+/// whole words; [`PLATFORM_NOT`] after it, or "embed" before it, makes it a
+/// developer question, not a request for posts. Bare "threads" (code,
+/// Reddit threads) and bare "facebook" (React, Prophet) are not cues.
+pub const PLATFORM_CUES: &[(&str, &str, &[&str])] = &[
+    (
+        "tiktok",
+        "TikTok",
+        &[
+            "on tiktok",
+            "tiktok videos",
+            "tiktok video",
+            "tiktoks",
+            "tiktok",
+            "tik tok",
+        ],
+    ),
+    (
+        "instagram",
+        "Instagram",
+        &[
+            "on instagram",
+            "instagram reels",
+            "instagram reel",
+            "instagram posts",
+            "instagram",
+            "on insta",
+            "insta reels",
+            "ig reels",
+            "ig reel",
+            "on ig",
+        ],
+    ),
+    (
+        "youtube",
+        "YouTube",
+        &[
+            "on youtube",
+            "youtube comments",
+            "youtube videos",
+            "youtube video",
+            "youtube shorts",
+            "youtubers",
+            "youtuber",
+            "youtube",
+            "on yt",
+        ],
+    ),
+    (
+        "threads",
+        "Threads",
+        &[
+            "on threads",
+            "threads posts",
+            "threads app",
+            "threads.net",
+            "threads.com",
+            "meta threads",
+        ],
+    ),
+    (
+        "facebook",
+        "Facebook",
+        &[
+            "on facebook",
+            "facebook pages",
+            "facebook page",
+            "facebook posts",
+            "facebook post",
+            "fb pages",
+            "fb page",
+            "on fb",
+        ],
+    ),
+];
+
+/// Words after a platform name that make the query about building on it.
+const PLATFORM_NOT: &[&str] = &[
+    "api",
+    "apis",
+    "sdk",
+    "oauth",
+    "pixel",
+    "stock",
+    "ipo",
+    "shares",
+    "earnings",
+    "logo",
+    "inc",
+    "embed",
+    "embeds",
+    "login",
+    "downloader",
+    "dl",
+    "dlp",
+    "graph",
+    "clone",
+    "developer",
+    "developers",
+    "iframe",
+    "player",
+    "data",
+];
+
+/// Where `phrase` occurs in `lower` as a cue: whole words, not before a
+/// developer word, not after "embed".
+fn cue_at(lower: &str, phrase: &str) -> Option<usize> {
+    lower.match_indices(phrase).map(|(i, _)| i).find(|&i| {
+        let end = i + phrase.len();
+        if !boundary_before(lower, i) || !boundary_after(lower, end) {
+            return false;
+        }
+        let next = lower[end..].trim_start_matches([' ', '-', '_']);
+        let dev = PLATFORM_NOT
+            .iter()
+            .any(|w| next.starts_with(w) && boundary_after(next, w.len()));
+        !dev && !after_embed(&lower[..i])
+    })
+}
+
+/// The platforms a query names, in table order, with the phrase that named
+/// each.
+pub fn platform_cues(query: &str) -> Vec<(&'static str, &'static str, String)> {
+    let lower = query.to_lowercase();
+    PLATFORM_CUES
+        .iter()
+        .filter_map(|(provider, label, phrases)| {
+            phrases
+                .iter()
+                .find(|p| cue_at(&lower, p).is_some())
+                .map(|p| (*provider, *label, p.to_string()))
+        })
+        .collect()
+}
+
+/// The social providers a query pins: `xai` for an X cue, then each
+/// platform it names. Empty means the default fan-out.
+pub fn social_pins(query: &str) -> Vec<&'static str> {
+    let x = x_cue(query.trim()).map(|_| "xai");
+    x.into_iter()
+        .chain(platform_cues(query).into_iter().map(|(p, _, _)| p))
+        .collect()
+}
+
+/// Rule 2: an X cue or a platform cue, labelled with every platform named.
+fn social_hit(q: &str) -> Option<Hit> {
+    let x = x_cue(q);
+    let platforms = platform_cues(q);
+    let cue = x
+        .clone()
+        .or_else(|| platforms.first().map(|(_, _, c)| c.clone()))?;
+    let labels: Vec<&str> = x
+        .iter()
+        .map(|_| "X/Twitter")
+        .chain(platforms.iter().map(|(_, l, _)| *l))
+        .collect();
+    let mut h = hit(2, Mode::Social, &cue);
+    h.label = Some(labels.join(" and "));
+    Some(h)
+}
+
+/// `query` without its platform cue phrases, whitespace collapsed: what a
+/// platform's own search is sent.
+pub fn strip_platform_cues(query: &str) -> String {
+    let mut phrases: Vec<&str> = PLATFORM_CUES
+        .iter()
+        .flat_map(|(_, _, p)| p.iter().copied())
+        .collect();
+    phrases.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    let mut text = query.to_string();
+    for p in phrases {
+        loop {
+            let lower = text.to_lowercase();
+            // Lowercasing can change byte lengths outside ASCII; only cut
+            // when the offsets line up.
+            if lower.len() != text.len() {
+                break;
+            }
+            let Some(i) = lower
+                .match_indices(p)
+                .map(|(i, _)| i)
+                .find(|&i| boundary_before(&lower, i) && boundary_after(&lower, i + p.len()))
+            else {
+                break;
+            };
+            text.replace_range(i..i + p.len(), " ");
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Phrases that ask what real people say.
 const COMMUNITY_PHRASES: &[&str] = &[
     "reddit",
@@ -608,7 +811,6 @@ const COMMUNITY_PHRASES: &[&str] = &[
     "what do people think about",
     "what do people think of",
     "what are people saying about",
-    "opinions on",
     "opinions about",
     "experiences with",
 ];
@@ -616,9 +818,17 @@ const COMMUNITY_PHRASES: &[&str] = &[
 /// Words after "reddit" that make it the company, not its threads.
 const REDDIT_COMPANY: &[&str] = &["api", "stock", "ipo", "earnings", "shares", "logo", "inc"];
 
+/// Units written like a subreddit: `r/min`, `r/sec` ("3000 r/min").
+const UNIT_NAMES: &[&str] = &[
+    "min", "mins", "sec", "secs", "hr", "hrs", "hour", "hours", "day", "days", "rad", "deg", "rev",
+    "revs", "mol", "kg", "km", "mph", "kmh", "rpm", "ms",
+];
+
 /// Rule 11: a community cue. "reddit" (not "reddit api" or "reddit
-/// stock"), Hacker News or `HN` (capitals), an `r/<name>`, or a phrase that
-/// asks what people say.
+/// stock"), Hacker News or "on HN" (capitals; bare "HN" is also Honduras),
+/// an `r/<name>` of 3+ characters that is not a unit (`r/min`), or a phrase
+/// that asks what people say ("opinions on" is not one: "supreme court
+/// opinions on ...").
 fn community_cue(q: &str) -> Option<String> {
     let lower = q.to_lowercase();
     for p in COMMUNITY_PHRASES {
@@ -639,20 +849,21 @@ fn community_cue(q: &str) -> Option<String> {
             return Some(p.to_string());
         }
     }
-    if q.match_indices("HN")
+    if q.match_indices("on HN")
         .any(|(i, m)| boundary_before(q, i) && boundary_after(q, i + m.len()))
     {
-        return Some("HN".to_string());
+        return Some("on HN".to_string());
     }
     q.split_whitespace()
         .find(|w| {
             let w = w.trim_start_matches('/');
-            w.len() > 3
-                && w.starts_with("r/")
-                && w[2..]
-                    .trim_end_matches(['/', ',', '.', '?'])
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            let Some(name) = w.strip_prefix("r/") else {
+                return false;
+            };
+            let name = name.trim_end_matches(['/', ',', '.', '?']);
+            name.len() >= 3
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !UNIT_NAMES.contains(&name.to_ascii_lowercase().as_str())
         })
         .map(|w| w.trim_start_matches('/').to_string())
 }
@@ -968,10 +1179,9 @@ mod tests {
                 "what are people saying about htmx",
                 "what are people saying about",
             ),
-            ("opinions on tailwind v4", "opinions on"),
             ("opinions about remote work", "opinions about"),
             ("experiences with hetzner", "experiences with"),
-            ("HN discussion of the outage", "HN"),
+            ("what they said on HN about the outage", "on HN"),
             ("r/rust async runtimes", "r/rust"),
         ] {
             let h = decisive(q).unwrap_or_else(|| panic!("{q}: no rule"));
@@ -990,15 +1200,100 @@ mod tests {
             "experience with python jobs",
             "redditor meaning",
             "opinion on the supreme court ruling",
+            // Reviewer's false routes (4 Nov): a unit, a court, a country code.
+            "convert 3000 r/min to rad/s",
+            "supreme court opinions on affirmative action",
+            "HN visa requirements Honduras",
+            "HN discussion of the outage",
+            "r/m2 conversion",
         ] {
             assert_ne!(local(q).0, "community", "{q}");
         }
         // X wins over a community phrase: rule 2 comes first.
         assert_eq!(local("what are people saying on X about htmx").0, "social");
-        let (d, _) = resolve_local("opinions on tailwind v4");
+        let (d, _) = resolve_local("opinions about tailwind v4");
         assert_eq!(
             d.reason,
-            "Asks what people say ('opinions on') (rule 11); used community."
+            "Asks what people say ('opinions about') (rule 11); used community."
+        );
+    }
+
+    /// Rule 2's platform cues: one per cue, each pinning its platform, and
+    /// developer questions that stay out.
+    #[test]
+    fn platform_cues_route_social_and_pin_their_platform() {
+        for (q, pins, cue) in [
+            ("mechanical keyboard on tiktok", vec!["tiktok"], "on tiktok"),
+            ("tiktok latte art", vec!["tiktok"], "tiktok"),
+            (
+                "instagram reels latte art",
+                vec!["instagram"],
+                "instagram reels",
+            ),
+            ("best desk setups on ig", vec!["instagram"], "on ig"),
+            (
+                "youtube comments on the m5 macbook",
+                vec!["youtube"],
+                "youtube comments",
+            ),
+            ("keyboard reviews youtube", vec!["youtube"], "youtube"),
+            (
+                "what people post on threads about bluesky",
+                vec!["threads"],
+                "on threads",
+            ),
+            ("keychron facebook page", vec!["facebook"], "facebook page"),
+            (
+                "tiktok vs instagram reels for bakeries",
+                vec!["tiktok", "instagram"],
+                "tiktok",
+            ),
+            (
+                "what twitter says about tiktok",
+                vec!["xai", "tiktok"],
+                "twitter",
+            ),
+        ] {
+            let h = decisive(q).unwrap_or_else(|| panic!("{q}: no rule"));
+            assert_eq!(
+                (h.rule, h.mode, h.cue.as_str()),
+                (2, Mode::Social, cue),
+                "{q}"
+            );
+            assert_eq!(social_pins(q), pins, "{q}");
+        }
+        for q in [
+            "youtube api quota limits",
+            "embed a youtube video in react",
+            "youtube-dl alternatives",
+            "tiktok sdk android login",
+            "instagram graph api permissions",
+            "rust threads vs async tasks",
+            "facebook prophet forecasting",
+            "reddit threads about rust",
+        ] {
+            assert_ne!(local(q).0, "social", "{q}");
+            assert!(social_pins(q).is_empty(), "{q}");
+        }
+        let (d, _) = resolve_local("mechanical keyboard on tiktok");
+        assert_eq!(
+            d.reason,
+            "Mentions TikTok ('on tiktok') (rule 2); used social."
+        );
+        let (d, _) = resolve_local("trending on twitter");
+        assert!(
+            d.reason.starts_with("Mentions X/Twitter ('twitter')"),
+            "{}",
+            d.reason
+        );
+        assert_eq!(
+            strip_platform_cues("Mechanical keyboard on TikTok"),
+            "Mechanical keyboard"
+        );
+        let p = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            fit_pinned(Mode::General, &p(&["tiktok"])).unwrap().mode,
+            "social"
         );
     }
 

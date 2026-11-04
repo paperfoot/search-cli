@@ -1,0 +1,69 @@
+{
+ "success": true,
+ "credits_remaining": 25096,
+ "credits_charged": 1,
+ "videos": [
+  {
+   "type": "video",
+   "id": "3rKPzh3Pr0o",
+   "url": "https://www.youtube.com/watch?v=3rKPzh3Pr0o",
+   "title": "Full-Sized Keyboards are FINALLY Good in 2026.",
+   "thumbnail": "https://i.ytimg.com/vi/3rKPzh3Pr0o/hq720.jpg?sqp=-oaymwEnCNAFEJQDSFryq4qpAxkIARUAAIhCGAHYAQHiAQoIGBACGAY4AUAB&rs=AOn4CLD7BJOldsK4isQkDSxqkfYP6N2IRg",
+   "viewCountInt": 431431,
+   "publishedTime": "2026-05-04T01:35:02.421Z",
+   "lengthSeconds": 811,
+   "channel": {
+    "title": "Switch and Click",
+    "handle": "SwitchandClickOfficial"
+   }
+  },
+  {
+   "type": "video",
+   "id": "8ta4dSQ-P9c",
+   "url": "https://www.youtube.com/watch?v=8ta4dSQ-P9c",
+   "title": "The Best Keyboard at Every Price (Don’t Waste your Money)",
+   "thumbnail": "https://i.ytimg.com/vi/8ta4dSQ-P9c/hq720.jpg?sqp=-oaymwEnCNAFEJQDSFryq4qpAxkIARUAAIhCGAHYAQHiAQoIGBACGAY4AUAB&rs=AOn4CLD9j6SuWFfore9DI3lRuBHsdVop5Q",
+   "viewCountInt": 1389057,
+   "publishedTime": "2025-11-04T01:35:02.421Z",
+   "lengthSeconds": 1088,
+   "channel": {
+    "title": "Switch and Click",
+    "handle": "SwitchandClickOfficial"
+   }
+  },
+  {
+   "type": "video",
+   "id": "Sr65wV4i7gA",
+   "url": "https://www.youtube.com/watch?v=Sr65wV4i7gA",
+   "title": "My Most Requested Keyboard Ever.",
+   "thumbnail": "https://i.ytimg.com/vi/Sr65wV4i7gA/hq720.jpg?sqp=-oaymwEnCNAFEJQDSFryq4qpAxkIARUAAIhCGAHYAQHiAQoIGBACGAY4AUAB&rs=AOn4CLB1-XacJsF2wHmQsszUiVuaq9F0dQ",
+   "viewCountInt": 876051,
+   "publishedTime": "2026-10-04T01:35:02.421Z",
+   "lengthSeconds": 630,
+   "channel": {
+    "title": "Hipyo Tech",
+    "handle": "HipyoTech"
+   }
+  }
+ ],
+ "shorts": [
+  {
+   "type": "short",
+   "id": "qehEJ2bZrRo",
+   "url": "https://www.youtube.com/watch?v=qehEJ2bZrRo",
+   "title": "This Keyboard is BUBBLE HEAVEN.",
+   "viewCountInt": 6200000,
+   "channel": {}
+  },
+  {
+   "type": "short",
+   "id": "epI4qs7WlUo",
+   "url": "https://www.youtube.com/watch?v=epI4qs7WlUo",
+   "title": "The sound is AMAZING! #customkeyboard #mechanicalkeyboard #gamingsetup",
+   "viewCountInt": 1500,
+   "channel": {}
+  }
+ ],
+ "channels": [],
+ "playlists": []
+}

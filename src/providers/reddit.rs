@@ -13,6 +13,11 @@
 //!   archive alone serves it. Archive search needs a subreddit
 //!   (`r/<name>` in the query).
 //!
+//! - **Global search fallback:** when the live route refuses a search that
+//!   names no subreddit, the social platforms' upstream (ScrapeCreators'
+//!   Reddit search) answers it: directly with `SCRAPECREATORS_API_KEY`, else
+//!   through metasearch.sh when logged in and the server offers it.
+//!
 //! `SEARCH_REDDIT_ROUTE=archive` skips the live route; `live` skips the
 //! archive.
 
@@ -686,6 +691,46 @@ fn parse_archive_tree(body: &str) -> Result<(Vec<Comment>, u64), String> {
     Ok((out, more))
 }
 
+/// Posts of the global search fallback (`/v1/reddit/search`).
+pub fn parse_global_search(body: &serde_json::Value) -> Vec<SearchResult> {
+    use super::social_api as api;
+    body["posts"]
+        .as_array()
+        .map(|posts| {
+            posts
+                .iter()
+                .filter_map(|p| {
+                    let url = api::non_empty(api::text(p, "/url")).or_else(|| {
+                        api::non_empty(api::text(p, "/permalink")).map(|l| format!("{LIVE}{l}"))
+                    })?;
+                    thread_ref(&url)?;
+                    let sub = api::text(p, "/subreddit");
+                    let body = thread::html_to_text(&api::text(p, "/selftext"));
+                    Some(SearchResult {
+                        title: api::text(p, "/title"),
+                        url,
+                        snippet: if body.is_empty() {
+                            format!("r/{sub}")
+                        } else {
+                            thread::clip(&body, 500)
+                        },
+                        source: "reddit".into(),
+                        published: api::iso(p, "/created_utc"),
+                        image_url: None,
+                        extra: Some(serde_json::json!({
+                            "subreddit": sub,
+                            "score": api::num(p, "/score"),
+                            "num_comments": api::num(p, "/num_comments"),
+                            "author": api::text(p, "/author"),
+                            "route": "global",
+                        })),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_archive_search(body: &str) -> Result<Vec<SearchResult>, String> {
     let list: ArchiveList<ArchivePost> = serde_json::from_str(body).map_err(archive_error)?;
     if let Some(e) = list.error {
@@ -884,6 +929,7 @@ impl Reddit {
                 Err(e) => why.push(e),
             }
         }
+        let live_refused = routes.live && !why.is_empty();
         if routes.archive {
             match subreddit_in(call.query) {
                 Some((sub, rest)) => {
@@ -912,6 +958,13 @@ impl Reddit {
                 ),
             }
         }
+        // Reddit refused and the query names no subreddit: global search.
+        if live_refused && subreddit_in(call.query).is_none() {
+            match self.global_search(call).await {
+                Ok(out) => return Ok(out),
+                Err(e) => why.push(e),
+            }
+        }
         let message = why.join("; ");
         let category = if message.starts_with("challenge") {
             FailureCategory::Rejected
@@ -926,6 +979,73 @@ impl Reddit {
             category,
             message,
         })
+    }
+}
+
+impl Reddit {
+    /// The global search fallback: direct with the platforms' key, else
+    /// hosted when metasearch.sh offers Reddit.
+    async fn global_search(&self, call: &Call<'_>) -> Result<Output, String> {
+        use super::social_api as api;
+        let key = super::resolve_key("", api::ENV_KEYS[0]);
+        if !key.is_empty() {
+            // -f is already one of day, week, month, year.
+            let timeframe = call.opts.freshness.as_deref().unwrap_or_default();
+            let r = api::get(
+                self,
+                &self.ctx,
+                &key,
+                "/v1/reddit/search",
+                &[
+                    ("query", call.query),
+                    ("timeframe", timeframe),
+                    ("trim", "true"),
+                ],
+                call.timeout,
+            )
+            .await
+            .map_err(|e| format!("global search: {e}"))?;
+            return Ok(api::search_output(
+                parse_global_search(&r.body),
+                call.count,
+                r.credits,
+            ));
+        }
+        let client = crate::hosted::MetasearchClient::new(&self.ctx)
+            .ok()
+            .flatten()
+            .ok_or("global search needs `search login`")?;
+        let offered = client
+            .manifest()
+            .await
+            .is_some_and(|m| m.offer("reddit", Mode::Community).is_some());
+        if !offered {
+            return Err("global search is not offered by metasearch.sh yet".into());
+        }
+        let idempotency = uuid::Uuid::new_v4().to_string();
+        let mut out = client
+            .search(
+                "reddit",
+                Mode::Community,
+                call.query,
+                call.count,
+                &super::NO_FILTERS,
+                &[],
+                &idempotency,
+                call.timeout,
+            )
+            .await
+            .map_err(|e| format!("global search through metasearch.sh: {e}"))?;
+        for r in &mut out.results {
+            if let Some(obj) = r
+                .extra
+                .get_or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+            {
+                obj.insert("route".into(), "hosted".into());
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1108,6 +1228,25 @@ mod tests {
                 archive: false
             }
         );
+    }
+
+    /// When Reddit refuses a search that names no subreddit, the global
+    /// search answers; its posts read like the live ones.
+    #[test]
+    fn global_search_posts_parse_like_live_ones() {
+        let body: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/social/reddit_search.json"
+        ))
+        .unwrap();
+        let hits = parse_global_search(&body);
+        assert_eq!(hits.len(), 3);
+        let h = &hits[0];
+        assert!(thread_ref(&h.url).is_some(), "{}", h.url);
+        let e = h.extra.as_ref().unwrap();
+        assert_eq!(e["subreddit"], "developersIndia");
+        assert_eq!(e["num_comments"], 49);
+        assert_eq!(e["route"], "global");
+        assert!(h.published.is_some());
     }
 
     #[test]
