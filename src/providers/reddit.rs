@@ -1023,17 +1023,20 @@ impl Reddit {
             return Err("global search is not offered by metasearch.sh yet".into());
         }
         let idempotency = uuid::Uuid::new_v4().to_string();
-        let mut out = client
-            .search(
-                "reddit",
-                Mode::Community,
-                call.query,
-                call.count,
-                &super::NO_FILTERS,
-                &[],
-                &idempotency,
-                call.timeout,
-            )
+        let body = crate::hosted::search_body(
+            Mode::Community,
+            call.query,
+            call.count,
+            &super::NO_FILTERS,
+            &crate::hosted::BodyOpts {
+                providers: Some(&["reddit"]),
+                allowed: &[],
+                rerank: None,
+                fresh: false,
+            },
+        );
+        let (mut out, _) = client
+            .search("reddit", &body, &idempotency, call.timeout)
             .await
             .map_err(|e| format!("global search through metasearch.sh: {e}"))?;
         for r in &mut out.results {

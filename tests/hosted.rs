@@ -186,26 +186,53 @@ fn manifest() -> Value {
         "limits": { "max_count": 20 },
         "modes": [
             { "mode": "general", "deadline_ms": 20000, "providers": GENERAL.iter().map(|n| entry(n)).collect::<Vec<_>>() },
+            { "mode": "academic", "deadline_ms": 20000, "providers": [entry("exa"), entry("serper")] },
+            { "mode": "social", "deadline_ms": 65000, "providers": [entry("xai"), entry("tiktok"), entry("instagram"), entry("youtube")] },
             { "mode": "places", "deadline_ms": 20000, "providers": [entry("serper")] },
             { "mode": "images", "deadline_ms": 20000, "providers": [entry("serper")] },
         ],
     })
 }
 
-/// A 200 for one pinned provider: three results unique to it.
+/// A 200 the way the server answers: one pinned provider gives three
+/// results unique to it; several are fused, each charged; none is routed to
+/// the cheapest (serper, a chain) and, unless `rerank: false`, reranked.
 fn search_ok(req: &Req) -> Reply {
-    let p = req.body["providers"][0].as_str().unwrap_or("?").to_string();
-    let results: Vec<Value> = (0..3)
-        .map(|i| json!({ "title": format!("{p} result {i}"), "url": format!("https://{p}.example/{i}"),
-                         "snippet": "about rust", "imageUrl": if i == 0 { json!("https://img.example/a.png") } else { Value::Null } }))
+    let pinned: Vec<String> = req.body["providers"]
+        .as_array()
+        .map(|a| a.iter().map(|p| p.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default();
+    let routed = pinned.is_empty();
+    let engines = if routed {
+        vec!["serper".to_string()]
+    } else {
+        pinned.clone()
+    };
+    let mut results: Vec<Value> = Vec::new();
+    for p in &engines {
+        for i in 0..3 {
+            results.push(json!({ "title": format!("{p} result {i}"), "url": format!("https://{p}.example/{i}"),
+                "snippet": "about rust", "imageUrl": if i == 0 { json!("https://img.example/a.png") } else { Value::Null },
+                "sources": [{ "provider": p, "rank": i + 1 }] }));
+        }
+    }
+    let attempts: Vec<Value> = engines
+        .iter()
+        .map(|p| json!({ "provider": p, "outcome": "ok", "latency_ms": 100, "charged_micros": 1500 }))
         .collect();
+    let charged = 1500 * engines.len() as u64;
+    let mut routing = json!({ "merge": if engines.len() > 1 { "fused" } else if routed { "chain" } else { "single" },
+        "served_by": engines[0], "providers": engines, "fell_back": false, "attempts": attempts });
+    if (routed || engines.len() > 1) && req.body["rerank"] != json!(false) {
+        routing["reranked"] = json!(true);
+    }
     Reply::Json(
         200,
         json!({
-            "request_id": "r", "mode": req.body["mode"], "provider": p, "results": results,
-            "routing": { "merge": "single", "served_by": p, "providers": [p], "fell_back": false, "attempts": [] },
-            "billing": { "reserved_micros": 3000, "charged_micros": 1500, "balance_micros": 998500,
-                         "charged_usd": 0.0015, "balance_usd": 0.9985 },
+            "request_id": "r", "mode": req.body["mode"], "provider": engines[0], "results": results,
+            "routing": routing,
+            "billing": { "reserved_micros": 3000, "charged_micros": charged, "balance_micros": 998500,
+                         "charged_usd": charged as f64 / 1e6, "balance_usd": 0.9985 },
         }),
     )
 }
@@ -475,8 +502,10 @@ fn failed_manifest_refresh_backs_off_instead_of_blocking_every_search() {
     );
 }
 
+/// No keys and no -p: ONE hosted call that names no engine, so the server
+/// routes it (here to serper), reranks it, and the CLI does not rerank again.
 #[test]
-fn zero_keys_auto_general_is_charged_capped_routed_and_reranked() {
+fn zero_keys_auto_general_is_one_routed_call() {
     let mock = start("zero", handler(|r, _| search_ok(r)));
     let (code, v) =
         run_json(
@@ -488,38 +517,110 @@ fn zero_keys_auto_general_is_charged_capped_routed_and_reranked() {
     assert_eq!(v["mode"], "general");
     let m = &v["metadata"];
     assert_eq!(m["cost"]["basis"], "charged");
-    assert_eq!(m["cost"]["micros"], 4500);
-    let by: Vec<&String> = m["cost"]["by_provider"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .collect();
-    assert_eq!(by, ["exa", "jina", "serper"]);
-    // The cap of 3, in registry order, with the rest named.
-    let sent: Vec<String> = mock
-        .requests("/api/v1/search")
-        .iter()
-        .map(|r| r.body["providers"][0].as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(sent.len(), 3);
-    let warning = m["warnings"][0].as_str().unwrap();
-    assert!(
-        warning.starts_with("hosted: queried serper, exa, jina; add -p to choose others"),
-        "{warning}"
-    );
-    assert!(warning.contains("brave"));
+    assert_eq!(m["cost"]["micros"], 1500);
+    assert_eq!(m["cost"]["by_provider"], json!({ "serper": 1500 }));
+    assert_eq!(m["providers_queried"], json!(["serper"]));
+    assert_eq!(m["transport"], json!({ "serper": "hosted" }));
+    let sent = mock.requests("/api/v1/search");
+    assert_eq!(sent.len(), 1, "one hosted call per search");
+    assert!(sent[0].body.get("providers").is_none(), "{}", sent[0].body);
+    assert!(sent[0].body.get("rerank").is_none() && sent[0].body.get("fresh").is_none());
+    assert!(m["warnings"].is_null(), "{}", m["warnings"]);
     // Model routing reported, with no model id.
     assert_eq!(m["routing"]["auto"]["source"], "model");
     assert_eq!(m["routing"]["auto"]["mode"], "general");
     assert!(m["routing"]["auto"].get("model").is_none());
     assert_eq!(mock.requests("/api/v1/route").len(), 1);
-    // Reranked: the mock reverses the order it was sent.
+    // The server reranked; the CLI did not ask again.
     assert_eq!(m["routing"]["reranked"], true);
-    let sent = &mock.requests("/api/v1/rerank")[0].body["results"];
-    let last = sent.as_array().unwrap().last().unwrap();
-    assert_eq!(v["results"][0]["url"], last["url"]);
-    assert!(v["results"][0]["extra"]["relevance"].is_number());
+    assert!(mock.requests("/api/v1/rerank").is_empty());
+    assert_eq!(v["results"][0]["source"], "serper");
     assert!(m["notes"].is_null(), "no login note when logged in");
+}
+
+/// `--no-cache` asks for fresh results; a cache hit and an escalation are
+/// read back: cached in routing, the set-aside engine charged nothing.
+#[test]
+fn no_cache_sends_fresh_and_cached_and_escalated_answers_are_read() {
+    let mock = start(
+        "cachehit",
+        handler(|r, _| {
+            if r.body["fresh"] == json!(true) {
+                return Reply::Json(
+                    200,
+                    json!({
+                    "request_id": "r", "mode": "academic", "provider": "exa",
+                    "results": [{ "title": "t", "url": "https://paper.example/1", "snippet": "s" }],
+                    "routing": { "merge": "chain", "served_by": "exa", "providers": ["exa"], "fell_back": true,
+                        "attempts": [
+                            { "provider": "serper", "outcome": "ok", "latency_ms": 300, "charged_micros": 0, "escalated": true },
+                            { "provider": "exa", "outcome": "ok", "latency_ms": 900, "charged_micros": 10500 }] },
+                    "billing": { "reserved_micros": 10500, "charged_micros": 10500, "balance_micros": 1, "charged_usd": 0.0105, "balance_usd": 0.0 } }),
+                );
+            }
+            Reply::Json(
+                200,
+                json!({
+                "request_id": "r", "mode": "academic", "provider": "serper",
+                "results": [{ "title": "t", "url": "https://paper.example/1", "snippet": "s" }],
+                "routing": { "merge": "chain", "served_by": "serper", "providers": ["serper"], "fell_back": false,
+                    "attempts": [], "cached": true, "cached_at": "2026-11-04T02:00:00.000Z" },
+                "billing": { "reserved_micros": 1500, "charged_micros": 1500, "balance_micros": 1, "charged_usd": 0.0015, "balance_usd": 0.0 } }),
+            )
+        }),
+    );
+    let args = [
+        "search",
+        "-q",
+        "crispr off-target",
+        "-m",
+        "academic",
+        "--json",
+    ];
+    let (code, v) = run_json(mock.cmd().args(args));
+    assert_eq!(code, 0, "{v}");
+    let m = &v["metadata"];
+    assert_eq!(m["routing"]["cached"], true, "{m}");
+    assert_eq!(m["routing"]["cached_at"], "2026-11-04T02:00:00.000Z");
+    assert!(m["routing"]["cache_age_secs"].is_number());
+    assert_eq!(m["cost"]["by_provider"], json!({ "serper": 1500 }));
+    // Not the local replay: that one is free and drops the cost.
+    assert!(m["cached"].is_null());
+
+    let (code, v) = run_json(mock.cmd().args(args).arg("--no-cache"));
+    assert_eq!(code, 0, "{v}");
+    let body = mock.requests("/api/v1/search").last().unwrap().body.clone();
+    assert_eq!(body["fresh"], true, "{body}");
+    assert!(body.get("providers").is_none());
+    let m = &v["metadata"];
+    assert!(m["routing"]["cached"].is_null());
+    assert_eq!(m["routing"]["escalated"], json!(["serper"]));
+    assert_eq!(
+        m["cost"]["by_provider"],
+        json!({ "exa": 10500, "serper": 0 })
+    );
+    assert_eq!(m["cost"]["micros"], 10500);
+    assert_eq!(m["providers_queried"], json!(["serper", "exa"]));
+    assert_eq!(m["provider_results"], json!({ "exa": 1 }));
+}
+
+/// Social with no cue: one routed call, the server picks the platforms.
+#[test]
+fn social_without_a_cue_is_left_to_the_server() {
+    let mock = start("social", handler(|r, _| search_ok(r)));
+    let (code, v) = run_json(mock.cmd().args([
+        "search",
+        "-q",
+        "mechanical keyboard",
+        "-m",
+        "social",
+        "--json",
+    ]));
+    assert_eq!(code, 0, "{v}");
+    let sent = mock.requests("/api/v1/search");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body["mode"], "social");
+    assert!(sent[0].body.get("providers").is_none(), "{}", sent[0].body);
 }
 
 #[test]
@@ -531,25 +632,28 @@ fn rerank_failure_keeps_the_fused_order() {
             _ => handler(|r, _| search_ok(r))(req, i),
         }),
     );
-    let args = ["search", "-q", "rust", "-m", "general", "--json"];
-    let (code, v) = run_json(mock.cmd().args(args));
+    // The CLI reranks only what it fused itself: an own key beside the hosted call.
+    let (code, v) = run_json(mixed(&mock).args(["--json"]));
     assert_eq!(code, 0, "{v}");
+    assert_eq!(mock.requests("/api/v1/rerank").len(), 1);
     assert_eq!(v["metadata"]["routing"]["reranked"], false);
     assert!(v["results"][0]["extra"]["relevance"].is_null());
-    // --no-rerank never asks.
+    // --no-rerank never asks, and tells the server not to either.
     let before = mock.requests("/api/v1/rerank").len();
-    let (_, v) = run_json(mock.cmd().args([
-        "search",
-        "-q",
-        "rust",
-        "-m",
-        "general",
-        "--json",
-        "--no-cache",
-        "--no-rerank",
-    ]));
+    let (_, v) = run_json(mixed(&mock).args(["--json", "--no-cache", "--no-rerank"]));
     assert_eq!(mock.requests("/api/v1/rerank").len(), before);
     assert!(v["metadata"]["routing"].is_null());
+    let body = mock.requests("/api/v1/search").last().unwrap().body.clone();
+    assert_eq!(body["rerank"], false, "{body}");
+}
+
+/// A general search with an own key for brave (unreachable here) beside the
+/// hosted call, so the CLI fuses and reranks.
+fn mixed(mock: &Mock) -> Command {
+    let mut c = mock.cmd();
+    c.env("BRAVE_API_KEY", "not-a-real-key-for-tests")
+        .args(["search", "-q", "rust", "-m", "general", "-c", "20"]);
+    c
 }
 
 /// The server's own fail-open answers 200 with the input order and no
@@ -572,10 +676,7 @@ fn rerank_without_scores_is_not_a_rerank() {
             _ => handler(|r, _| search_ok(r))(req, i),
         }),
     );
-    let (code, v) = run_json(
-        mock.cmd()
-            .args(["search", "-q", "rust", "-m", "general", "--json"]),
-    );
+    let (code, v) = run_json(mixed(&mock).args(["--json"]));
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["metadata"]["routing"]["reranked"], false);
     assert!(v["results"][0]["extra"]["relevance"].is_null());
@@ -729,8 +830,9 @@ fn auto_never_picks_a_mode_the_pinned_provider_cannot_serve() {
     assert_eq!(reqs[0].body["providers"], json!(["exa"]));
 }
 
+/// -p goes as given, in one call (the server fans out and fuses).
 #[test]
-fn p_lifts_the_cap() {
+fn p_is_sent_as_given_in_one_call() {
     let mock = start("plift", handler(|r, _| search_ok(r)));
     let (code, v) = run_json(mock.cmd().args([
         "search",
@@ -739,23 +841,24 @@ fn p_lifts_the_cap() {
         "-m",
         "general",
         "-p",
-        "serper,exa,jina,brave,linkup",
+        "brave,serper,exa",
         "--json",
     ]));
     assert_eq!(code, 0, "{v}");
-    assert_eq!(mock.requests("/api/v1/search").len(), 5);
-    assert!(
-        v["metadata"]["warnings"].is_null(),
-        "{}",
-        v["metadata"]["warnings"]
-    );
+    let sent = mock.requests("/api/v1/search");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body["providers"], json!(["brave", "serper", "exa"]));
+    let m = &v["metadata"];
+    assert_eq!(m["cost"]["micros"], 4500);
+    assert_eq!(m["providers_queried"], json!(["brave", "serper", "exa"]));
+    assert!(m["warnings"].is_null(), "{}", m["warnings"]);
 }
 
 #[test]
 fn own_key_goes_direct_and_basis_is_mixed() {
     let mock = start("mixed", handler(|r, _| search_ok(r)));
     // A key that is not real: serper answers 4xx (or the network is absent);
-    // either way the call went direct, and nothing hosted was sent for it.
+    // either way the call went direct, and the hosted remainder is one call.
     let (code, v) = run_json(
         mock.cmd()
             .env("SERPER_API_KEY", "not-a-real-key-for-tests")
@@ -775,14 +878,12 @@ fn own_key_goes_direct_and_basis_is_mixed() {
     let t = &v["metadata"]["transport"];
     assert_eq!(t["serper"], "direct");
     assert_eq!(t["exa"], "hosted");
+    let sent = mock.requests("/api/v1/search");
+    assert_eq!(sent.len(), 1, "the hosted remainder is one call");
+    // Pinned to the first engine without a key, so serper never runs twice.
+    assert_eq!(sent[0].body["providers"], json!(["exa"]));
+    assert_eq!(sent[0].body["rerank"], false);
     assert_eq!(v["metadata"]["cost"]["basis"], "mixed");
-    let hosted: Vec<String> = mock
-        .requests("/api/v1/search")
-        .iter()
-        .map(|r| r.body["providers"][0].as_str().unwrap().to_string())
-        .collect();
-    assert!(!hosted.contains(&"serper".to_string()));
-    assert_eq!(hosted.len(), 3, "the cap counts hosted calls only");
 }
 
 #[test]

@@ -103,6 +103,11 @@ pub trait Adapter: Send + Sync {
     fn applied_filters(&self, _opts: &SearchOpts) -> FilterSupport {
         self.spec().filters
     }
+    /// The hosted twin of a provider you hold no key for; the engine folds
+    /// these into one metasearch.sh call per search.
+    fn as_hosted(&self) -> Option<&crate::hosted::HostedAdapter> {
+        None
+    }
     fn name(&self) -> &'static str {
         self.spec().name
     }

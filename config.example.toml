@@ -35,7 +35,5 @@ token = ""
 # Another host for login and hosted calls (default https://metasearch.sh).
 # METASEARCH_URL overrides it; any other host needs METASEARCH_ALLOW_INSECURE_HOST=1.
 # url = ""
-# Most engines a fused search sends through metasearch.sh. Unset, it is 3, or 6
-# for deep; a value (1-8) is the cap for every fused mode, deep included. Engines
-# you name with -p are always sent. Set it here or with `search config set`; no env var does.
-# max_providers = 3
+# metasearch.sh picks the engines of a hosted search itself (one call per
+# search); name engines with -p to choose them.

@@ -89,8 +89,9 @@ const EXTRACT_CHAIN: &[&str] = &[
     "browserless",
 ];
 
-/// The social fan-out without a platform cue: X, TikTok, Instagram,
-/// YouTube. Threads and Facebook (page search) run on their cue or `-p`.
+/// The social platforms a search with no platform cue picks from: X,
+/// TikTok, Instagram, YouTube (two at most, see `router::pick_social_platforms`).
+/// Threads and Facebook (page search) run on their cue or `-p`.
 const SOCIAL_FAN_OUT: &[&str] = &["xai", "tiktok", "instagram", "youtube"];
 
 /// How long the social fan-out waits before it takes the answers it has:
@@ -242,7 +243,7 @@ pub const MODES: &[ModeSpec] = &[
         input: InputKind::Query,
         merge: MergeKind::Fused,
         providers: SOCIAL_FAN_OUT,
-        description: "X, TikTok, Instagram reels and YouTube at once, fused; a platform cue pins one (see social)",
+        description: "X plus the likeliest of TikTok, Instagram reels and YouTube (2 paid calls at most), fused; a platform cue pins one (see social)",
         when_to_use: "Trends, reviews, creators and reactions on social platforms. With xai, -d filters X handles.",
         deadline: secs(65),
         straggler_cap: Some(SOCIAL_WAIT),
@@ -284,8 +285,26 @@ pub fn providers_for(mode: Mode, query: &str) -> Vec<&'static str> {
         if !pins.is_empty() {
             return pins;
         }
+        // No cue: the rule pick first, then the rest of the fan-out as
+        // stand-ins for a picked platform that cannot run here.
+        let mut order = crate::router::pick_social_platforms(query);
+        let rest: Vec<&'static str> = base
+            .iter()
+            .copied()
+            .filter(|p| !order.contains(p))
+            .collect();
+        order.extend(rest);
+        return order;
     }
     base.to_vec()
+}
+
+/// How many providers a mode may run for this input without `-p`: social
+/// with no platform cue runs the rule pick's count (at most two paid
+/// calls), as metasearch.sh does.
+pub fn fan_out_cap(mode: Mode, query: &str) -> Option<usize> {
+    (mode == Mode::Social && crate::router::social_pins(query).is_empty())
+        .then(|| crate::router::pick_social_platforms(query).len())
 }
 
 pub fn spec(mode: Mode) -> &'static ModeSpec {

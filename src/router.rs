@@ -752,6 +752,146 @@ pub fn social_pins(query: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// The platforms a social search with no platform cue asks, at most two
+/// paid calls: X plus the one most likely to hold the answer. The same
+/// rules, in the same order, as metasearch.sh's rule-based pick
+/// (`pickSocialPlatforms`), so both sides choose alike; logged in, the
+/// server refines this with its own model.
+pub fn pick_social_platforms(query: &str) -> Vec<&'static str> {
+    const REAL_TIME: &[&str] = &[
+        "breaking",
+        "right now",
+        "just now",
+        "live",
+        "happening",
+        "today",
+        "tonight",
+        "this morning",
+        "outage",
+        "down right now",
+        "earthquake",
+        "election results",
+        "election result",
+        "announced",
+        "announcement",
+    ];
+    const SHORT_FORM: &[&str] = &[
+        "trends",
+        "trend",
+        "trending",
+        "viral",
+        "memes",
+        "meme",
+        "dances",
+        "dance",
+        "challenges",
+        "challenge",
+        "sounds",
+        "sound",
+        "songs",
+        "song",
+        "hacks",
+        "hack",
+        "duets",
+        "duet",
+        "fyp",
+    ];
+    const VIDEO_HOW: &[&str] = &[
+        "how to",
+        "tutorials",
+        "tutorial",
+        "guides",
+        "guide",
+        "walkthrough",
+        "walk-through",
+        "explained",
+        "reviews",
+        "reviewed",
+        "review",
+        "unboxing",
+        "vs",
+        "versus",
+        "compare",
+        "comparison",
+        "setup",
+        "installing",
+        "installation",
+        "install",
+        "building",
+        "build",
+        "teardown",
+        "hands-on",
+        "first look",
+        "lecture",
+        "course",
+        "podcast",
+        "interview",
+    ];
+    const VISUAL: &[&str] = &[
+        "fashion",
+        "outfits",
+        "outfit",
+        "ootd",
+        "styling",
+        "style",
+        "makeup",
+        "beauty",
+        "skincare",
+        "nails",
+        "nail",
+        "hairstyles",
+        "hairstyle",
+        "hairs",
+        "hair",
+        "food",
+        "recipes",
+        "recipe",
+        "restaurants",
+        "restaurant",
+        "cafes",
+        "cafe",
+        "coffee",
+        "travel",
+        "hotels",
+        "hotel",
+        "interiors",
+        "interior",
+        "decor",
+        "aesthetic",
+        "photography",
+        "photos",
+        "photo",
+        "brands",
+        "brand",
+        "luxury",
+        "jewellery",
+        "jewelry",
+        "tattoos",
+        "tattoo",
+        "weddings",
+        "wedding",
+        "fitness",
+        "workouts",
+        "workout",
+    ];
+    let lower = query
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if first_phrase(&lower, REAL_TIME).is_some() {
+        vec!["xai"]
+    } else if first_phrase(&lower, SHORT_FORM).is_some() {
+        vec!["xai", "tiktok"]
+    } else if first_phrase(&lower, VIDEO_HOW).is_some() {
+        vec!["xai", "youtube"]
+    } else if first_phrase(&lower, VISUAL).is_some() {
+        vec!["xai", "instagram"]
+    } else {
+        vec!["xai", "tiktok"]
+    }
+}
+
 /// Rule 2: an X cue or a platform cue, labelled with every platform named.
 fn social_hit(q: &str) -> Option<Hit> {
     let x = x_cue(q);
@@ -1426,5 +1566,30 @@ mod tests {
     fn reasons_are_plain_sentences() {
         let (d, _) = resolve_local("coffee near me");
         assert_eq!(d.reason, "Matched 'near me' (rule 6); used places.");
+    }
+
+    /// The same pick, rule for rule, as metasearch.sh's pickSocialPlatforms.
+    #[test]
+    fn social_pick_matches_the_server_rules() {
+        assert_eq!(pick_social_platforms("earthquake right now"), ["xai"]);
+        assert_eq!(pick_social_platforms("viral dance"), ["xai", "tiktok"]);
+        assert_eq!(
+            pick_social_platforms("iphone 17 review"),
+            ["xai", "youtube"]
+        );
+        assert_eq!(
+            pick_social_platforms("how to  fix a bike"),
+            ["xai", "youtube"]
+        );
+        assert_eq!(
+            pick_social_platforms("summer outfits"),
+            ["xai", "instagram"]
+        );
+        assert_eq!(
+            pick_social_platforms("mechanical keyboard"),
+            ["xai", "tiktok"]
+        );
+        // Words, not substrings: "livestock" is not "live".
+        assert_eq!(pick_social_platforms("livestock prices"), ["xai", "tiktok"]);
     }
 }

@@ -241,8 +241,8 @@ pub struct ResponseMetadata {
     pub notes: Vec<String>,
 }
 
-/// What the CLI decided on the caller's behalf (ROUTING.md).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// What the CLI and metasearch.sh decided on the caller's behalf (ROUTING.md).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Routing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<AutoDecision>,
@@ -250,6 +250,20 @@ pub struct Routing {
     /// `extra.relevance`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reranked: Option<bool>,
+    /// metasearch.sh answered from its result cache: no engine was asked,
+    /// and the charge is the stored call's (unlike `metadata.cached`, a free
+    /// replay from this machine's cache).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached: Option<bool>,
+    /// When metasearch.sh fetched the cached answer (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_age_secs: Option<u64>,
+    /// Engines metasearch.sh asked first whose list it set aside for a
+    /// better engine's: never charged (0 in `cost.by_provider`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalated: Vec<String>,
 }
 
 /// How `auto` resolved. `source`: "rule" (a decisive pattern), "model"
