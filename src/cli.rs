@@ -253,7 +253,8 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub freshness: Option<String>,
 
-    /// Bypass the local 5-minute query cache and force a fresh search
+    /// Fresh results: skip the local 5-minute query cache and, logged in,
+    /// metasearch.sh's result cache (sends fresh: true)
     #[arg(long)]
     pub no_cache: bool,
 
@@ -314,7 +315,7 @@ pub enum ConfigAction {
     Show,
     /// Set a configuration value (e.g. keys.brave YOUR_KEY)
     Set {
-        /// Config key (e.g. keys.brave, settings.count, metasearch.max_providers)
+        /// Config key (e.g. keys.brave, settings.count, metasearch.url)
         key: String,
         /// Value to set. Pass "-" to read it from stdin, keeping secrets out
         /// of shell history and process listings

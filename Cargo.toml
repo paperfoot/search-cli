@@ -1,6 +1,6 @@
 [package]
 name = "agent-search"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 description = "Web search CLI for AI agents: ten search engines plus TikTok, YouTube, X and Reddit, auto routing, rank fusion, page extraction and the cost of every search"
 license = "MIT"

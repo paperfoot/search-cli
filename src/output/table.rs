@@ -14,10 +14,16 @@ pub fn render(response: &SearchResponse) {
         return;
     }
 
-    if response.metadata.cached {
+    let server_cache = response
+        .metadata
+        .routing
+        .as_ref()
+        .filter(|r| r.cached == Some(true));
+    if response.metadata.cached || server_cache.is_some() {
         let age = response
             .metadata
             .cache_age_secs
+            .or(server_cache.and_then(|r| r.cache_age_secs))
             .map(|s| format!(" ({s}s old)"))
             .unwrap_or_default();
         if use_color {

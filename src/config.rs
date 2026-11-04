@@ -31,14 +31,8 @@ pub struct Metasearch {
     /// Override the API host (self-host or local dev). Empty = metasearch.sh.
     #[serde(default)]
     pub url: String,
-    /// Most providers one fused search sends through metasearch.sh without
-    /// `-p` (default 3, deep 6). Each hosted call is charged.
-    #[serde(
-        default,
-        deserialize_with = "de_opt_num",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_providers: Option<u64>,
+    // `max_providers` (0.10 to 0.12.0) is read and ignored: since 0.12.1
+    // metasearch.sh picks the engines of a hosted search itself.
 }
 
 /// An integer, or a string holding one: versions before 0.10 could save
@@ -57,10 +51,6 @@ fn de_num<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
             .parse()
             .map_err(|_| serde::de::Error::custom(format!("expected a number, got '{t}'"))),
     }
-}
-
-fn de_opt_num<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
-    de_num(d).map(Some)
 }
 
 fn de_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
@@ -219,7 +209,7 @@ fn effective_keys(config: &AppConfig) -> Vec<(&'static crate::providers::Provide
 pub const SETTING_KEYS: &[&str] = &["count"];
 
 /// Valid field names for `config set metasearch.<name>`.
-pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url", "max_providers"];
+pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
 
 pub fn mask_key(key: &str) -> String {
     // Char-based: byte-slicing (`&key[..2]`) panics on multi-byte UTF-8 and
@@ -362,18 +352,7 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
                             METASEARCH_KEYS.join(", ")
                         )));
                     }
-                    if *name == "max_providers" {
-                        match value.parse::<u64>() {
-                            Ok(n) if (1..=8).contains(&n) => toml::Value::Integer(n as i64),
-                            _ => {
-                                return Err(SearchError::Config(format!(
-                                    "metasearch.max_providers must be 1-8, got '{value}'"
-                                )))
-                            }
-                        }
-                    } else {
-                        toml::Value::String(value.to_string())
-                    }
+                    toml::Value::String(value.to_string())
                 }
                 other => {
                     return Err(SearchError::Config(format!(
@@ -582,6 +561,6 @@ mod tests {
             .extract()
             .unwrap();
         assert_eq!(cfg.settings.count, 7);
-        assert_eq!(cfg.metasearch.max_providers, Some(4));
+        // The retired metasearch.max_providers still loads.
     }
 }

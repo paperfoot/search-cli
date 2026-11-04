@@ -1,7 +1,7 @@
 {
   "name": "search-cli",
   "displayName": "search CLI",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Teaches Claude to use the search CLI: auto or explicit modes over ten search engines, TikTok, Instagram, YouTube, X, Reddit and Hacker News, page extraction with video transcripts, cost in every result. Needs the search binary (brew install paperfoot/tap/search-cli).",
   "author": {
     "name": "Paperfoot AI",
