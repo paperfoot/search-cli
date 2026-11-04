@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- New `community` mode: what real people say on Reddit and Hacker News, fused,
+  with no key and at $0 (both run on your machine). Hits carry the score or
+  points, comment count, subreddit and author in `extra`.
+- Extracting a Reddit thread URL returns the post and every comment with its
+  author, score, depth, parent and time, in thread order; before, the extract
+  chain kept one comment. A Hacker News `item?id=` URL does the same through
+  Algolia's HN API.
+- Reddit is read from Reddit's own comment pages (current scores, paced to
+  about 10 requests a minute across every `search` run on the machine, 7
+  minutes' rest after a captcha) and from the Arctic Shift archive (the whole
+  tree); a captcha page counts as a failure, never as content, and the
+  archive serves threads alone when Reddit refuses. `extra.route` names the
+  source; `SEARCH_REDDIT_ROUTE=archive|live` picks one.
+- Auto picks `community` for "reddit", "hacker news", "HN", `r/<name>`, "what
+  do people say about", "opinions on" and "experiences with" (rule 11, right
+  after the X cue), but not "reddit api" or "reddit stock". `-p reddit` or
+  `-p hackernews` alone searches `community`.
+
 ## 0.11.1 — 2026-11-03
 
 - The `metasearch` plugin connects by URL alone: Claude Code asks you to sign

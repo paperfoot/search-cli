@@ -1,12 +1,13 @@
 ---
 name: search
 description: >
-  Web search, news, papers, people, X posts, images, places, patents and page
-  extraction through the `search` CLI, which sends a query to several of its
-  ten search engines at once and fuses the results. Use when you need to look
-  something up, get current information or the latest news, find sources or
-  papers for a claim, read the text of a URL, see what people say on X, or
-  research a person or company. The mode defaults to auto and is reported;
+  Web search, news, papers, people, X posts, Reddit and Hacker News threads,
+  images, places, patents and page extraction through the `search` CLI, which
+  sends a query to several of its ten search engines at once and fuses the
+  results. Use when you need to look something up, get current information or
+  the latest news, find sources or papers for a claim, read the text of a URL,
+  see what people say on X, Reddit or Hacker News, or research a person or
+  company. The mode defaults to auto and is reported;
   every result envelope carries its cost. Run `search agent-info` for the
   full manifest.
 compatibility: Requires the search binary (brew install paperfoot/tap/search-cli) and network access
@@ -24,7 +25,10 @@ exit code.
 
 The mode defaults to `auto`: fixed rules first (a lone URL is `extract`;
 "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social`, but
-never code like `@property` or an email; `similar to <URL>` is `similar`;
+never code like `@property` or an email; "reddit", "hacker news", "HN",
+`r/<name>`, "what do people say about", "opinions on" or "experiences with"
+is `community`, never "reddit api" or "reddit stock"; `similar to <URL>` is
+`similar`;
 "patent" or "prior art" is `patents`, never "patent leather"; "images of" is
 `images`, never Docker or VM images), then metasearch.sh's routing model when
 logged in, else keyword rules, else `general`. In `news` and `social`, a time word sets `-f` unless
@@ -32,7 +36,8 @@ you passed one ("today", "yesterday" → `day`;
 "this week", "latest", "breaking" → `week`; "this month", "this year" →
 `month`, `year`). Auto never picks `deep`, and picks `social` only on an X
 cue: ask for those two with `-m`. An explicit `-m` or `-p` always wins; if the
-`-p` engines cannot serve the mode auto picked, the search runs as `general`.
+`-p` engines cannot serve the mode auto picked, the search runs as `general`
+(as `community` for `-p reddit` or `-p hackernews`).
 
 Pass `-m` when auto is not what you want:
 
@@ -44,6 +49,8 @@ Pass `-m` when auto is not what you want:
 | A paper's citations, versions, PDF | `-m scholar` |
 | A person, their role, their LinkedIn | `-m people` |
 | What X says about something | `-m social` |
+| What real people say (Reddit, Hacker News) | `-m community` |
+| Read a Reddit or HN thread whole | `-q <thread URL>` (auto extract) |
 | Read this page | `-q <URL> -m extract`; markdown is in `results[0].snippet` |
 | Pages like this one | `-q <URL> -m similar` |
 | Images | `-m images`; the picture is `image_url`, `url` is the page it is on |
@@ -65,6 +72,31 @@ Examples:
 - `search search -q "CRISPR delivery" -m academic --json`
 - `search search -q https://example.com/post -m extract --json`
 - `search --x "AI agents"`: X only
+- `search search -q "r/rust async runtimes" -m community --json`: one subreddit
+
+## Reddit and Hacker News
+
+`-m community` searches Reddit and Hacker News at once, with no key, at $0
+(run on this machine). Hits carry `extra.score` (Reddit votes) or
+`extra.points` (HN), `extra.num_comments`, `extra.subreddit` and
+`extra.author`; the `url` is the discussion. Extract a
+`reddit.com/r/<sub>/comments/<id>` or `news.ycombinator.com/item?id=N` URL
+to read the whole thread: the post, then every comment as
+`[score] author (depth N): body`, indented by depth, in `results[0].snippet`,
+and the same comments as records in `extra.comments[]` (`id`, `parent`,
+`author`, `score`, `depth`, `created`, `body`).
+
+- Reddit is paced to about 10 requests a minute across every `search` run on
+  the machine; after a captcha it rests for 7 minutes. Don't loop over many
+  threads quickly: a paced call fails with `rate_limit` (exit 4).
+- `extra.route` says what served a Reddit thread: `live` (Reddit itself, current
+  scores), `archive` (Arctic Shift, scores from when it saved each comment) or
+  `live+archive` (the whole tree, current scores where Reddit showed them).
+- When Reddit refuses, the archive serves threads; archive search needs a
+  subreddit, so put `r/<name>` in the query. `SEARCH_REDDIT_ROUTE=archive` or
+  `live` picks one source.
+- Through metasearch.sh, Hacker News costs a small per-call price and Reddit
+  is not offered.
 
 ## Keys, login and cost
 
@@ -86,7 +118,8 @@ Examples:
   (free)": keyword rules route the query and nothing is reranked.
 - A metasearch.sh key in `METASEARCH_API_KEY` (or `METASEARCH_TOKEN`) works
   like `search login`, for CI and containers.
-- Not logged in and no keys: only `extract` works (the local fetchers). Tell the
+- Not logged in and no keys: only `extract` and `community` work (they run on
+  this machine). Tell the
   user to run `search login` or set a key; `search config check` shows which
   engines are configured.
 
