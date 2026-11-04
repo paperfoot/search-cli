@@ -8,10 +8,13 @@
   list is thin. It also caps social at two platforms and answers a repeated
   search from its own cache. A `general` search with no keys of your own
   used to cost about $0.013 for three engines; it now usually costs $0.0015.
-- `-p` is sent as you give it, in one call.
+- `-p` is sent as you give it: in one call in fused modes, and one engine at
+  a time, in order, in `extract` and the one-engine modes, so only the first
+  that answers is charged.
 - Beside an engine you run with your own key, the hosted call goes to the
-  first engine of the mode you have no key for, so no engine runs, or is
-  charged, twice.
+  first engine of the mode you have no key for (in `extract`, each hosted
+  step keeps its place in the chain), so no engine runs, or is charged,
+  twice.
 - `--no-cache` now also skips metasearch.sh's cache.
 - A search metasearch.sh answered from its cache is marked
   `metadata.routing.cached` (with `cached_at` and `cache_age_secs`), charged

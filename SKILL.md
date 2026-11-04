@@ -75,7 +75,8 @@ Bare `search "…"` takes only the global flags (`--json`, `--pretty`,
 
 Omit `-p` unless the user named a provider or you are retrying a known failure.
 `-p` replaces the mode's engines; logged in, they are sent to metasearch.sh as
-you name them, so each one is charged. Without `-p`, metasearch.sh picks the
+you name them, so in fused modes each one is charged (`extract` tries them in
+order and stops at the first page). Without `-p`, metasearch.sh picks the
 cheapest engine that answers well.
 
 Examples:
@@ -141,7 +142,8 @@ and the same comments as records in `extra.comments[]` (`id`, `parent`,
   engines without a key go through metasearch.sh as one call per search,
   charged to the account. Without `-p` the server picks the engines: the
   cheapest first, a pricier one only when the first list is thin. Beside an
-  own key, the call goes to the first engine without one, so none runs twice.
+  own key, the call goes to the first engine without one, so none runs twice
+  (in `extract`, each hosted step keeps its place in the chain).
   Login also adds model routing and relevance reranking at no charge.
 - Read `metadata.cost`: `usd`, `micros`, `by_provider`, and `basis`
   (`estimate` when nothing went through metasearch.sh, `charged` when every

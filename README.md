@@ -43,7 +43,7 @@ search "rust async runtimes"
 - Engines you have your own key for go direct, as before. Your keys always win.
 - Engines you have no key for go through metasearch.sh and are charged to your balance.
 - Each search reports its cost in `metadata.cost` and how each engine was reached in `metadata.transport` (`direct`, `local` or `hosted`).
-- The engines without your key go to metasearch.sh as one call per search. Without `-p`, metasearch.sh picks the engines: the cheapest one first, a pricier one only when the first list is thin, and two social platforms at most. It also answers a repeated search from its own cache, at the stored price, and marks it `metadata.routing.cached`. With `-p`, the engines you name are sent as you give them. Beside an engine you run with your own key, the call goes to the first engine of the mode you have no key for, so no engine runs twice.
+- The engines without your key go to metasearch.sh as one call per search. Without `-p`, metasearch.sh picks the engines: the cheapest one first, a pricier one only when the first list is thin, and two social platforms at most. It also answers a repeated search from its own cache, at the stored price, and marks it `metadata.routing.cached`. With `-p`, the engines you name are sent as you give them; in `extract` and the one-engine modes they are tried one at a time, in order, so only the first that answers is charged. Beside an engine you run with your own key, the call goes to the first engine of the mode you have no key for (in `extract`, each hosted step keeps its place in the chain), so no engine runs twice.
 - `--no-cache` skips both caches: the one on your machine and the one on metasearch.sh.
 - Logging in also turns on model routing and relevance reranking, which are free.
 
