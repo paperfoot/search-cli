@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.1 — 2026-11-04
+
+- Logged in, the engines you have no key for now go to metasearch.sh as one
+  call per search instead of one call per engine. Without `-p`, metasearch.sh
+  picks the engines: the cheapest first, a pricier one only when the first
+  list is thin. It also caps social at two platforms and answers a repeated
+  search from its own cache. A `general` search with no keys of your own
+  used to cost about $0.013 for three engines; it now usually costs $0.0015.
+- `-p` is sent as you give it, in one call.
+- Beside an engine you run with your own key, the hosted call goes to the
+  first engine of the mode you have no key for, so no engine runs, or is
+  charged, twice.
+- `--no-cache` now also skips metasearch.sh's cache.
+- A search metasearch.sh answered from its cache is marked
+  `metadata.routing.cached` (with `cached_at` and `cache_age_secs`), charged
+  at the stored price. `metadata.routing.escalated` names engines whose list
+  the server set aside for a better engine's; they are charged nothing.
+- `metadata.providers_queried`, `transport` and `cost.by_provider` name the
+  engines metasearch.sh asked.
+- `social` with no platform named and your own keys searches X plus the
+  likeliest other platform, two paid calls at most, by the same rules
+  metasearch.sh uses: TikTok for trends and memes, YouTube for reviews and
+  tutorials, Instagram for fashion, food and travel, and X alone for
+  breaking news. Before, it searched all four platforms.
+- `metasearch.max_providers` is retired: metasearch.sh picks the engines.
+  An old config file that sets it still loads.
+
 ## 0.12.0 — 2026-11-04
 
 - New sources in `social` mode: TikTok, Instagram reels, YouTube, Facebook

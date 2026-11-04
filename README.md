@@ -43,7 +43,8 @@ search "rust async runtimes"
 - Engines you have your own key for go direct, as before. Your keys always win.
 - Engines you have no key for go through metasearch.sh and are charged to your balance.
 - Each search reports its cost in `metadata.cost` and how each engine was reached in `metadata.transport` (`direct`, `local` or `hosted`).
-- A fused search sends at most 3 hosted engines (6 for `deep`, 4 for `social`), in the mode's order, and a warning names the ones left out. Name engines with `-p` to choose others, or set one cap for every fused mode, `deep` included, with `search config set metasearch.max_providers 5` (1 to 8, config file only).
+- The engines without your key go to metasearch.sh as one call per search. Without `-p`, metasearch.sh picks the engines: the cheapest one first, a pricier one only when the first list is thin, and two social platforms at most. It also answers a repeated search from its own cache, at the stored price, and marks it `metadata.routing.cached`. With `-p`, the engines you name are sent as you give them. Beside an engine you run with your own key, the call goes to the first engine of the mode you have no key for, so no engine runs twice.
+- `--no-cache` skips both caches: the one on your machine and the one on metasearch.sh.
 - Logging in also turns on model routing and relevance reranking, which are free.
 
 ```bash
@@ -84,7 +85,7 @@ Pass `-m` to choose the mode yourself; an explicit `-m` or `-p` is always obeyed
 | `scholar` | Google Scholar records: citations, versions, PDFs | query | serper, serpapi |
 | `deep` | Wide coverage when recall matters more than cost; use `-c 30` | query | exa, serper, brave, linkup, parallel, tavily, perplexity, xai |
 | `people` | A person, their role, their LinkedIn profile | query | exa |
-| `social` | What X, TikTok, Instagram and YouTube show; a platform cue pins one, and Threads and Facebook pages run on their cue | query | xai, tiktok, instagram, youtube (threads, facebook on a cue) |
+| `social` | What X, TikTok, Instagram and YouTube show: X plus the likeliest other platform, two paid calls at most; a platform cue pins one, and Threads and Facebook pages run on their cue | query | xai, tiktok, instagram, youtube (threads, facebook on a cue) |
 | `community` | What real people say on Reddit and Hacker News | query | reddit, hackernews |
 | `patents` | Prior art, patent families | query | serper |
 | `images` | Images; the picture is `image_url`, `url` is the page | query | serper |
@@ -113,12 +114,12 @@ The shorthand `search "…"` takes only the global flags (`--json`, `--quiet`, `
 
 ```bash
 search "mechanical keyboard on tiktok"                             # TikTok only
-search search -q "mechanical keyboard" -m social --json            # X, TikTok, Instagram, YouTube
+search search -q "mechanical keyboard" -m social --json            # X plus the likeliest platform
 search "https://www.youtube.com/watch?v=3rKPzh3Pr0o"               # the video, transcript, top comments
 search "https://www.facebook.com/keychron"                         # a page's details and latest posts
 ```
 
-`social` searches X, TikTok, Instagram reels and YouTube at once and fuses the hits, so the top post of each platform comes first. Naming a platform ("on tiktok", "instagram reels", "youtube comments", "on threads", "facebook page", "twitter") searches that platform only, and the cue words are left out of its query. Threads and Facebook run only on their cue or `-p threads` / `-p facebook`; Facebook search finds pages by name, because Facebook offers no public keyword search of posts. Each hit's `extra` carries `platform`, `author`, `followers`, `views`, `likes`, `num_comments`, `shares` and `duration_s` where the platform reports them.
+`social` with no platform named searches two platforms at once and fuses the hits, so the top post of each comes first. Logged in, metasearch.sh picks them. With your own keys, the CLI applies the same rules: X alone for breaking news ("live", "today", "outage"), X and TikTok for trends, memes and sounds, X and YouTube for reviews, tutorials and comparisons, X and Instagram for fashion, food, travel and other visual topics, and X and TikTok otherwise. Name the platforms with `-p` to search more of them. Naming a platform ("on tiktok", "instagram reels", "youtube comments", "on threads", "facebook page", "twitter") searches that platform only, and the cue words are left out of its query. Threads and Facebook run only on their cue or `-p threads` / `-p facebook`; Facebook search finds pages by name, because Facebook offers no public keyword search of posts. Each hit's `extra` carries `platform`, `author`, `followers`, `views`, `likes`, `num_comments`, `shares` and `duration_s` where the platform reports them.
 
 Extracting a TikTok, Instagram, YouTube, Facebook or Threads post or video URL returns the caption, the stats, the transcript (TikTok, Instagram, YouTube and Facebook videos) and the top comments in `results[0].snippet`; `extra.transcript` says whether a transcript was found and `extra.comments[]` holds `author`, `likes` and `text`. A Facebook page URL returns the page's details and its latest posts.
 
@@ -167,7 +168,7 @@ Typical upstream prices for one call with 10 results, as published by each provi
 
 `search agent-info` carries the same list prices: `usd_per_call` for each engine, and `usd_per_call_where_different` for the modes priced otherwise (deep on Exa, Brave, Linkup and Parallel; academic and deep on Tavily).
 
-Through metasearch.sh a call costs 1.5 times the upstream price, at least $0.0001, and never more than the price quoted before it runs. A `general` search with no keys of your own (serper, exa and jina under the cap of 3) costs about $0.013. Current hosted prices for every engine and mode are at [metasearch.sh/pricing](https://metasearch.sh/pricing).
+Through metasearch.sh a call costs 1.5 times the upstream price, at least $0.0001, and never more than the price quoted before it runs. A `general` search with no keys of your own usually runs on serper alone and costs about $0.0015; `academic` costs the same unless serper's list is thin and exa is asked as well. Current hosted prices for every engine and mode are at [metasearch.sh/pricing](https://metasearch.sh/pricing).
 
 `search usage` reports your metasearch.sh balance and the remaining balance at each provider whose API exposes one (SerpApi, Firecrawl, Tavily, Linkup, Brave from rate-limit headers, and xAI when `XAI_MANAGEMENT_API_KEY` and `XAI_TEAM_ID` are set). It never turns an engine off because its balance is low; an engine out of credit shows up as a `billing_quota` failure. `search stats` summarises your local search logs: volume by mode, failures per engine and spend from `metadata.cost`. Nothing leaves the machine, and `SEARCH_LOG=off` turns logging off.
 
@@ -191,8 +192,8 @@ Each attempt is checked before it counts: a bot challenge, a JavaScript shell wi
 - Output is JSON when piped and a table in a terminal; `--json` forces JSON. In JSON mode stdout carries exactly one document, errors included, as one compact line; `--pretty` indents it. Diagnostics go to stderr. `--help` and `--version` stay plain text. `NO_COLOR` turns colour off.
 - A result envelope's `mode` is the mode that ran (for example `news`), never `auto`; metasearch.sh's own API echoes `auto` in that field, the CLI does not. `metadata.routing.auto` repeats it and adds `source` (`rule`, `model`, `heuristic` or `fallback`), a one-sentence `reason`, and `filters_applied` when a time word set `-f`.
 - AI-written text (Tavily's answer, xAI's summary of the X posts) is in `answers[]`, apart from `results[]`.
-- `metadata.provider_failures` gives each failed engine's category (`auth`, `billing_quota`, `rate_limit`, `timeout`, `rejected`, …) and message; `metadata.warnings` lists filters an engine did not apply and hosted engines the cap left out.
-- Results are cached for 5 minutes and replays are marked `cached: true`; `--no-cache` forces a fresh search.
+- `metadata.provider_failures` gives each failed engine's category (`auth`, `billing_quota`, `rate_limit`, `timeout`, `rejected`, …) and message; `metadata.warnings` lists filters an engine did not apply. `metadata.routing.escalated` names engines whose list metasearch.sh set aside for a better engine's; they are charged nothing.
+- Results are cached on your machine for 5 minutes and replays are marked `cached: true`, at no cost. A search metasearch.sh answers from its own cache is marked `metadata.routing.cached` and charged the stored price. `--no-cache` skips both.
 - `--max-chars N` caps each snippet, to protect your context window.
 - `search skill install` copies [SKILL.md](SKILL.md) to `~/.claude/skills/search` (Claude Code) and `~/.agents/skills/search` (Codex CLI, and Gemini CLI, which reads that folder too). It removes copies an older version left in `~/.codex/skills` or `~/.gemini/skills` and reports any it cannot remove safely; `search skill status` shows them.
 
