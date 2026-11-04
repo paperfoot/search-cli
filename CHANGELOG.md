@@ -1,24 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 — 2026-11-04
 
+- New sources in `social` mode: TikTok, Instagram reels, YouTube, Facebook
+  pages and Threads, beside X. With no platform named, social searches X,
+  TikTok, Instagram and YouTube at once and fuses the hits; once one has
+  answered it waits at most 20 s for the rest, so one slow platform no longer
+  holds up the call. Hits carry the author, followers, views, likes, comment
+  and share counts and the length in `extra`. They run through metasearch.sh
+  after `search login`, priced per call.
+- Naming a platform pins the search to it: "on tiktok", "instagram reels",
+  "youtube comments", "on threads", "facebook page" or "twitter". Auto picks
+  `social` for these cues (rule 2), but not for "youtube api", "embed a
+  youtube video", "rust threads" or "facebook prophet". The query each
+  platform gets leaves the cue words out.
+- `--tiktok`, `--instagram`, `--youtube` and `--threads` search one platform,
+  as `--x` does for X.
+- A TikTok, Instagram, YouTube, Facebook or Threads URL reads the post whole:
+  caption, stats, the transcript (TikTok, Instagram, YouTube and Facebook
+  videos) and the top comments; a Facebook page URL returns the page's
+  details and latest posts. Other URLs keep the usual extract chain.
 - New `community` mode: what real people say on Reddit and Hacker News, fused,
   with no key and at $0 (both run on your machine). Hits carry the score or
   points, comment count, subreddit and author in `extra`.
-- Extracting a Reddit thread URL returns the post and every comment with its
-  author, score, depth, parent and time, in thread order; before, the extract
-  chain kept one comment. A Hacker News `item?id=` URL does the same through
-  Algolia's HN API.
-- Reddit is read from Reddit's own comment pages (current scores, paced to
-  about 10 requests a minute across every `search` run on the machine, 7
-  minutes' rest after a captcha) and from the Arctic Shift archive (the whole
-  tree); a captcha page counts as a failure, never as content, and the
-  archive serves threads alone when Reddit refuses. `extra.route` names the
-  source; `SEARCH_REDDIT_ROUTE=archive|live` picks one.
-- Auto picks `community` for "reddit", "hacker news", "HN", `r/<name>`, "what
-  do people say about", "opinions on" and "experiences with" (rule 11, right
-  after the X cue), but not "reddit api" or "reddit stock". `-p reddit` or
-  `-p hackernews` alone searches `community`.
+- A Reddit thread URL returns the post and every comment with its author,
+  score, depth, parent and time, in thread order; before, the extract chain
+  kept one comment. A Hacker News `item?id=` URL does the same.
+- Reddit is read from Reddit's own pages (current scores, paced to about 10
+  requests a minute across every `search` run on the machine, 7 minutes' rest
+  after a captcha) and from a Reddit archive that keeps the whole comment
+  tree; a captcha page counts as a failure, never as content, and the archive
+  serves threads alone when Reddit refuses. When Reddit refuses a search that
+  names no subreddit, a Reddit-wide search answers it instead. `extra.route`
+  names the source; `SEARCH_REDDIT_ROUTE=archive|live` picks one.
+- Auto picks `community` for "reddit", "hacker news", "on HN", `r/<name>`,
+  "what do people say about", "opinions about" and "experiences with" (rule
+  11, right after the platform cues), but not for "reddit api", a unit like
+  "r/min", "supreme court opinions on" or "HN" alone (Honduras). `-p reddit`
+  or `-p hackernews` alone searches `community`, and `-p tiktok` alone
+  searches `social`.
 
 ## 0.11.1 — 2026-11-03
 

@@ -2,8 +2,10 @@ pub mod brave;
 pub mod browserless;
 pub mod direct;
 pub mod exa;
+pub mod facebook;
 pub mod firecrawl;
 pub mod hackernews;
+pub mod instagram;
 pub mod jina;
 pub mod linkup;
 pub mod parallel;
@@ -11,12 +13,16 @@ pub mod perplexity;
 pub mod reddit;
 pub mod serpapi;
 pub mod serper;
+pub mod social_api;
 pub mod spec;
 #[cfg(feature = "stealth")]
 pub mod stealth;
 pub mod tavily;
 pub mod thread;
+pub mod threads;
+pub mod tiktok;
 pub mod xai;
+pub mod youtube;
 
 pub use spec::{Adapter, Call, FilterSupport, Output, ProviderSpec};
 
@@ -42,6 +48,11 @@ static ALL: &[&ProviderSpec] = &[
     &xai::SPEC,
     &reddit::SPEC,
     &hackernews::SPEC,
+    &tiktok::SPEC,
+    &instagram::SPEC,
+    &youtube::SPEC,
+    &facebook::SPEC,
+    &threads::SPEC,
     &firecrawl::SPEC,
     &browserless::SPEC,
     #[cfg(feature = "stealth")]
@@ -50,7 +61,7 @@ static ALL: &[&ProviderSpec] = &[
 ];
 
 /// How many search engines the binary has: providers serving any mode but
-/// extract and community. The README, both SKILL.md copies, the plugin and
+/// extract and community, other than the social platforms. The README, both SKILL.md copies, the plugin and
 /// marketplace entries, the crate description and `--help` say it in words
 /// ("ten"); a test fails when either drifts.
 pub const SEARCH_ENGINES: usize = 10;
@@ -58,6 +69,11 @@ pub const SEARCH_ENGINES: usize = 10;
 /// The community sources (`community` mode): Reddit and Hacker News. Counted
 /// apart from the search engines; the public text names them.
 pub const COMMUNITY_SOURCES: &[&str] = &["reddit", "hackernews"];
+
+/// The social platforms (`social` mode, beside X): TikTok, Instagram,
+/// YouTube, Facebook and Threads. Counted apart from the search engines;
+/// they run through metasearch.sh.
+pub const SOCIAL_PLATFORMS: &[&str] = social_api::PLATFORMS;
 
 pub fn all() -> &'static [&'static ProviderSpec] {
     ALL
@@ -83,6 +99,11 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Adapter>> {
         Box::new(xai::Xai::new(ctx.clone())),
         Box::new(reddit::Reddit::new(ctx.clone())),
         Box::new(hackernews::HackerNews::new(ctx.clone())),
+        Box::new(tiktok::TikTok::new(ctx.clone())),
+        Box::new(instagram::Instagram::new(ctx.clone())),
+        Box::new(youtube::YouTube::new(ctx.clone())),
+        Box::new(facebook::Facebook::new(ctx.clone())),
+        Box::new(threads::Threads::new(ctx.clone())),
         Box::new(firecrawl::Firecrawl::new(ctx.clone())),
         Box::new(browserless::Browserless::new(ctx.clone())),
         #[cfg(feature = "stealth")]
@@ -335,6 +356,7 @@ mod tests {
         use crate::types::Mode;
         let engines = ALL
             .iter()
+            .filter(|s| !SOCIAL_PLATFORMS.contains(&s.name))
             .filter(|s| {
                 s.modes
                     .iter()
@@ -342,6 +364,12 @@ mod tests {
             })
             .count();
         assert_eq!(engines, SEARCH_ENGINES);
+        let social: Vec<&str> = ALL
+            .iter()
+            .filter(|s| s.modes.contains(&Mode::Social) && s.name != "xai")
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(social, SOCIAL_PLATFORMS);
         let community: Vec<&str> = ALL
             .iter()
             .filter(|s| s.modes.contains(&Mode::Community))

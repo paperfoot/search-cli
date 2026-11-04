@@ -47,6 +47,8 @@ impl Hosting {
         match self.max_providers {
             Some(n) => n.max(1) as usize,
             None if mode == Mode::Deep => 6,
+            // X, TikTok, Instagram and YouTube.
+            None if mode == Mode::Social => 4,
             None => 3,
         }
     }
@@ -72,6 +74,7 @@ pub async fn run(
         only: only_providers.as_deref(),
         opts,
         deadline: registry::spec(mode).deadline,
+        straggler_cap: registry::spec(mode).straggler_cap,
         hosted_cap: hosting.map(|h| h.cap(mode)),
         reranker: hosting.filter(|h| h.rerank).map(|h| h.client.as_ref()),
     };
@@ -154,6 +157,9 @@ pub(crate) struct Request<'a> {
     pub only: Option<&'a [String]>,
     pub opts: &'a SearchOpts,
     pub deadline: Duration,
+    /// Fused: stop waiting this long in once one provider has answered
+    /// (the registry's `straggler_cap`).
+    pub straggler_cap: Option<Duration>,
     /// Most hosted providers a fused mode queries without `-p`.
     pub hosted_cap: Option<usize>,
     /// Rerank fused results through metasearch.sh (logged in, not `--no-rerank`).
@@ -245,7 +251,10 @@ pub(crate) async fn execute_with(
         .collect();
 
     let mut outcomes: Vec<(&'static str, Outcome)> = match mode_spec.merge {
-        MergeKind::Fused => run_fused(plan, req, mode, deadline).await,
+        MergeKind::Fused => {
+            let cap = req.straggler_cap.map(|c| start + c);
+            run_fused(plan, req, mode, deadline, cap).await
+        }
         MergeKind::Chain | MergeKind::Single => run_chain(plan, req, mode, deadline).await,
     };
     // Plan order, not completion order, so fusion ties break the same way
@@ -288,7 +297,7 @@ pub(crate) async fn execute_with(
                 failures.push(f);
             }
             Outcome::TimedOut => {
-                tracing::warn!("{name}: still running at the mode deadline");
+                tracing::warn!("{name}: still running when the search stopped waiting");
                 if let Some(c) = sent_cost {
                     by_provider.insert(name.to_string(), c);
                 }
@@ -543,11 +552,15 @@ async fn run_one(
 }
 
 /// Every provider at once; collect until all finish or the deadline passes.
+/// With a straggler cap, once the cap has passed and one provider has
+/// answered with something, the rest are no longer waited for: one slow
+/// platform cannot hold up the whole call.
 async fn run_fused(
     plan: Vec<Box<dyn Adapter>>,
     req: &Request<'_>,
     mode: Mode,
     deadline: Instant,
+    straggler_cap: Option<Instant>,
 ) -> Vec<(&'static str, Outcome)> {
     let mut set: JoinSet<(&'static str, Outcome)> = JoinSet::new();
     let mut pending: Vec<&'static str> = Vec::new();
@@ -566,10 +579,18 @@ async fn run_fused(
     }
 
     let mut outcomes = Vec::new();
+    let mut answered = false;
     loop {
-        match tokio::time::timeout_at(deadline.into(), set.join_next()).await {
+        let until = match straggler_cap {
+            Some(cap) if answered => cap.min(deadline),
+            _ => deadline,
+        };
+        match tokio::time::timeout_at(until.into(), set.join_next()).await {
             Ok(Some(Ok((name, outcome)))) => {
                 pending.retain(|n| *n != name);
+                if let Outcome::Done(out) = &outcome {
+                    answered |= !out.results.is_empty() || !out.answers.is_empty();
+                }
                 outcomes.push((name, outcome));
             }
             // A crashed adapter is a failure of that provider, not a timeout,
@@ -592,7 +613,8 @@ async fn run_fused(
             }
             Ok(None) => break,
             Err(_) => {
-                // Deadline: nothing more will be waited for.
+                // Deadline (or the straggler cap with an answer in hand):
+                // nothing more will be waited for.
                 set.abort_all();
                 break;
             }
@@ -668,7 +690,7 @@ fn timeout_failure(provider: &str) -> ProviderFailure {
         category: FailureCategory::Timeout,
         http_status: None,
         code: "timeout".to_string(),
-        reason: format!("{provider} was still running at the mode deadline"),
+        reason: format!("{provider} was still running when the search stopped waiting (the mode deadline, or in social the 20 s wait once another platform had answered)"),
         retryable: true,
     }
 }
@@ -994,10 +1016,90 @@ mod tests {
             only,
             opts: &opts,
             deadline: Duration::from_millis(deadline_ms),
+            straggler_cap: None,
             hosted_cap: None,
             reranker: None,
         };
         execute_with(adapters, &req).await
+    }
+
+    /// One slow platform does not hold up the social fan-out: once the wait
+    /// has passed and one provider answered, the straggler is dropped (and
+    /// its sent call counted as spent); with nothing answered yet, the
+    /// search keeps waiting to the deadline.
+    #[tokio::test]
+    async fn social_stops_waiting_for_a_straggler_once_one_answered() {
+        use crate::providers::{instagram, tiktok, youtube};
+        let opts = SearchOpts::default();
+        let run = |adapters, query: &'static str| {
+            let opts = &opts;
+            async move {
+                let req = Request {
+                    query,
+                    mode: Mode::Social,
+                    count: 10,
+                    only: None,
+                    opts,
+                    deadline: Duration::from_millis(3_000),
+                    straggler_cap: Some(Duration::from_millis(300)),
+                    hosted_cap: None,
+                    reranker: None,
+                };
+                execute_with(adapters, &req).await
+            }
+        };
+        let (adapters, _) = fakes(&[
+            (&tiktok::SPEC, ok(20, 3, "tiktok")),
+            (&youtube::SPEC, ok(150, 3, "youtube")),
+            (&instagram::SPEC, ok(30_000, 3, "instagram")),
+            (&xai::SPEC, ok(30_000, 3, "x")),
+        ]);
+        let started = Instant::now();
+        let r = run(adapters, "mechanical keyboard").await.unwrap();
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(280), "{took:?}");
+        assert!(
+            took < Duration::from_millis(1_500),
+            "waited for the straggler: {took:?}"
+        );
+        assert!(r.metadata.provider_results.contains_key("tiktok"));
+        assert!(r.metadata.provider_results.contains_key("youtube"));
+        let mut late = r.metadata.providers_timed_out.clone();
+        late.sort();
+        assert_eq!(late, ["instagram", "xai"]);
+        let cost = r.metadata.cost.unwrap();
+        assert_eq!(
+            cost.by_provider["instagram"],
+            instagram::SPEC.price.per_call as u64
+        );
+        // Fused: the top hit of each platform comes before any second hit.
+        let firsts: Vec<&str> = r.results[..2].iter().map(|x| x.source.as_str()).collect();
+        assert!(
+            firsts.contains(&"tiktok") && firsts.contains(&"youtube"),
+            "{firsts:?}"
+        );
+
+        // Nobody has answered at the wait: the search waits on.
+        let (adapters, _) = fakes(&[
+            (&tiktok::SPEC, ok(600, 2, "tiktok")),
+            (&youtube::SPEC, ok(30_000, 2, "youtube")),
+        ]);
+        let started = Instant::now();
+        let r = run(adapters, "mechanical keyboard").await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(580));
+        assert!(r.metadata.provider_results.contains_key("tiktok"));
+        assert_eq!(r.metadata.providers_timed_out, ["youtube"]);
+
+        // A cue pins the platform: only TikTok is called.
+        let (adapters, log) = fakes(&[
+            (&tiktok::SPEC, ok(5, 2, "tiktok")),
+            (&youtube::SPEC, ok(5, 2, "youtube")),
+            (&xai::SPEC, ok(5, 2, "x")),
+        ]);
+        run(adapters, "mechanical keyboard on tiktok")
+            .await
+            .unwrap();
+        assert_eq!(called(&log), ["tiktok"]);
     }
 
     fn called(log: &Log) -> Vec<String> {
@@ -1317,6 +1419,7 @@ mod tests {
             only: None,
             opts: &opts,
             deadline: Duration::from_millis(2_000),
+            straggler_cap: None,
             hosted_cap: None,
             reranker: None,
         };

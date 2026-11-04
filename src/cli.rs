@@ -6,11 +6,14 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Ten search engines across 14 modes, plus Reddit and Hacker News\n\
-        (community mode, no key) and page extraction (local fetchers first,\n\
+    long_about = "Ten search engines across 14 modes; TikTok, Instagram, YouTube,\n\
+        Facebook, Threads and X (social mode); Reddit and Hacker News\n\
+        (community mode, no key); and page extraction (local fetchers first,\n\
         then Jina Reader, Firecrawl or Browserless).\n\
-        With no -m the mode is auto: a URL extracts, an X/Twitter cue searches\n\
-        X, \"reddit\" or \"what do people say about\" searches community, and\n\
+        With no -m the mode is auto: a URL extracts (a TikTok, YouTube or\n\
+        Reddit link reads the post whole: transcript, comments), \"on tiktok\"\n\
+        or \"twitter\" searches that platform, \"reddit\" or \"what do people\n\
+        say about\" searches community, and\n\
         so on; the decision is reported in metadata.routing.auto. An\n\
         explicit -m or -p is always obeyed. Auto never picks deep.\n\
         Engines without your own key run through metasearch.sh after\n\
@@ -34,17 +37,25 @@ use clap::{Parser, Subcommand};
           stealth    Local Chrome-impersonating fetch (no API key)\n  \
           xai        Real-time X/Twitter search (Grok agentic)\n  \
           reddit     Reddit posts and whole threads (no key; paced ~10/min)\n  \
-          hackernews Hacker News stories, comments, threads (no key)\n\n\
+          hackernews Hacker News stories, comments, threads (no key)\n  \
+          tiktok     TikTok videos: search, transcript, comments (search login)\n  \
+          instagram  Instagram reels and posts (search login)\n  \
+          youtube    YouTube videos and shorts, transcripts (search login)\n  \
+          facebook   Facebook pages and posts (search login)\n  \
+          threads    Threads posts and replies (search login)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # auto mode\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \
           search search -q \"CEO of Stripe\" -m people      # LinkedIn profiles via Exa\n  \
           search search -q \"AI news\" -m news              # breaking news\n  \
           search search -q \"trending on twitter\" -m social # X/Twitter search\n  \
-          search \"opinions on tailwind v4\"               # Reddit + HN (community)\n  \
+          search \"mechanical keyboard on tiktok\"          # TikTok (social)\n  \
+          search \"https://youtu.be/3rKPzh3Pr0o\"           # video, transcript, comments\n  \
+          search \"opinions about tailwind v4\"            # Reddit + HN (community)\n  \
           search search -q \"query\" -p exa                 # force Exa only\n  \
           search search -q \"query\" -p exa,brave           # only Exa + Brave\n  \
           search --x \"AI agents\"                          # search X (Twitter) only\n  \
+          search --youtube \"AI agents\"                    # also --tiktok --instagram --threads\n  \
           search \"query\" --json | jq '.results[].url'     # pipe JSON to jq"
 )]
 pub struct Cli {
@@ -74,6 +85,26 @@ pub struct Cli {
     /// Search X (Twitter) only — shorthand for -m social -p xai
     #[arg(long = "x", global = true)]
     pub x_only: bool,
+
+    /// Search TikTok only — shorthand for -m social -p tiktok
+    #[arg(long, global = true)]
+    pub tiktok: bool,
+
+    /// Search Instagram reels only — shorthand for -m social -p instagram
+    #[arg(long, global = true)]
+    pub instagram: bool,
+
+    /// Search YouTube only — shorthand for -m social -p youtube
+    #[arg(long, global = true)]
+    pub youtube: bool,
+
+    /// Search Threads only — shorthand for -m social -p threads
+    #[arg(long, global = true)]
+    pub threads: bool,
+
+    /// The platform a shorthand flag pinned (set in main, not by clap).
+    #[arg(skip)]
+    pub platform: Option<&'static str>,
 
     /// Verbose debug logging to stderr (sets log level to debug unless RUST_LOG is set)
     #[arg(long, global = true, visible_alias = "verbose")]
@@ -189,8 +220,8 @@ pub struct SearchArgs {
     pub query: String,
 
     /// Search mode (default: auto). auto picks one of general, news,
-    /// academic, scholar, people, images, places, patents, social (X cue
-    /// only), community (a Reddit/HN or "what do people say" cue), extract
+    /// academic, scholar, people, images, places, patents, social (an X,
+    /// TikTok, Instagram, YouTube, Threads or Facebook page cue), community (a Reddit/HN or "what do people say" cue), extract
     /// (a URL) or similar, and reports why; never deep. Or choose: general,
     /// news, academic, deep, social, community, scholar, patents, people,
     /// places, images, similar, scrape, extract.
@@ -206,7 +237,7 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai,reddit,hackernews)
+    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai,reddit,hackernews,tiktok,instagram,youtube,facebook,threads)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 
