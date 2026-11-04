@@ -36,6 +36,8 @@ pub enum Mode {
     Places,
     /// Live X/Twitter search (X summary + cited posts)
     Social,
+    /// What real people say: Reddit and Hacker News threads, fused
+    Community,
 }
 
 impl fmt::Display for Mode {
@@ -54,6 +56,7 @@ impl fmt::Display for Mode {
             Mode::Images => "images",
             Mode::Places => "places",
             Mode::Social => "social",
+            Mode::Community => "community",
         };
         write!(f, "{s}")
     }

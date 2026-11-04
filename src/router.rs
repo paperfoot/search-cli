@@ -1,7 +1,8 @@
 //! `auto` mode: the deterministic rules of ROUTING.md, as a pure function.
 //!
-//! Rules 1-5 are decisive (the first match decides, the routing model is
-//! skipped). Rules 6-10 are signals: when not logged in the first one in table
+//! Rules 1-5 and 11 are decisive (the first match decides, the routing
+//! model is skipped); rule 11, a community cue (Reddit, Hacker News, "what
+//! do people say about"), is checked right after rule 2. Rules 6-10 are signals: when not logged in the first one in table
 //! order decides; logged in, metasearch.sh's routing model decides. Auto never picks `deep`, and
 //! picks `social` only on an explicit X/Twitter cue. The server runs the same
 //! patterns; the table tests below mirror its vectors.
@@ -33,14 +34,22 @@ pub fn fit_pinned(mode: Mode, pinned: &[String]) -> Option<AutoDecision> {
         .filter(|s| !s.modes.contains(&mode))
         .map(|s| s.name)
         .collect();
-    if cannot.is_empty() || !specs.iter().all(|s| s.modes.contains(&Mode::General)) {
+    if cannot.is_empty() {
         return None;
     }
+    // Pinned community sources (-p reddit, -p hackernews) search community.
+    let to = if specs.iter().all(|s| s.modes.contains(&Mode::General)) {
+        Mode::General
+    } else if specs.iter().all(|s| s.modes.contains(&Mode::Community)) {
+        Mode::Community
+    } else {
+        return None;
+    };
     Some(AutoDecision {
-        mode: Mode::General.to_string(),
+        mode: to.to_string(),
         source: "fallback".to_string(),
         reason: format!(
-            "{} cannot serve {mode}, so general was used.",
+            "{} cannot serve {mode}, so {to} was used.",
             cannot.join(", ")
         ),
         probabilities: None,
@@ -61,6 +70,9 @@ pub fn decisive(query: &str) -> Option<Hit> {
     }
     if let Some(cue) = x_cue(q) {
         return Some(hit(2, Mode::Social, &cue));
+    }
+    if let Some(cue) = community_cue(q) {
+        return Some(hit(11, Mode::Community, &cue));
     }
     if let Some(url) = similar_url(q) {
         let mut h = hit(3, Mode::Similar, "a request for similar sites");
@@ -218,6 +230,7 @@ pub fn decision_for(h: &Hit, source: &str) -> AutoDecision {
         1 => "The query is a URL".to_string(),
         2 => format!("Mentions X/Twitter ('{}')", h.cue),
         3 => "Asked for sites similar to a URL".to_string(),
+        11 => format!("Asks what people say ('{}')", h.cue),
         _ => format!("Matched '{}'", h.cue),
     };
     AutoDecision {
@@ -246,6 +259,7 @@ pub fn auto_mode(name: &str) -> Option<Mode> {
             | Mode::Places
             | Mode::Patents
             | Mode::Social
+            | Mode::Community
             | Mode::Extract
             | Mode::Similar
     )
@@ -582,6 +596,67 @@ fn lone_handle(q: &str) -> Option<String> {
     None
 }
 
+/// Phrases that ask what real people say.
+const COMMUNITY_PHRASES: &[&str] = &[
+    "reddit",
+    "subreddit",
+    "hacker news",
+    "hackernews",
+    "ask hn",
+    "show hn",
+    "what do people say about",
+    "what do people think about",
+    "what do people think of",
+    "what are people saying about",
+    "opinions on",
+    "opinions about",
+    "experiences with",
+];
+
+/// Words after "reddit" that make it the company, not its threads.
+const REDDIT_COMPANY: &[&str] = &["api", "stock", "ipo", "earnings", "shares", "logo", "inc"];
+
+/// Rule 11: a community cue. "reddit" (not "reddit api" or "reddit
+/// stock"), Hacker News or `HN` (capitals), an `r/<name>`, or a phrase that
+/// asks what people say.
+fn community_cue(q: &str) -> Option<String> {
+    let lower = q.to_lowercase();
+    for p in COMMUNITY_PHRASES {
+        let hit = lower.match_indices(*p).any(|(i, m)| {
+            let end = i + m.len();
+            if !boundary_before(&lower, i) || !boundary_after(&lower, end) {
+                return false;
+            }
+            if *p == "reddit" {
+                let next = lower[end..].trim_start();
+                return !REDDIT_COMPANY
+                    .iter()
+                    .any(|w| next.starts_with(w) && boundary_after(next, w.len()));
+            }
+            true
+        });
+        if hit {
+            return Some(p.to_string());
+        }
+    }
+    if q.match_indices("HN")
+        .any(|(i, m)| boundary_before(q, i) && boundary_after(q, i + m.len()))
+    {
+        return Some("HN".to_string());
+    }
+    q.split_whitespace()
+        .find(|w| {
+            let w = w.trim_start_matches('/');
+            w.len() > 3
+                && w.starts_with("r/")
+                && w[2..]
+                    .trim_end_matches(['/', ',', '.', '?'])
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|w| w.trim_start_matches('/').to_string())
+}
+
 /// Rule 3: `^(similar to|sites like|alternatives to|competitors (of|to)|more like)\s+(https?://\S+)$`.
 fn similar_url(q: &str) -> Option<String> {
     const LEADS: &[&str] = &[
@@ -868,6 +943,73 @@ mod tests {
                 "query {q:?}"
             );
         }
+    }
+
+    /// Rule 11: one case per cue, and look-alikes that stay out.
+    #[test]
+    fn rule_11_routes_community_cues_and_nothing_else() {
+        for (q, cue) in [
+            ("best mechanical keyboard reddit", "reddit"),
+            ("which subreddit for rust jobs", "subreddit"),
+            ("hacker news thread on sqlite", "hacker news"),
+            ("hackernews rust async", "hackernews"),
+            ("Ask HN: freelancing in 2026", "ask hn"),
+            ("show hn launch tips", "show hn"),
+            (
+                "what do people say about the framework laptop",
+                "what do people say about",
+            ),
+            (
+                "what do people think about bun",
+                "what do people think about",
+            ),
+            ("what do people think of zed", "what do people think of"),
+            (
+                "what are people saying about htmx",
+                "what are people saying about",
+            ),
+            ("opinions on tailwind v4", "opinions on"),
+            ("opinions about remote work", "opinions about"),
+            ("experiences with hetzner", "experiences with"),
+            ("HN discussion of the outage", "HN"),
+            ("r/rust async runtimes", "r/rust"),
+        ] {
+            let h = decisive(q).unwrap_or_else(|| panic!("{q}: no rule"));
+            assert_eq!(
+                (h.rule, h.mode, h.cue.as_str()),
+                (11, Mode::Community, cue),
+                "{q}"
+            );
+            assert_eq!(local(q), ("community".into(), "rule".into()), "{q}");
+        }
+        for q in [
+            "rust async runtime",
+            "reddit api pricing",
+            "reddit stock price",
+            "hn stands for what",
+            "experience with python jobs",
+            "redditor meaning",
+            "opinion on the supreme court ruling",
+        ] {
+            assert_ne!(local(q).0, "community", "{q}");
+        }
+        // X wins over a community phrase: rule 2 comes first.
+        assert_eq!(local("what are people saying on X about htmx").0, "social");
+        let (d, _) = resolve_local("opinions on tailwind v4");
+        assert_eq!(
+            d.reason,
+            "Asks what people say ('opinions on') (rule 11); used community."
+        );
+    }
+
+    #[test]
+    fn pinned_community_sources_search_community() {
+        let p = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let d = fit_pinned(Mode::General, &p(&["hackernews"])).expect("hn has no general");
+        assert_eq!(d.mode, "community");
+        assert!(fit_pinned(Mode::Community, &p(&["reddit", "hackernews"])).is_none());
+        // A mixed pin with no common mode is left for the engine to refuse.
+        assert!(fit_pinned(Mode::General, &p(&["reddit", "serper"])).is_none());
     }
 
     /// The server's judge.test.ts vectors for amended rule 2: developer

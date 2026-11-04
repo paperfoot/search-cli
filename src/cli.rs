@@ -6,10 +6,12 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Ten search engines across 13 modes, plus page extraction (local\n\
-        fetchers first, then Jina Reader, Firecrawl or Browserless).\n\
+    long_about = "Ten search engines across 14 modes, plus Reddit and Hacker News\n\
+        (community mode, no key) and page extraction (local fetchers first,\n\
+        then Jina Reader, Firecrawl or Browserless).\n\
         With no -m the mode is auto: a URL extracts, an X/Twitter cue searches\n\
-        X, and so on; the decision is reported in metadata.routing.auto. An\n\
+        X, \"reddit\" or \"what do people say about\" searches community, and\n\
+        so on; the decision is reported in metadata.routing.auto. An\n\
         explicit -m or -p is always obeyed. Auto never picks deep.\n\
         Engines without your own key run through metasearch.sh after\n\
         `search login`, charged to your balance; each result's cost is in\n\
@@ -30,13 +32,16 @@ use clap::{Parser, Subcommand};
           browserless Cloud browser for Cloudflare/JS-heavy pages\n  \
           direct     Honest local page fetch, markdown first (no API key)\n  \
           stealth    Local Chrome-impersonating fetch (no API key)\n  \
-          xai        Real-time X/Twitter search (Grok agentic)\n\n\
+          xai        Real-time X/Twitter search (Grok agentic)\n  \
+          reddit     Reddit posts and whole threads (no key; paced ~10/min)\n  \
+          hackernews Hacker News stories, comments, threads (no key)\n\n\
         EXAMPLES:\n  \
           search \"rust error handling\"                    # auto mode\n  \
           search search -q \"CRISPR\" -m academic           # academic papers\n  \
           search search -q \"CEO of Stripe\" -m people      # LinkedIn profiles via Exa\n  \
           search search -q \"AI news\" -m news              # breaking news\n  \
           search search -q \"trending on twitter\" -m social # X/Twitter search\n  \
+          search \"opinions on tailwind v4\"               # Reddit + HN (community)\n  \
           search search -q \"query\" -p exa                 # force Exa only\n  \
           search search -q \"query\" -p exa,brave           # only Exa + Brave\n  \
           search --x \"AI agents\"                          # search X (Twitter) only\n  \
@@ -185,9 +190,10 @@ pub struct SearchArgs {
 
     /// Search mode (default: auto). auto picks one of general, news,
     /// academic, scholar, people, images, places, patents, social (X cue
-    /// only), extract (a URL) or similar, and reports why; never deep. Or
-    /// choose: general, news, academic, deep, social, scholar, patents,
-    /// people, places, images, similar, scrape, extract.
+    /// only), community (a Reddit/HN or "what do people say" cue), extract
+    /// (a URL) or similar, and reports why; never deep. Or choose: general,
+    /// news, academic, deep, social, community, scholar, patents, people,
+    /// places, images, similar, scrape, extract.
     #[arg(short, long, default_value = "auto", value_parser = parse_mode_arg)]
     pub mode: ModeArg,
 
@@ -200,7 +206,7 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai)
+    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai,reddit,hackernews)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 

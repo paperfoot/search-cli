@@ -126,5 +126,6 @@ pub fn mode_str(m: Mode) -> &'static str {
         Mode::Images => "images",
         Mode::Places => "places",
         Mode::Social => "social",
+        Mode::Community => "community",
     }
 }

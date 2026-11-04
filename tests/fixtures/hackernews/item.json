@@ -1,0 +1,101 @@
+{
+ "author": "bcantrill",
+ "children": [
+  {
+   "author": "Sytten",
+   "children": [
+    {
+     "author": "cogman10",
+     "children": [],
+     "created_at": "2025-10-31T20:37:17.000Z",
+     "created_at_i": 1761943037,
+     "id": 45776433,
+     "parent_id": 45776277,
+     "points": null,
+     "story_id": 45774086,
+     "text": "The ideas that have been batted around is called &quot;async drop&quot; [1]<p>And it looks like it&#x27;s still just an unaddressed well known problem [2].<p>Honestly, once the Mozilla sackening of rust devs happened it seems like the language has been practically rudderless.  The RFC system seems almost dead as a lot of the main contributors are no longer working on rust.<p>This initiative hasn&#",
+     "title": null,
+     "type": "comment",
+     "url": null
+    },
+    {
+     "author": "sunshowers",
+     "children": [],
+     "created_at": "2025-10-31T20:42:52.000Z",
+     "created_at_i": 1761943372,
+     "id": 45776480,
+     "parent_id": 45776277,
+     "points": null,
+     "story_id": 45774086,
+     "text": "Note that forcing a drop of a lock guard has its own issues, particularly around leaving the guarded data in an invalid state. I cover this a bit in my talk that Bryan linked to in the OP [1].<p>[1] timestamped: <a href=\"https:&#x2F;&#x2F;youtu.be&#x2F;zrv5Cy1R7r4?t=1067\" rel=\"nofollow\">https:&#x2F;&#x2F;youtu.be&#x2F;zrv5Cy1R7r4?t=1067</a>",
+     "title": null,
+     "type": "comment",
+     "url": null
+    }
+   ],
+   "created_at": "2025-10-31T20:21:17.000Z",
+   "created_at_i": 1761942077,
+   "id": 45776277,
+   "parent_id": 45774086,
+   "points": null,
+   "story_id": 45774086,
+   "text": "I am wondering if there is a larger RFC for Rust to force users to not hold a variable across await points.<p>In my mind futurelock is similar to keeping a sync lock across an await point. We have nothing right now to force a drop and I think the solution to that problem would help here.",
+   "title": null,
+   "type": "comment",
+   "url": null
+  },
+  {
+   "author": "orthecreedence",
+   "children": [
+    {
+     "author": "bcantrill",
+     "children": [],
+     "created_at": "2025-10-31T21:13:19.000Z",
+     "created_at_i": 1761945199,
+     "id": 45776768,
+     "parent_id": 45776307,
+     "points": null,
+     "story_id": 45774086,
+     "text": "Indeed. One of the interesting side effects of being a remote company that records everything[0] is that we have the instant where the &quot;1000 piece puzzle just clicks together&quot; recorded, and it&#x27;s honestly pretty wild.  In this case, it was very much a shared brainstorming between four engineers (Eliza, Sean, John and Dave) -- and there is almost a passing of the baton where they star",
+     "title": null,
+     "type": "comment",
+     "url": null
+    }
+   ],
+   "created_at": "2025-10-31T20:23:56.000Z",
+   "created_at_i": 1761942236,
+   "id": 45776307,
+   "parent_id": 45774086,
+   "points": null,
+   "story_id": 45774086,
+   "text": "Great read, and the example code makes sense. This stuff can be a nightmare to find, but once you do it&#x27;s like a giant 1000 piece puzzle just clicks together instantly.",
+   "title": null,
+   "type": "comment",
+   "url": null
+  },
+  {
+   "author": "oconnor663",
+   "children": [],
+   "created_at": "2025-10-31T20:41:14.000Z",
+   "created_at_i": 1761943274,
+   "id": 45776463,
+   "parent_id": 45774086,
+   "points": null,
+   "story_id": 45774086,
+   "text": "&gt; FAQ: doesn\u2019t future1 get cancelled?<p>I guess cancellation is really two different things, which usually happen at the ~same time, but not in this case: 1) the future stops getting polled, and 2) the future gets dropped. In this example the drop is delayed, and because the future is holding a guard,* the delay has side effects. So the future &quot;has been cancelled&quot; in the sense that it",
+   "title": null,
+   "type": "comment",
+   "url": null
+  }
+ ],
+ "created_at": "2025-10-31T16:49:26.000Z",
+ "created_at_i": 1761929366,
+ "id": 45774086,
+ "parent_id": null,
+ "points": 449,
+ "story_id": 45774086,
+ "text": "This RFD describes our distillation of a really gnarly issue that we hit in the Oxide control plane.[0]  Not unlike our discovery of the async cancellation issue[1][2][3], this is larger than the issue itself -- and worse, the program that hits futurelock is correct from the programmer&#x27;s point of view.  Fortunately, the surface area here is smaller than that of async cancellation and the cond",
+ "title": "Futurelock: A subtle risk in async Rust",
+ "type": "story",
+ "url": "https://rfd.shared.oxide.computer/rfd/0609"
+}
