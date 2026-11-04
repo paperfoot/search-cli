@@ -1,12 +1,14 @@
 ---
 name: search
 description: >
-  Web search, news, papers, people, X posts, Reddit and Hacker News threads,
+  Web search, news, papers, people, TikTok, Instagram, YouTube, Facebook,
+  Threads and X posts, Reddit and Hacker News threads, video transcripts,
   images, places, patents and page extraction through the `search` CLI, which
   sends a query to several of its ten search engines at once and fuses the
   results. Use when you need to look something up, get current information or
   the latest news, find sources or papers for a claim, read the text of a URL,
-  see what people say on X, Reddit or Hacker News, or research a person or
+  see what people say or show on TikTok, YouTube, Instagram, X, Reddit or
+  Hacker News, read a video's transcript and comments, or research a person or
   company. The mode defaults to auto and is reported;
   every result envelope carries its cost. Run `search agent-info` for the
   full manifest.
@@ -24,20 +26,24 @@ exit code.
 ## Choosing a mode
 
 The mode defaults to `auto`: fixed rules first (a lone URL is `extract`;
-"tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social`, but
-never code like `@property` or an email; "reddit", "hacker news", "HN",
-`r/<name>`, "what do people say about", "opinions on" or "experiences with"
-is `community`, never "reddit api" or "reddit stock"; `similar to <URL>` is
+"tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social` on X,
+but never code like `@property` or an email; "tiktok", "instagram reels",
+"youtube", "on threads" or "facebook page" is `social` on that platform,
+never "youtube api" or "embed a youtube video"; "reddit", "hacker news",
+"on HN", `r/<name>`, "what do people say about", "opinions about" or
+"experiences with" is `community`, never "reddit api", "r/min" or a bare
+"HN"; `similar to <URL>` is
 `similar`;
 "patent" or "prior art" is `patents`, never "patent leather"; "images of" is
 `images`, never Docker or VM images), then metasearch.sh's routing model when
 logged in, else keyword rules, else `general`. In `news` and `social`, a time word sets `-f` unless
 you passed one ("today", "yesterday" → `day`;
 "this week", "latest", "breaking" → `week`; "this month", "this year" →
-`month`, `year`). Auto never picks `deep`, and picks `social` only on an X
-cue: ask for those two with `-m`. An explicit `-m` or `-p` always wins; if the
-`-p` engines cannot serve the mode auto picked, the search runs as `general`
-(as `community` for `-p reddit` or `-p hackernews`).
+`month`, `year`). Auto never picks `deep`, and picks `social` only on a
+platform cue: ask for those two with `-m`. An explicit `-m` or `-p` always
+wins; if the `-p` engines cannot serve the mode auto picked, the search runs
+as `general` (as `community` for `-p reddit` or `-p hackernews`, `social` for
+`-p tiktok` and the other platforms).
 
 Pass `-m` when auto is not what you want:
 
@@ -48,9 +54,11 @@ Pass `-m` when auto is not what you want:
 | Papers on a topic | `-m academic` |
 | A paper's citations, versions, PDF | `-m scholar` |
 | A person, their role, their LinkedIn | `-m people` |
-| What X says about something | `-m social` |
+| What X, TikTok, Instagram and YouTube show about something | `-m social` |
+| One platform | `"… on tiktok"`, or `--tiktok`, `--instagram`, `--youtube`, `--threads`, `--x` |
 | What real people say (Reddit, Hacker News) | `-m community` |
 | Read a Reddit or HN thread whole | `-q <thread URL>` (auto extract) |
+| A video's transcript and top comments | `-q <TikTok, YouTube, Instagram, Facebook or Threads URL>` |
 | Read this page | `-q <URL> -m extract`; markdown is in `results[0].snippet` |
 | Pages like this one | `-q <URL> -m similar` |
 | Images | `-m images`; the picture is `image_url`, `url` is the page it is on |
@@ -59,7 +67,8 @@ Pass `-m` when auto is not what you want:
 | Wide coverage, cost no object | `-m deep -c 30` (several times the price of general) |
 
 Bare `search "…"` takes only the global flags (`--json`, `--pretty`,
-`--quiet`, `--x`, `--last`, `--debug`). A search flag after it (`-m`, `-p`, `-c`, `-f`, `-d`,
+`--quiet`, `--last`, `--debug`, and `--x`, `--tiktok`, `--instagram`,
+`--youtube`, `--threads`). A search flag after it (`-m`, `-p`, `-c`, `-f`, `-d`,
 `--no-cache` and the rest) exits 3; use the full form:
 `search search -q "…" -m news -f week`. `-f` takes `day`, `week`, `month` or
 `year`; anything else exits 3.
@@ -72,7 +81,31 @@ Examples:
 - `search search -q "CRISPR delivery" -m academic --json`
 - `search search -q https://example.com/post -m extract --json`
 - `search --x "AI agents"`: X only
+- `search "mechanical keyboard on tiktok" --json`: TikTok only
+- `search "https://www.youtube.com/watch?v=3rKPzh3Pr0o" --json`: the video,
+  its transcript and top comments
 - `search search -q "r/rust async runtimes" -m community --json`: one subreddit
+
+## TikTok, Instagram, YouTube, Facebook, Threads and X
+
+`-m social` searches X, TikTok, Instagram reels and YouTube at once and
+fuses the hits; once one has answered it waits at most 20 s for the rest
+(stragglers are listed in `metadata.providers_timed_out`). Naming a platform
+("on tiktok", "instagram reels", "youtube comments", "on threads", "facebook
+page", "twitter") searches that platform only, and the cue words are left out
+of its query. Threads and Facebook (page search by name) run only on their
+cue or `-p threads` / `-p facebook`.
+
+- Hits carry `extra.platform`, `extra.author`, `extra.followers`,
+  `extra.views`, `extra.likes`, `extra.num_comments`, `extra.shares` and
+  `extra.duration_s` where the platform reports them.
+- Extract a TikTok, Instagram, YouTube, Facebook or Threads post or video
+  URL for the caption, stats, transcript and top comments in
+  `results[0].snippet`; `extra.transcript` says whether a transcript was
+  found and `extra.comments[]` holds `author`, `likes` and `text`. A Facebook
+  page URL gives the page's details and latest posts.
+- The platforms run through metasearch.sh: they need `search login`, and
+  each call is charged to the account (`agent-info` lists the price).
 
 ## Reddit and Hacker News
 
@@ -90,20 +123,20 @@ and the same comments as records in `extra.comments[]` (`id`, `parent`,
   the machine; after a captcha it rests for 7 minutes. Don't loop over many
   threads quickly: a paced call fails with `rate_limit` (exit 4).
 - `extra.route` says what served a Reddit thread: `live` (Reddit itself, current
-  scores), `archive` (Arctic Shift, scores from when it saved each comment) or
+  scores), `archive` (a Reddit archive, scores from when it saved each comment) or
   `live+archive` (the whole tree, current scores where Reddit showed them).
 - When Reddit refuses, the archive serves threads; archive search needs a
-  subreddit, so put `r/<name>` in the query. `SEARCH_REDDIT_ROUTE=archive` or
-  `live` picks one source.
-- Through metasearch.sh, Hacker News costs a small per-call price and Reddit
-  is not offered.
+  subreddit (`r/<name>` in the query). A refused search without one goes to
+  a Reddit-wide search instead (`extra.route` is `global`).
+  `SEARCH_REDDIT_ROUTE=archive` or `live` picks one source.
 
 ## Keys, login and cost
 
 - Engines with the user's own key go direct (env vars beat the config file).
 - After `search login` (free; searches are paid from a topped-up balance),
   engines without a key go through metasearch.sh and are charged to the
-  account. A fused search sends at most 3 hosted engines (6 for `deep`); `-p`
+  account. A fused search sends at most 3 hosted engines (6 for `deep`, 4 for
+  `social`); `-p`
   chooses others. Login also adds model routing and relevance reranking at no
   charge.
 - Read `metadata.cost`: `usd`, `micros`, `by_provider`, and `basis`

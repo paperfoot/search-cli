@@ -9,11 +9,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/paperfoot/search-cli/ci.yml?style=for-the-badge&logo=github)](https://github.com/paperfoot/search-cli/actions)
 
-[Install](#install) · [No keys?](#no-keys-search-login) · [Modes](#modes) · [Reddit and HN](#reddit-and-hacker-news) · [Cost](#what-a-search-costs) · [Extract](#reading-a-page) · [Agents](#for-agents) · [Plugins and MCP](#plugins-and-mcp)
+[Install](#install) · [No keys?](#no-keys-search-login) · [Modes](#modes) · [TikTok, YouTube and more](#tiktok-instagram-youtube-facebook-threads-and-x) · [Reddit and HN](#reddit-and-hacker-news) · [Cost](#what-a-search-costs) · [Extract](#reading-a-page) · [Agents](#for-agents) · [Plugins and MCP](#plugins-and-mcp)
 
 </div>
 
-`search` is a single Rust binary for AI agents and the people who run them. It searches with Serper, Exa, Jina, Brave, Linkup, Parallel, Tavily, Perplexity, SerpApi and xAI, searches Reddit and Hacker News with no key, reads pages with two fetchers of its own and then Jina, Firecrawl or Browserless, merges what comes back with reciprocal rank fusion, and prints one JSON document with the results, the engines that answered, the ones that failed and why, and the cost.
+`search` is a single Rust binary for AI agents and the people who run them. It searches with Serper, Exa, Jina, Brave, Linkup, Parallel, Tavily, Perplexity, SerpApi and xAI, searches TikTok, Instagram, YouTube, Facebook, Threads and X for posts and videos (with transcripts and top comments), searches Reddit and Hacker News with no key, reads pages with two fetchers of its own and then Jina, Firecrawl or Browserless, merges what comes back with reciprocal rank fusion, and prints one JSON document with the results, the engines that answered, the ones that failed and why, and the cost.
 
 ```bash
 search "CRISPR gene therapy trials"
@@ -43,7 +43,7 @@ search "rust async runtimes"
 - Engines you have your own key for go direct, as before. Your keys always win.
 - Engines you have no key for go through metasearch.sh and are charged to your balance.
 - Each search reports its cost in `metadata.cost` and how each engine was reached in `metadata.transport` (`direct`, `local` or `hosted`).
-- A fused search sends at most 3 hosted engines (6 for `deep`), in the mode's order, and a warning names the ones left out. Name engines with `-p` to choose others, or set one cap for every fused mode, `deep` included, with `search config set metasearch.max_providers 5` (1 to 8, config file only).
+- A fused search sends at most 3 hosted engines (6 for `deep`, 4 for `social`), in the mode's order, and a warning names the ones left out. Name engines with `-p` to choose others, or set one cap for every fused mode, `deep` included, with `search config set metasearch.max_providers 5` (1 to 8, config file only).
 - Logging in also turns on model routing and relevance reranking, which are free.
 
 ```bash
@@ -69,11 +69,11 @@ Precedence: `<PROVIDER>_API_KEY` env, then `SEARCH_KEYS_<PROVIDER>` env, then th
 
 ## Modes
 
-With no `-m`, the mode is `auto`, in `search "…"` and `search search -q "…"` alike. Auto applies fixed rules first: a lone URL is `extract`; "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social`; "reddit", "subreddit", "hacker news", "HN", `r/<name>`, "what do people say about", "opinions on" or "experiences with" is `community` (not "reddit api" or "reddit stock"); `similar to <URL>` (or "sites like", "alternatives to") is `similar`; "patent" (not "patent leather"), "prior art" or a patent number such as `US 10123456` or `EP1234567` is `patents`; "images of" or "logo for" is `images`, except system images such as Docker, container or VM images. Web-development uses ("Twitter card", "embed a tweet"), "on X axis", code at-words (`@property`, `@media`, `@types/node`) and email addresses are not X cues. When you are logged in, metasearch.sh's routing model, a small classification model, picks among the remaining modes. Without login, or when the model does not answer within 1.2 s, keyword rules decide (places, scholar, academic, people, then news), and anything else is `general`. Auto never picks `deep`, and picks `social` only on an X cue: those two cost far more and must be asked for.
+With no `-m`, the mode is `auto`, in `search "…"` and `search search -q "…"` alike. Auto applies fixed rules first: a lone URL is `extract`; "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social` on X; "tiktok", "instagram reels", "youtube", "youtube comments", "on threads" or "facebook page" is `social` on that platform (not "youtube api", "tiktok sdk" or "embed a youtube video"); "reddit", "subreddit", "hacker news", "on HN", `r/<name>`, "what do people say about", "opinions about" or "experiences with" is `community` (not "reddit api", "reddit stock", a unit such as "r/min", or "HN" alone); `similar to <URL>` (or "sites like", "alternatives to") is `similar`; "patent" (not "patent leather"), "prior art" or a patent number such as `US 10123456` or `EP1234567` is `patents`; "images of" or "logo for" is `images`, except system images such as Docker, container or VM images. Web-development uses ("Twitter card", "embed a tweet"), "on X axis", code at-words (`@property`, `@media`, `@types/node`) and email addresses are not X cues. When you are logged in, metasearch.sh's routing model, a small classification model, picks among the remaining modes. Without login, or when the model does not answer within 1.2 s, keyword rules decide (places, scholar, academic, people, then news), and anything else is `general`. Auto never picks `deep`, and picks `social` only on a platform cue: those two cost more and must be asked for.
 
 In `news` and `social`, auto turns a time word into a freshness filter when you gave no `-f`: "today" and "yesterday" mean `day`; "this week", "latest" and "breaking" mean `week`; "this month" and "this year" mean `month` and `year`. The decision, its `source` and its `reason` are in `metadata.routing.auto`.
 
-Pass `-m` to choose the mode yourself; an explicit `-m` or `-p` is always obeyed. If the engines you name with `-p` cannot serve the mode auto picked, the search runs as `general` with source `fallback` (as `community` when you name only `reddit` or `hackernews`).
+Pass `-m` to choose the mode yourself; an explicit `-m` or `-p` is always obeyed. If the engines you name with `-p` cannot serve the mode auto picked, the search runs as `general` with source `fallback` (as `community` when you name only `reddit` or `hackernews`, and `social` when you name only platforms such as `tiktok`).
 
 | Mode | Use it for | `-q` is | Engines, in order |
 |------|------------|---------|-------------------|
@@ -84,16 +84,16 @@ Pass `-m` to choose the mode yourself; an explicit `-m` or `-p` is always obeyed
 | `scholar` | Google Scholar records: citations, versions, PDFs | query | serper, serpapi |
 | `deep` | Wide coverage when recall matters more than cost; use `-c 30` | query | exa, serper, brave, linkup, parallel, tavily, perplexity, xai |
 | `people` | A person, their role, their LinkedIn profile | query | exa |
-| `social` | What people say on X | query | xai |
+| `social` | What X, TikTok, Instagram and YouTube show; a platform cue pins one, and Threads and Facebook pages run on their cue | query | xai, tiktok, instagram, youtube (threads, facebook on a cue) |
 | `community` | What real people say on Reddit and Hacker News | query | reddit, hackernews |
 | `patents` | Prior art, patent families | query | serper |
 | `images` | Images; the picture is `image_url`, `url` is the page | query | serper |
 | `places` | Local businesses and maps | query | serper |
-| `extract` | Read one page as markdown (a Reddit or HN thread URL goes to reddit or hackernews first) | URL | direct, stealth, jina, firecrawl, browserless |
+| `extract` | Read one page as markdown (a Reddit or HN thread URL goes to reddit or hackernews first, a TikTok, Instagram, YouTube, Facebook or Threads URL to that platform) | URL | direct, stealth, jina, firecrawl, browserless |
 | `scrape` | Same as `extract` | URL | same as `extract` |
 | `similar` | Pages like this one | URL | exa |
 
-Fused modes (`general`, `news`, `academic`, `scholar`, `deep`, `community`) query their engines at once and rank with reciprocal rank fusion: a URL that several engines return ranks above any one engine's top hit, and `extra.also_found_by` shows which engines agreed. A fused search waits for every engine until the mode's deadline, because an engine that received the query bills for it whether or not the CLI waits; engines still running at the deadline are listed in `metadata.providers_timed_out`. `extract` tries engines in order and stops at the first real page. The other modes use one engine. `search agent-info` prints this table from the same registry the engine uses.
+Fused modes (`general`, `news`, `academic`, `scholar`, `deep`, `social`, `community`) query their engines at once and rank with reciprocal rank fusion: a URL that several engines return ranks above any one engine's top hit, and `extra.also_found_by` shows which engines agreed. A fused search waits for every engine until the mode's deadline, because an engine that received the query bills for it whether or not the CLI waits; engines still running at the deadline are listed in `metadata.providers_timed_out`. `social` is the exception: once one platform has answered, it waits at most 20 s for the rest, so one slow platform cannot hold up the search. `extract` tries engines in order and stops at the first real page. The other modes use one engine. `search agent-info` prints this table from the same registry the engine uses.
 
 When you are logged in, results in `general`, `news`, `academic`, `scholar`, `people` and `deep` are reranked by relevance once there are at least 3: `metadata.routing.reranked` is `true` and each result carries `extra.relevance` (0 to 1). A search pinned to one engine with `-p` keeps that engine's order, `--no-rerank` keeps the fused order, and a failed rerank keeps it too (`reranked: false`). Without login, auto and rerank-mode searches carry the note "log in for model routing and reranking (free)" in `metadata.notes`.
 
@@ -104,26 +104,42 @@ search search -q "AI agent frameworks" -m news -f week
 search search -q https://example.com/post -m extract
 search search -q "rust error handling" -p exa,serper       # only these engines
 search --x "Claude Code"                                   # X only
+search --tiktok "Claude Code"                              # TikTok only (also --instagram, --youtube, --threads)
 ```
 
-The shorthand `search "…"` takes only the global flags (`--json`, `--quiet`, `--x`, `--last`, `--debug`). A search flag after it (`-m`, `-p`, `-c`, `-f`, `-d`, `--no-cache` and the rest, `--flag=value` too) exits 3 with an error that shows the full form, `search search -q "…"`. `-f` takes `day`, `week`, `month` or `year`; anything else exits 3.
+The shorthand `search "…"` takes only the global flags (`--json`, `--quiet`, `--last`, `--debug`, and `--x`, `--tiktok`, `--instagram`, `--youtube`, `--threads`). A search flag after it (`-m`, `-p`, `-c`, `-f`, `-d`, `--no-cache` and the rest, `--flag=value` too) exits 3 with an error that shows the full form, `search search -q "…"`. `-f` takes `day`, `week`, `month` or `year`; anything else exits 3.
+
+## TikTok, Instagram, YouTube, Facebook, Threads and X
+
+```bash
+search "mechanical keyboard on tiktok"                             # TikTok only
+search search -q "mechanical keyboard" -m social --json            # X, TikTok, Instagram, YouTube
+search "https://www.youtube.com/watch?v=3rKPzh3Pr0o"               # the video, transcript, top comments
+search "https://www.facebook.com/keychron"                         # a page's details and latest posts
+```
+
+`social` searches X, TikTok, Instagram reels and YouTube at once and fuses the hits, so the top post of each platform comes first. Naming a platform ("on tiktok", "instagram reels", "youtube comments", "on threads", "facebook page", "twitter") searches that platform only, and the cue words are left out of its query. Threads and Facebook run only on their cue or `-p threads` / `-p facebook`; Facebook search finds pages by name, because Facebook offers no public keyword search of posts. Each hit's `extra` carries `platform`, `author`, `followers`, `views`, `likes`, `num_comments`, `shares` and `duration_s` where the platform reports them.
+
+Extracting a TikTok, Instagram, YouTube, Facebook or Threads post or video URL returns the caption, the stats, the transcript (TikTok, Instagram, YouTube and Facebook videos) and the top comments in `results[0].snippet`; `extra.transcript` says whether a transcript was found and `extra.comments[]` holds `author`, `likes` and `text`. A Facebook page URL returns the page's details and its latest posts.
+
+The platforms run through metasearch.sh: run `search login`, and each call is charged to your balance at the price `search agent-info` lists. X also works with your own xAI key.
 
 ## Reddit and Hacker News
 
 ```bash
-search "opinions on tailwind v4"                                   # auto picks community
+search "opinions about tailwind v4"                                # auto picks community
 search search -q "r/rust async runtimes" -m community --json       # one subreddit
 search https://www.reddit.com/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/
 search search -q "rust async" -p hackernews
 ```
 
-`community` searches Reddit and Hacker News at once and fuses the hits. Both run on your machine with no key and cost $0. Each hit's `url` is the discussion; `extra` carries `score` (Reddit votes) or `points` (HN), `num_comments`, `subreddit` and `author`. Hacker News comes from Algolia's HN API, which honours `-f`.
+`community` searches Reddit and Hacker News at once and fuses the hits. Both run on your machine with no key and cost $0. Each hit's `url` is the discussion; `extra` carries `score` (Reddit votes) or `points` (HN), `num_comments`, `subreddit` and `author`. Hacker News search honours `-f`.
 
 Extracting a thread URL (`reddit.com/r/<sub>/comments/<id>` or `news.ycombinator.com/item?id=N`) returns the post and every comment, in thread order: `results[0].snippet` has one line per comment, `[score] author (depth N): body`, indented by depth, and `extra.comments[]` has the same as records (`id`, `parent`, `author`, `score`, `depth`, `created`, `body`).
 
-Reddit is read two ways at once. Reddit's own comment pages give the current scores of the top comments; they are fetched from your machine with a browser TLS fingerprint and paced to about 10 requests a minute across every `search` run on the machine, and after a captcha they rest for 7 minutes. The Arctic Shift archive gives the post and the whole comment tree, with scores from when it saved each comment. `extra.route` says which served the thread: `live`, `archive` or `live+archive`. When Reddit refuses, the archive serves threads alone; archive search needs a subreddit, so add `r/<name>` to the query. `SEARCH_REDDIT_ROUTE=archive` (or `live`) uses one source only. A paced call fails with `rate_limit` (exit 4).
+Reddit is read two ways at once. Reddit's own comment pages give the current scores of the top comments; they are fetched from your machine with a browser TLS fingerprint and paced to about 10 requests a minute across every `search` run on the machine, and after a captcha they rest for 7 minutes. A Reddit archive gives the post and the whole comment tree, with scores from when it saved each comment. `extra.route` says which served the thread: `live`, `archive` or `live+archive`. When Reddit refuses, the archive serves threads alone; archive search needs a subreddit, so add `r/<name>` to the query; a refused search without one goes to a Reddit-wide search instead (`extra.route` is `global`). `SEARCH_REDDIT_ROUTE=archive` (or `live`) uses one source only. A paced call fails with `rate_limit` (exit 4).
 
-Through metasearch.sh, Hacker News costs a small per-call price and Reddit is not offered.
+Through metasearch.sh, Reddit and Hacker News are priced per call.
 
 ## What a search costs
 
@@ -147,6 +163,7 @@ Typical upstream prices for one call with 10 results, as published by each provi
 | browserless | extract | $0.004 |
 | direct, stealth | extract | free (runs on your machine) |
 | reddit, hackernews | community, extract | free (runs on your machine) |
+| tiktok, instagram, youtube, facebook, threads | social, extract | through metasearch.sh; see `search agent-info` |
 
 `search agent-info` carries the same list prices: `usd_per_call` for each engine, and `usd_per_call_where_different` for the modes priced otherwise (deep on Exa, Brave, Linkup and Parallel; academic and deep on Tavily).
 
