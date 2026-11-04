@@ -3,16 +3,19 @@ pub mod browserless;
 pub mod direct;
 pub mod exa;
 pub mod firecrawl;
+pub mod hackernews;
 pub mod jina;
 pub mod linkup;
 pub mod parallel;
 pub mod perplexity;
+pub mod reddit;
 pub mod serpapi;
 pub mod serper;
 pub mod spec;
 #[cfg(feature = "stealth")]
 pub mod stealth;
 pub mod tavily;
+pub mod thread;
 pub mod xai;
 
 pub use spec::{Adapter, Call, FilterSupport, Output, ProviderSpec};
@@ -37,6 +40,8 @@ static ALL: &[&ProviderSpec] = &[
     &perplexity::SPEC,
     &serpapi::SPEC,
     &xai::SPEC,
+    &reddit::SPEC,
+    &hackernews::SPEC,
     &firecrawl::SPEC,
     &browserless::SPEC,
     #[cfg(feature = "stealth")]
@@ -45,10 +50,14 @@ static ALL: &[&ProviderSpec] = &[
 ];
 
 /// How many search engines the binary has: providers serving any mode but
-/// extract. The README, both SKILL.md copies, the plugin and marketplace
-/// entries, the crate description and `--help` say it in words
+/// extract and community. The README, both SKILL.md copies, the plugin and
+/// marketplace entries, the crate description and `--help` say it in words
 /// ("ten"); a test fails when either drifts.
 pub const SEARCH_ENGINES: usize = 10;
+
+/// The community sources (`community` mode): Reddit and Hacker News. Counted
+/// apart from the search engines; the public text names them.
+pub const COMMUNITY_SOURCES: &[&str] = &["reddit", "hackernews"];
 
 pub fn all() -> &'static [&'static ProviderSpec] {
     ALL
@@ -72,6 +81,8 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Adapter>> {
         Box::new(perplexity::Perplexity::new(ctx.clone())),
         Box::new(serpapi::SerpApi::new(ctx.clone())),
         Box::new(xai::Xai::new(ctx.clone())),
+        Box::new(reddit::Reddit::new(ctx.clone())),
+        Box::new(hackernews::HackerNews::new(ctx.clone())),
         Box::new(firecrawl::Firecrawl::new(ctx.clone())),
         Box::new(browserless::Browserless::new(ctx.clone())),
         #[cfg(feature = "stealth")]
@@ -321,11 +332,22 @@ mod tests {
 
     #[test]
     fn search_engine_count_matches_the_provider_list() {
+        use crate::types::Mode;
         let engines = ALL
             .iter()
-            .filter(|s| s.modes.iter().any(|m| *m != crate::types::Mode::Extract))
+            .filter(|s| {
+                s.modes
+                    .iter()
+                    .any(|m| !matches!(m, Mode::Extract | Mode::Community))
+            })
             .count();
         assert_eq!(engines, SEARCH_ENGINES);
+        let community: Vec<&str> = ALL
+            .iter()
+            .filter(|s| s.modes.contains(&Mode::Community))
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(community, COMMUNITY_SOURCES);
     }
 
     /// Every "<number> engines" / "<number> search engines" phrase in the

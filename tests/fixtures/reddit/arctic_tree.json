@@ -1,0 +1,285 @@
+{
+ "data": [
+  {
+   "kind": "t1",
+   "data": {
+    "id": "kcxj4ur",
+    "author": "Vova_xX",
+    "body": "can highly recommend the keychron V3, as 60% lack keys that I need like delete and insert. you can also buy it barebones if you want to assemble the board yourself.",
+    "score": 57,
+    "created_utc": 1702321175,
+    "parent_id": "t3_18g0wcw",
+    "link_id": "t3_18g0wcw",
+    "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxj4ur/",
+    "replies": {
+     "kind": "Listing",
+     "data": {
+      "children": [
+       {
+        "kind": "t1",
+        "data": {
+         "id": "kcxkcgx",
+         "author": "JSamRoweb",
+         "body": "This with brown switches sound so southing",
+         "score": 8,
+         "created_utc": 1702321676,
+         "parent_id": "t1_kcxj4ur",
+         "link_id": "t3_18g0wcw",
+         "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxkcgx/",
+         "replies": {
+          "kind": "Listing",
+          "data": {
+           "children": [
+            {
+             "kind": "t1",
+             "data": {
+              "id": "kcxz2lz",
+              "author": "The_Shryk",
+              "body": "Keychain K3 with optical brown switches is the best keyboard switch known to man, I will fight someone over it.",
+              "score": 8,
+              "created_utc": 1702327176,
+              "parent_id": "t1_kcxkcgx",
+              "link_id": "t3_18g0wcw",
+              "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxz2lz/",
+              "replies": ""
+             }
+            },
+            {
+             "kind": "t1",
+             "data": {
+              "id": "kczb3sh",
+              "author": "Kurts_Vonneguts",
+              "body": "Second the brown switches. Tactile > linear for typing!",
+              "score": 2,
+              "created_utc": 1702346018,
+              "parent_id": "t1_kcxkcgx",
+              "link_id": "t3_18g0wcw",
+              "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kczb3sh/",
+              "replies": ""
+             }
+            }
+           ]
+          }
+         }
+        }
+       },
+       {
+        "kind": "t1",
+        "data": {
+         "id": "kcy0meb",
+         "author": "romeozor",
+         "body": "I'd like to buy this, but I already have a Q1 for home and a V1 for the office.",
+         "score": 6,
+         "created_utc": 1702327731,
+         "parent_id": "t1_kcxj4ur",
+         "link_id": "t3_18g0wcw",
+         "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcy0meb/",
+         "replies": ""
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "kind": "t1",
+   "data": {
+    "id": "kcxk7c1",
+    "author": "codeslikeshit",
+    "body": "I have the Anne Pro 2 60% and really like it. Once I get an office and a bigger desk, I might go up a size but for my current situation, I love the mechanical keyboard in a 60%. Make sure with a 60% you setup the tap keys so that you can use the shift and other keys to move like arrow keys with a tap rather than clicking around too much. It will also help you learn all the commands that make programming faster without wasted movements.",
+    "score": 5,
+    "created_utc": 1702321615,
+    "parent_id": "t3_18g0wcw",
+    "link_id": "t3_18g0wcw",
+    "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxk7c1/",
+    "replies": ""
+   }
+  },
+  {
+   "kind": "t1",
+   "data": {
+    "id": "kcxk9fk",
+    "author": "Bridge4_Kal",
+    "body": "I prefer my 96%. I still get all the functionality of a full keyboard but with some space saved. I can't survive without arrow keys and/or keypad, so I need it. I initially bought the 60%, but when I found I was severely in need of those things I bought the same model but RK96 96% instead.",
+    "score": 10,
+    "created_utc": 1702321639,
+    "parent_id": "t3_18g0wcw",
+    "link_id": "t3_18g0wcw",
+    "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxk9fk/",
+    "replies": {
+     "kind": "Listing",
+     "data": {
+      "children": [
+       {
+        "kind": "t1",
+        "data": {
+         "id": "kd0en04",
+         "author": "WushuManInJapan",
+         "body": "Why do people like these 60 and 80% keyboards? I can't do anything but full keyboard. Even not having a numpad drives me crazy.",
+         "score": 12,
+         "created_utc": 1702365872,
+         "parent_id": "t1_kcxk9fk",
+         "link_id": "t3_18g0wcw",
+         "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kd0en04/",
+         "replies": {
+          "kind": "Listing",
+          "data": {
+           "children": [
+            {
+             "kind": "t1",
+             "data": {
+              "id": "kd1qlbv",
+              "author": "RockleyBob",
+              "body": "I was like you once. As a programmer though, I realized that there's maybe a 5% chance during any typing session that I'll use the number keys for more than a quick value or telephone number. I don't do extended periods of data entry or spreadsheets. So that 5x5 inch square is just always on my desk 100% of the time, taking up space in between the two things my right hand wants to do 95% of the time, typing letters and punctuation or using the mouse.\n\nI went to a 75% very easily. No numpad, but still have HOME, PGUP, PGDN, END, DEL, and F keys. Much more compact, and very little alteration to my daily use. In fact, the 75% layout I like actually puts the HOME and END keys within reach of my pinky, and that has been awesome. I use HOME and END so much more now to zoom around IDEs and terminal editors. CTRL + HOME goes immediately to the top of the page. CTRL + SHIFT + END selects everything from cursor to the bottom of the page, etc. SO much better than using click and drag to highlight. Before, when those keys were over in their own island between alphanumeric and numberpad keys, I rarely used them.",
+              "score": 2,
+              "created_utc": 1702395310,
+              "parent_id": "t1_kd0en04",
+              "link_id": "t3_18g0wcw",
+              "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kd1qlbv/",
+              "replies": ""
+             }
+            }
+           ]
+          }
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "kind": "t1",
+   "data": {
+    "id": "kcxmgxs",
+    "author": "ratbiscuits",
+    "body": "I like a TKL build. I like having arrow keys. \n\nPersonally I\u2019m using a GMMK barebones, Gateron G Pro yellows, and some random black keycap set that I have.",
+    "score": 5,
+    "created_utc": 1702322519,
+    "parent_id": "t3_18g0wcw",
+    "link_id": "t3_18g0wcw",
+    "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxmgxs/",
+    "replies": ""
+   }
+  },
+  {
+   "kind": "t1",
+   "data": {
+    "id": "kcxpxex",
+    "author": "r_levan",
+    "body": "HHKB",
+    "score": 14,
+    "created_utc": 1702323851,
+    "parent_id": "t3_18g0wcw",
+    "link_id": "t3_18g0wcw",
+    "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxpxex/",
+    "replies": {
+     "kind": "Listing",
+     "data": {
+      "children": [
+       {
+        "kind": "t1",
+        "data": {
+         "id": "kcz6m3o",
+         "author": "devdudedoingstuff",
+         "body": "Hybrid Type-S and never going back.",
+         "score": 3,
+         "created_utc": 1702344222,
+         "parent_id": "t1_kcxpxex",
+         "link_id": "t3_18g0wcw",
+         "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcz6m3o/",
+         "replies": {
+          "kind": "Listing",
+          "data": {
+           "children": [
+            {
+             "kind": "t1",
+             "data": {
+              "id": "kd0kv7b",
+              "author": "evonhell",
+              "body": "Same here, love mine. However it's pricy AF and there are awesome keyboards you can get for less, so it's a luxury pick. I have never regretted buying mine though, it's amazing to type on",
+              "score": 1,
+              "created_utc": 1702370720,
+              "parent_id": "t1_kcz6m3o",
+              "link_id": "t3_18g0wcw",
+              "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kd0kv7b/",
+              "replies": ""
+             }
+            }
+           ]
+          }
+         }
+        }
+       },
+       {
+        "kind": "t1",
+        "data": {
+         "id": "kd07tjr",
+         "author": "Graumm",
+         "body": "I have almost impulse purchased one many times because the call of topre is strong, but I just can\u2019t shake the feeling that I will regret the lack of arrow keys.\n\nI know you can get comfortable with arrows on the other layer, and rebind them even with the Hybrid one, but I\u2019ve got a question. What is your experience doing ctrl+arrow keys to jump around words? I\u2019m not sure if a fn+ctrl+arrow is going to be horrible in practice.\n\nAlso before anyone asks I don\u2019t think Vim is for me. I used it for a solid 3 months and got second natured with it, but swapped back because I really really do not like switching between vim apps and non-vim apps, and rebinding vim shortcuts that replace non-vim shortcuts I use a lot. I am not hardcore enough for emacs.",
+         "score": 1,
+         "created_utc": 1702361206,
+         "parent_id": "t1_kcxpxex",
+         "link_id": "t3_18g0wcw",
+         "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kd07tjr/",
+         "replies": {
+          "kind": "Listing",
+          "data": {
+           "children": [
+            {
+             "kind": "t1",
+             "data": {
+              "id": "kd0x5wt",
+              "author": "DerpppSauce",
+              "body": "I own a HHKB, love it to bits. The arrow keys are indeed a bit annoying at first, especially if you switch to regular layout and HHKB often like I do.\n\nOne solution I had was to remap esc so pressing it would be esc, but holding it would activate hyper mode and I would map hyper + hjkl row as arrows (like in vim). Works out pretty well.",
+              "score": 3,
+              "created_utc": 1702380618,
+              "parent_id": "t1_kd07tjr",
+              "link_id": "t3_18g0wcw",
+              "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kd0x5wt/",
+              "replies": ""
+             }
+            },
+            {
+             "kind": "t1",
+             "data": {
+              "id": "kd1fk42",
+              "author": "engwish",
+              "body": "I personally use vim extensions in my IDEs to get access to vim keys such as hjkl while still having the full IDE experience.",
+              "score": 1,
+              "created_utc": 1702390734,
+              "parent_id": "t1_kd07tjr",
+              "link_id": "t3_18g0wcw",
+              "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kd1fk42/",
+              "replies": ""
+             }
+            }
+           ]
+          }
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "kind": "t1",
+   "data": {
+    "id": "kcxs5do",
+    "author": "CommanderUgly",
+    "body": "I love my Azio.",
+    "score": 3,
+    "created_utc": 1702324669,
+    "parent_id": "t3_18g0wcw",
+    "link_id": "t3_18g0wcw",
+    "permalink": "/r/webdev/comments/18g0wcw/keyboards_that_you_recommend_for_programming/kcxs5do/",
+    "replies": ""
+   }
+  }
+ ],
+ "error": null
+}

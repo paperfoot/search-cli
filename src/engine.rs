@@ -197,7 +197,12 @@ pub(crate) async fn execute_with(
         m => m,
     };
     let mode_spec = registry::spec(mode);
-    let mut plan = plan(adapters, mode, mode_spec.providers, req.only)?;
+    let mut plan = plan(
+        adapters,
+        mode,
+        &registry::providers_for(mode, req.query),
+        req.only,
+    )?;
     if plan.is_empty() {
         return Err(no_providers_error(mode, req.only));
     }

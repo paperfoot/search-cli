@@ -1,0 +1,134 @@
+{
+ "hits": [
+  {
+   "_tags": [
+    "story",
+    "author_tazjin",
+    "story_26406989"
+   ],
+   "author": "tazjin",
+   "children": [
+    26407139,
+    26407162,
+    26407186
+   ],
+   "created_at": "2021-03-10T02:16:55Z",
+   "created_at_i": 1615342615,
+   "num_comments": 482,
+   "objectID": "26406989",
+   "points": 603,
+   "story_id": 26406989,
+   "title": "Why asynchronous Rust doesn't work",
+   "updated_at": "2026-04-14T23:02:23Z",
+   "url": "https://theta.eu.org/2021/03/08/async-rust-2.html"
+  },
+  {
+   "_tags": [
+    "story",
+    "author_bcantrill",
+    "story_45774086"
+   ],
+   "author": "bcantrill",
+   "children": [
+    45775088,
+    45776277,
+    45776307
+   ],
+   "created_at": "2025-10-31T16:49:26Z",
+   "created_at_i": 1761929366,
+   "num_comments": 245,
+   "objectID": "45774086",
+   "points": 449,
+   "story_id": 45774086,
+   "story_text": "This RFD describes our distillation of a really gnarly issue that we hit in the Oxide control plane.[0]  Not unlike our discovery of the async cancellation issue[1][2][3], this is larger than the issue itself -- and worse, the program that hits futurelock is correct from the programmer&#x27;s point of view.  Fortunately, the surface area here is smaller than that of async cancellation and the conditions required to hit it can be relatively easily mitigated.  Still, this is a pretty deep issue -- and something that took some very seasoned Rust hands quite a while to find.<p>[0] <a href=\"https:&#x2F;&#x2F;github.com&#x2F;oxidecomputer&#x2F;omicron&#x2F;issues&#x2F;9259\" rel=\"nofollow\">https:&#x2F;&#x2F;github.com&#x2F;oxidecomputer&#x2F;omicron&#x2F;issues&#x2F;9259</a><p>[1] <a href=\"https:&#x2F;&#x2F;rfd.shared.oxide.computer&#x2F;rfd&#x2F;397\" rel=\"nofollow\">https:&#x2F;&#x2F;rfd.shared.oxide.computer&#x2F;rfd&#x2F;397</a><p>[2] <a href=\"https:&#x2F;&#x2F;rfd.shared.oxide.computer&#x2F;rfd&#x2F;400\" rel=\"nofollow\">https:&#x2F;&#x2F;rfd.shared.oxide.computer&#x2F;rfd&#x2F;400</a><p>[3] <a href=\"https:&#x2F;&#x2F;www.youtube.com&#x2F;watch?v=zrv5Cy1R7r4\" rel=\"nofollow\">https:&#x2F;&#x2F;www.youtube.com&#x2F;watch?v=zrv5Cy1R7r4</a>",
+   "title": "Futurelock: A subtle risk in async Rust",
+   "updated_at": "2026-06-28T18:40:22Z",
+   "url": "https://rfd.shared.oxide.computer/rfd/0609"
+  },
+  {
+   "_tags": [
+    "story",
+    "author_pjmlp",
+    "story_48019163"
+   ],
+   "author": "pjmlp",
+   "children": [
+    48019317,
+    48019420,
+    48019511
+   ],
+   "created_at": "2026-05-05T07:26:03Z",
+   "created_at_i": 1777965963,
+   "num_comments": 266,
+   "objectID": "48019163",
+   "points": 446,
+   "story_id": 48019163,
+   "title": "Async Rust never left the MVP state",
+   "updated_at": "2026-09-23T08:16:48Z",
+   "url": "https://tweedegolf.nl/en/blog/237/async-rust-never-left-the-mvp-state"
+  },
+  {
+   "_tags": [
+    "story",
+    "author_phil-opp",
+    "story_22727985"
+   ],
+   "author": "phil-opp",
+   "children": [
+    22728537,
+    22728574,
+    22728742
+   ],
+   "created_at": "2020-03-30T13:52:04Z",
+   "created_at_i": 1585576324,
+   "num_comments": 103,
+   "objectID": "22727985",
+   "points": 410,
+   "story_id": 22727985,
+   "title": "Writing an OS in Rust: Async/Await",
+   "updated_at": "2024-09-20T05:51:21Z",
+   "url": "https://os.phil-opp.com/async-await/"
+  },
+  {
+   "_tags": [
+    "comment",
+    "author_kxo",
+    "story_9088640"
+   ],
+   "author": "kxo",
+   "comment_text": "If Rust had asynchronous I&#x2F;O this would be less of a head scratcher.<p>Too bad that AIO and related, necessary primitives were forsaken for other priorities.",
+   "created_at": "2015-02-24T02:19:58Z",
+   "created_at_i": 1424744398,
+   "objectID": "9098368",
+   "parent_id": 9089454,
+   "points": null,
+   "story_id": 9088640,
+   "story_title": "On Rust and Nim",
+   "story_url": "https://andreaferretti.github.io/on-rust-and-nim/",
+   "updated_at": "2023-09-07T02:09:54Z",
+   "children": []
+  },
+  {
+   "_tags": [
+    "comment",
+    "author_freekh",
+    "story_8458831"
+   ],
+   "author": "freekh",
+   "comment_text": "Is Rust Postgres async?",
+   "created_at": "2014-10-16T08:39:15Z",
+   "created_at_i": 1413448755,
+   "objectID": "8463969",
+   "parent_id": 8461182,
+   "story_id": 8458831,
+   "story_title": "Rustful \u2013 A RESTful web framework for Rust",
+   "story_url": "https://github.com/Ogeon/rustful",
+   "updated_at": "2024-09-19T21:17:41Z",
+   "children": []
+  }
+ ],
+ "nbHits": 12115,
+ "page": 0,
+ "hitsPerPage": 6,
+ "query": "rust async"
+}

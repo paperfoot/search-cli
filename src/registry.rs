@@ -220,7 +220,36 @@ pub const MODES: &[ModeSpec] = &[
         when_to_use: "What's being said on X, trending topics, account activity. Here -d/--exclude-domain filter X handles, not domains.",
         deadline: secs(65),
     },
+    ModeSpec {
+        mode: Mode::Community,
+        input: InputKind::Query,
+        merge: MergeKind::Fused,
+        providers: &["reddit", "hackernews"],
+        description: "What real people say: Reddit posts and Hacker News stories and comments, fused",
+        when_to_use: "Opinions, experiences and recommendations from real users. Extract a hit's URL to read the whole thread.",
+        deadline: secs(30),
+    },
 ];
+
+/// The providers a mode tries for this input, in order. A Reddit or Hacker
+/// News thread URL in extract goes to its site's provider first (the whole
+/// thread with every comment), then the usual chain.
+pub fn providers_for(mode: Mode, query: &str) -> Vec<&'static str> {
+    let base = spec(mode).providers;
+    if matches!(mode, Mode::Extract | Mode::Scrape) {
+        let first = if providers::reddit::thread_ref(query).is_some() {
+            Some("reddit")
+        } else if providers::hackernews::item_id(query).is_some() {
+            Some("hackernews")
+        } else {
+            None
+        };
+        if let Some(first) = first {
+            return std::iter::once(first).chain(base.iter().copied()).collect();
+        }
+    }
+    base.to_vec()
+}
 
 pub fn spec(mode: Mode) -> &'static ModeSpec {
     // The test below guarantees every Mode variant has an entry.
@@ -255,7 +284,7 @@ pub fn filter_support(provider: &str) -> FilterSupport {
 pub fn mode_applies_filters(mode: Mode) -> bool {
     matches!(
         mode,
-        Mode::General | Mode::News | Mode::Academic | Mode::Deep | Mode::Social
+        Mode::General | Mode::News | Mode::Academic | Mode::Deep | Mode::Social | Mode::Community
     )
 }
 
@@ -561,6 +590,24 @@ mod tests {
             // A JS shell or a PDF goes on to the rendering rungs.
             assert!(rung_gate("jina", &url).is_ok(), "{saw:?}");
         }
+    }
+
+    #[test]
+    fn thread_urls_go_to_their_site_first_then_the_chain() {
+        let reddit = providers_for(
+            Mode::Extract,
+            "https://www.reddit.com/r/webdev/comments/18g0wcw/keyboards/",
+        );
+        assert_eq!(reddit[0], "reddit");
+        assert_eq!(&reddit[1..], spec(Mode::Extract).providers);
+        let hn = providers_for(Mode::Scrape, "https://news.ycombinator.com/item?id=1");
+        assert_eq!(hn[0], "hackernews");
+        let page = providers_for(Mode::Extract, "https://example.com/r/x/comments/y");
+        assert_eq!(page, spec(Mode::Extract).providers);
+        assert_eq!(
+            providers_for(Mode::Community, "q"),
+            ["reddit", "hackernews"]
+        );
     }
 
     #[test]
