@@ -457,6 +457,7 @@ impl MetasearchClient {
         timeout: Duration,
     ) -> Result<(Output, HostedReport), SearchError> {
         let provider = label;
+        let mut request = body.clone();
         let deadline = Instant::now() + timeout;
         let mut connect_retries = 0u32;
         let mut conflict_retried = false;
@@ -474,7 +475,7 @@ impl MetasearchClient {
                     reqwest::header::USER_AGENT,
                     concat!("search-cli/", env!("CARGO_PKG_VERSION")),
                 )
-                .json(body)
+                .json(&request)
                 .timeout(left)
                 .send()
                 .await;
@@ -504,6 +505,14 @@ impl MetasearchClient {
                 return Ok(to_output(provider, v));
             }
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            // A server older than 0.12.1's contract refuses the `fresh` field
+            // (a 400 before anything is reserved): ask again without it.
+            if status == 400 && refuses_fresh(&request, &body) {
+                if let Some(obj) = request.as_object_mut() {
+                    obj.remove("fresh");
+                }
+                continue;
+            }
             if status == 409 && !conflict_retried {
                 conflict_retried = true;
                 if Duration::from_secs(2) < deadline.saturating_duration_since(Instant::now()) {
@@ -602,6 +611,15 @@ impl MetasearchClient {
         let answer: RerankAnswer = resp.json().await.ok()?;
         (!answer.relevance.is_empty()).then_some(answer)
     }
+}
+
+/// True when the server refused the request for carrying `fresh`.
+fn refuses_fresh(request: &serde_json::Value, answer: &serde_json::Value) -> bool {
+    request.get("fresh").is_some()
+        && answer["error"] == "invalid_request"
+        && answer["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("fresh"))
 }
 
 fn account_error(message: String) -> SearchError {
@@ -1070,6 +1088,17 @@ mod tests {
         assert_eq!(rep.asked(), ["serper"]);
         assert_eq!(rep.charges()["serper"], 1_500);
         assert!(rep.cache_age_secs().is_some());
+    }
+
+    #[test]
+    fn an_older_server_refusing_fresh_is_recognised() {
+        let sent = serde_json::json!({"query": "q", "fresh": true});
+        let refused = serde_json::json!({"error": "invalid_request",
+            "message": "body: Unrecognized key: \"fresh\""});
+        assert!(refuses_fresh(&sent, &refused));
+        assert!(!refuses_fresh(&serde_json::json!({"query": "q"}), &refused));
+        let other = serde_json::json!({"error": "invalid_request", "message": "count: too big"});
+        assert!(!refuses_fresh(&sent, &other));
     }
 
     #[test]

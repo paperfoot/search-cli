@@ -604,6 +604,39 @@ fn no_cache_sends_fresh_and_cached_and_escalated_answers_are_read() {
     assert_eq!(m["provider_results"], json!({ "exa": 1 }));
 }
 
+/// A server that predates `fresh` refuses it with a 400; --no-cache asks
+/// again without it rather than failing the search.
+#[test]
+fn no_cache_against_an_older_server_retries_without_fresh() {
+    let mock = start(
+        "oldfresh",
+        handler(|r, _| {
+            if r.body.get("fresh").is_some() {
+                return Reply::Json(
+                    400,
+                    json!({ "error": "invalid_request",
+                    "message": "body: Unrecognized key: \"fresh\"" }),
+                );
+            }
+            search_ok(r)
+        }),
+    );
+    let (code, v) = run_json(mock.cmd().args([
+        "search",
+        "-q",
+        "rust",
+        "-m",
+        "general",
+        "--no-cache",
+        "--json",
+    ]));
+    assert_eq!(code, 0, "{v}");
+    let sent = mock.requests("/api/v1/search");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].body["fresh"], true);
+    assert!(sent[1].body.get("fresh").is_none());
+}
+
 /// Social with no cue: one routed call, the server picks the platforms.
 #[test]
 fn social_without_a_cue_is_left_to_the_server() {
