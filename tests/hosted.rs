@@ -676,8 +676,10 @@ fn rerank_failure_keeps_the_fused_order() {
     let (_, v) = run_json(mixed(&mock).args(["--json", "--no-cache", "--no-rerank"]));
     assert_eq!(mock.requests("/api/v1/rerank").len(), before);
     assert!(v["metadata"]["routing"].is_null());
+    // Pinned to one engine (beside the own key): the server never reranks
+    // that, so no flag is sent.
     let body = mock.requests("/api/v1/search").last().unwrap().body.clone();
-    assert_eq!(body["rerank"], false, "{body}");
+    assert_eq!(body["providers"], json!(["serper"]), "{body}");
 }
 
 /// A general search with an own key for brave (unreachable here) beside the
@@ -915,7 +917,6 @@ fn own_key_goes_direct_and_basis_is_mixed() {
     assert_eq!(sent.len(), 1, "the hosted remainder is one call");
     // Pinned to the first engine without a key, so serper never runs twice.
     assert_eq!(sent[0].body["providers"], json!(["exa"]));
-    assert_eq!(sent[0].body["rerank"], false);
     assert_eq!(v["metadata"]["cost"]["basis"], "mixed");
 }
 

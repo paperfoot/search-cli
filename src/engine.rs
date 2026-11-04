@@ -186,14 +186,18 @@ pub(crate) fn hosted_group(
     opts: &SearchOpts,
     local_rerank: bool,
     fresh: bool,
+    own_key: bool,
 ) -> Option<(usize, HostedGroup)> {
+    // Chain and single modes: several named engines would fan out on the
+    // server and each be charged, where the chain stops at the first page
+    // it accepts, so a pinned rung stays its own call, in chain order.
+    if !matches!(registry::spec(mode).merge, MergeKind::Fused) && (only.is_some() || own_key) {
+        return None;
+    }
     let at = plan.iter().position(|a| a.as_hosted().is_some())?;
     let members: Vec<&HostedAdapter> = plan.iter().filter_map(|a| a.as_hosted()).collect();
     let client = members[0].client.clone();
     let alone = members.len() == plan.len();
-    // A routed call could pick an engine you already ran with your own key
-    // and charge for it twice, so beside an own key it is pinned.
-    let own_key = plan.iter().any(|a| a.transport() == Transport::Direct);
     let providers: Option<Vec<&'static str>> = match only {
         Some(list) => {
             let mut named: Vec<&'static str> = Vec::new();
@@ -260,7 +264,9 @@ pub(crate) fn hosted_group(
         Some(_) => chosen.iter().map(|m| m.max_count).min().unwrap_or(20),
         None => 20,
     };
-    let rerank = if local_rerank && alone {
+    // Only rerank modes carry the flag: elsewhere it would split the
+    // server's cache key from callers that never send it.
+    let rerank = if !RERANK_MODES.contains(&mode) || (local_rerank && alone) {
         None
     } else {
         Some(false)
@@ -279,11 +285,15 @@ pub(crate) fn hosted_group(
     ))
 }
 
-/// Replace every hosted adapter of `plan` with the one hosted call.
+/// Replace every hosted adapter of `plan` with the one hosted call. A call
+/// pinned to one engine stays that engine's own adapter (same request), so
+/// its failures and timeouts carry the engine's name. `own_key`: the mode
+/// had an engine on your own key before the social cut.
 fn fold_hosted(
     plan: Vec<Box<dyn Adapter>>,
     req: &Request<'_>,
     mode: Mode,
+    own_key: bool,
 ) -> (Vec<Box<dyn Adapter>>, Option<ReportSlot>) {
     let Some((at, group)) = hosted_group(
         &plan,
@@ -292,9 +302,18 @@ fn fold_hosted(
         req.opts,
         req.reranker.is_some(),
         req.fresh,
+        own_key,
     ) else {
         return (plan, None);
     };
+    if let Some([one]) = group.providers.as_deref() {
+        let one = *one;
+        let kept = plan
+            .into_iter()
+            .filter(|a| a.as_hosted().is_none_or(|h| h.spec.name == one))
+            .collect();
+        return (kept, None);
+    }
     let slot = group.report.clone();
     let mut group = Some(Box::new(group) as Box<dyn Adapter>);
     let mut folded: Vec<Box<dyn Adapter>> = Vec::with_capacity(plan.len());
@@ -358,13 +377,17 @@ pub(crate) async fn execute_with(
     let mut warnings: Vec<String> = Vec::new();
     // Social with no platform cue runs the rule pick (two paid calls at
     // most), as metasearch.sh does.
+    // A routed call could pick an engine you already ran with your own key
+    // and charge for it twice: beside an own key the hosted call is pinned.
+    // Read before the social cut, which can drop the own-key platform.
+    let own_key = plan.iter().any(|a| a.transport() == Transport::Direct);
     if req.only.is_none() {
         if let Some(cap) = registry::fan_out_cap(mode, req.query) {
             plan.truncate(cap);
         }
     }
     // Every hosted provider becomes one metasearch.sh call.
-    let (plan, report_slot) = fold_hosted(plan, req, mode);
+    let (plan, report_slot) = fold_hosted(plan, req, mode, own_key);
     // The hosted call is the whole search: the server fused and reranked it.
     let hosted_alone = report_slot.is_some() && plan.len() == 1;
 
@@ -409,7 +432,12 @@ pub(crate) async fn execute_with(
     for (name, outcome) in outcomes {
         // The hosted call that answered: report the engines the server asked.
         if name == HOSTED_SPEC.name {
-            if let (Outcome::Done(out), Some(rep)) = (&outcome, report.as_ref()) {
+            let answered = match &outcome {
+                Outcome::Done(out) => Some((out, None)),
+                Outcome::Rejected(f, out) => Some((out, Some(f.clone()))),
+                _ => None,
+            };
+            if let (Some((out, rejected)), Some(rep)) = (answered, report.as_ref()) {
                 let sent = applied.get(name).copied();
                 for asked in rep.asked() {
                     queried.push(asked.to_string());
@@ -420,6 +448,16 @@ pub(crate) async fn execute_with(
                 }
                 by_provider.extend(rep.charges());
                 failures.extend(rep.failures());
+                if let Some(mut f) = rejected {
+                    // The mode refused the page the server served.
+                    if let Some(by) = rep.routing.served_by.clone() {
+                        f.reason = f.reason.replacen(HOSTED_SPEC.name, &by, 1);
+                        f.provider = by;
+                    }
+                    tracing::warn!("{}", redact_secrets(&f.reason));
+                    failures.push(f);
+                    continue;
+                }
                 for r in &out.results {
                     *hosted_counts.entry(r.source.clone()).or_default() += 1;
                 }
@@ -1321,6 +1359,39 @@ mod tests {
         })
     }
 
+    fn own(plan: &[Box<dyn Adapter>]) -> bool {
+        plan.iter().any(|a| a.transport() == Transport::Direct)
+    }
+
+    /// Chain and single modes never fold pinned rungs: two named engines
+    /// would fan out on the server and both be charged, and beside an own
+    /// key every hosted rung stays in chain order.
+    #[test]
+    fn chain_rungs_stay_their_own_calls_when_pinned() {
+        let opts = SearchOpts::default();
+        let plan = vec![hosted(&jina::SPEC, &[]), hosted(&firecrawl::SPEC, &[])];
+        let only = vec!["jina".to_string(), "firecrawl".to_string()];
+        assert!(
+            hosted_group(&plan, Mode::Extract, Some(&only), &opts, true, false, false).is_none()
+        );
+        assert!(hosted_group(&plan, Mode::Extract, None, &opts, true, false, true).is_none());
+        // Routed, with no own key: one call, no provider list.
+        let (_, g) = hosted_group(&plan, Mode::Extract, None, &opts, true, false, false).unwrap();
+        assert_eq!(g.providers, None);
+        assert_eq!(g.rerank, None, "extract carries no rerank flag");
+    }
+
+    /// An own key cut from a social pick still pins the hosted call, so the
+    /// server cannot pick that platform and charge it again.
+    #[test]
+    fn own_key_read_before_the_social_cut_still_pins() {
+        use crate::providers::tiktok;
+        let opts = SearchOpts::default();
+        let plan = vec![hosted(&xai::SPEC, &[]), hosted(&tiktok::SPEC, &[])];
+        let (_, g) = hosted_group(&plan, Mode::Social, None, &opts, true, false, true).unwrap();
+        assert_eq!(g.providers, Some(vec!["xai", "tiktok"]));
+    }
+
     /// Without -p the one hosted call names no engine: the server routes it.
     /// With -p the hosted names go as given. Beside an own-key engine it is
     /// pinned and not reranked (the CLI reranks the fused list once).
@@ -1332,14 +1403,24 @@ mod tests {
             hosted(&serper::SPEC, &[]),
             hosted(&jina::SPEC, &[]),
         ];
-        let (at, g) = hosted_group(&plan, Mode::Academic, None, &opts, true, false).unwrap();
+        let (at, g) =
+            hosted_group(&plan, Mode::Academic, None, &opts, true, false, own(&plan)).unwrap();
         assert_eq!(at, 0);
         let b = body_of(&g, Mode::Academic, &opts);
         assert!(b.get("providers").is_none(), "{b}");
         assert!(b.get("rerank").is_none() && b.get("fresh").is_none());
 
         let only = vec!["serper".to_string(), "EXA".to_string()];
-        let (_, g) = hosted_group(&plan, Mode::Academic, Some(&only), &opts, true, true).unwrap();
+        let (_, g) = hosted_group(
+            &plan,
+            Mode::Academic,
+            Some(&only),
+            &opts,
+            true,
+            true,
+            own(&plan),
+        )
+        .unwrap();
         let b = body_of(&g, Mode::Academic, &opts);
         assert_eq!(b["providers"], serde_json::json!(["serper", "exa"]));
         assert_eq!(b["fresh"], true);
@@ -1348,7 +1429,8 @@ mod tests {
         let (direct, _) = fakes(&[(&brave::SPEC, ok(1, 1, "b"))]);
         let mut mixed = direct;
         mixed.extend([hosted(&exa::SPEC, &[]), hosted(&serper::SPEC, &[])]);
-        let (at, g) = hosted_group(&mixed, Mode::General, None, &opts, true, false).unwrap();
+        let (at, g) =
+            hosted_group(&mixed, Mode::General, None, &opts, true, false, own(&mixed)).unwrap();
         assert_eq!(at, 1);
         let b = body_of(&g, Mode::General, &opts);
         // Never an engine the own key already ran: the first hosted one.
@@ -1358,7 +1440,16 @@ mod tests {
         let (local, _) = fakes(&[(&crate::providers::reddit::SPEC, ok(1, 1, "r"))]);
         let mut with_local = local;
         with_local.push(hosted(&exa::SPEC, &[]));
-        let (_, g) = hosted_group(&with_local, Mode::General, None, &opts, true, false).unwrap();
+        let (_, g) = hosted_group(
+            &with_local,
+            Mode::General,
+            None,
+            &opts,
+            true,
+            false,
+            own(&with_local),
+        )
+        .unwrap();
         assert_eq!(g.providers, None);
     }
 
@@ -1375,7 +1466,8 @@ mod tests {
             hosted(&serper::SPEC, &["freshness", "country", "language"]),
             hosted(&exa::SPEC, &["freshness"]),
         ];
-        let (_, g) = hosted_group(&plan, Mode::General, None, &opts, true, false).unwrap();
+        let (_, g) =
+            hosted_group(&plan, Mode::General, None, &opts, true, false, own(&plan)).unwrap();
         let b = body_of(&g, Mode::General, &opts);
         assert_eq!(
             b["filters"],
@@ -1395,11 +1487,13 @@ mod tests {
         let mut plan = plan;
         plan.sort_by_key(|a| order.iter().position(|o| *o == a.name()));
         plan.truncate(registry::fan_out_cap(Mode::Social, "mechanical keyboard").unwrap());
-        let (_, g) = hosted_group(&plan, Mode::Social, None, &opts, true, false).unwrap();
+        let (_, g) =
+            hosted_group(&plan, Mode::Social, None, &opts, true, false, own(&plan)).unwrap();
         assert_eq!(g.providers, Some(vec!["tiktok"]));
         // All hosted: the server picks.
         let plan = vec![hosted(&xai::SPEC, &[]), hosted(&tiktok::SPEC, &[])];
-        let (_, g) = hosted_group(&plan, Mode::Social, None, &opts, true, false).unwrap();
+        let (_, g) =
+            hosted_group(&plan, Mode::Social, None, &opts, true, false, own(&plan)).unwrap();
         assert_eq!(g.providers, None);
     }
 
