@@ -4,7 +4,7 @@ description: >
   Web search, news, papers, people, TikTok, Instagram, YouTube, Facebook,
   Threads and X posts, Reddit and Hacker News threads, video transcripts,
   images, places, patents and page extraction through the `search` CLI, which
-  sends a query to several of its ten search engines at once and fuses the
+  sends a query to several of its eleven search engines at once and fuses the
   results. Use when you need to look something up, get current information or
   the latest news, find sources or papers for a claim, read the text of a URL,
   see what people say or show on TikTok, YouTube, Instagram, X, Reddit or

@@ -62,6 +62,8 @@ pub struct ApiKeys {
     #[serde(default)]
     pub parallel: String,
     #[serde(default)]
+    pub keenable: String,
+    #[serde(default)]
     pub brave: String,
     #[serde(default)]
     pub serper: String,
@@ -91,6 +93,7 @@ impl ApiKeys {
     pub fn get(&self, provider: &str) -> Option<&str> {
         let v = match provider {
             "parallel" => &self.parallel,
+            "keenable" => &self.keenable,
             "brave" => &self.brave,
             "serper" => &self.serper,
             "exa" => &self.exa,
@@ -125,6 +128,7 @@ impl Default for AppConfig {
         Self {
             keys: ApiKeys {
                 parallel: String::new(),
+                keenable: String::new(),
                 brave: String::new(),
                 serper: String::new(),
                 exa: String::new(),

@@ -7,6 +7,7 @@ pub mod firecrawl;
 pub mod hackernews;
 pub mod instagram;
 pub mod jina;
+pub mod keenable;
 pub mod linkup;
 pub mod parallel;
 pub mod perplexity;
@@ -42,6 +43,7 @@ static ALL: &[&ProviderSpec] = &[
     &brave::SPEC,
     &linkup::SPEC,
     &parallel::SPEC,
+    &keenable::SPEC,
     &tavily::SPEC,
     &perplexity::SPEC,
     &serpapi::SPEC,
@@ -64,7 +66,7 @@ static ALL: &[&ProviderSpec] = &[
 /// extract and community, other than the social platforms. The README, both SKILL.md copies, the plugin and
 /// marketplace entries, the crate description and `--help` say it in words
 /// ("ten"); a test fails when either drifts.
-pub const SEARCH_ENGINES: usize = 10;
+pub const SEARCH_ENGINES: usize = 11;
 
 /// The community sources (`community` mode): Reddit and Hacker News. Counted
 /// apart from the search engines; the public text names them.
@@ -93,6 +95,7 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Adapter>> {
         Box::new(brave::Brave::new(ctx.clone())),
         Box::new(linkup::Linkup::new(ctx.clone())),
         Box::new(parallel::Parallel::new(ctx.clone())),
+        Box::new(keenable::Keenable::new(ctx.clone())),
         Box::new(tavily::Tavily::new(ctx.clone())),
         Box::new(perplexity::Perplexity::new(ctx.clone())),
         Box::new(serpapi::SerpApi::new(ctx.clone())),
@@ -383,7 +386,7 @@ mod tests {
     /// between copies again.
     #[test]
     fn every_public_engine_count_is_the_canonical_one() {
-        const SEARCH_ENGINES_WORD: &str = "ten";
+        const SEARCH_ENGINES_WORD: &str = "eleven";
         const NUMBERS: &[&str] = &[
             "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
             "twelve", "thirteen", "fourteen", "fifteen",
