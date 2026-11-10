@@ -2,7 +2,7 @@
 
 # search: web search for AI agents
 
-**One command sends a query to several of ten search engines at once, fuses the results, and tells you what each search cost.**
+**One command sends a query to several of eleven search engines at once, fuses the results, and tells you what each search cost.**
 
 [![Crates.io](https://img.shields.io/crates/v/agent-search?style=for-the-badge&logo=rust&logoColor=white&label=crates.io)](https://crates.io/crates/agent-search)
 [![Downloads](https://img.shields.io/crates/d/agent-search?style=for-the-badge&logo=rust&logoColor=white)](https://crates.io/crates/agent-search)
@@ -13,7 +13,7 @@
 
 </div>
 
-`search` is a single Rust binary for AI agents and the people who run them. It searches with Serper, Exa, Jina, Brave, Linkup, Parallel, Tavily, Perplexity, SerpApi and xAI, searches TikTok, Instagram, YouTube, Facebook, Threads and X for posts and videos (with transcripts and top comments), searches Reddit and Hacker News with no key, reads pages with two fetchers of its own and then Jina, Firecrawl or Browserless, merges what comes back with reciprocal rank fusion, and prints one JSON document with the results, the engines that answered, the ones that failed and why, and the cost.
+`search` is a single Rust binary for AI agents and the people who run them. It searches with Serper, Exa, Jina, Brave, Linkup, Parallel, Keenable, Tavily, Perplexity, SerpApi and xAI, searches TikTok, Instagram, YouTube, Facebook, Threads and X for posts and videos (with transcripts and top comments), searches Reddit and Hacker News with no key, reads pages with two fetchers of its own and then Jina, Firecrawl or Browserless, merges what comes back with reciprocal rank fusion, and prints one JSON document with the results, the engines that answered, the ones that failed and why, and the cost.
 
 ```bash
 search "CRISPR gene therapy trials"
@@ -66,7 +66,7 @@ search config check                            # which engines have a key
 search doctor                                  # test each engine you have a key for (one billed query each)
 ```
 
-Precedence: `<PROVIDER>_API_KEY` env, then `SEARCH_KEYS_<PROVIDER>` env, then the config file. The variables are `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`, `BRAVE_API_KEY`, `LINKUP_API_KEY`, `PARALLEL_API_KEY`, `TAVILY_API_KEY`, `PERPLEXITY_API_KEY`, `SERPAPI_API_KEY`, `XAI_API_KEY`, `FIRECRAWL_API_KEY` and `BROWSERLESS_API_KEY`. The config file is `~/.config/search/config.toml` on Linux and `~/Library/Application Support/search/config.toml` on macOS, created with mode 0600; [config.example.toml](config.example.toml) lists every setting.
+Precedence: `<PROVIDER>_API_KEY` env, then `SEARCH_KEYS_<PROVIDER>` env, then the config file. The variables are `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`, `BRAVE_API_KEY`, `LINKUP_API_KEY`, `PARALLEL_API_KEY`, `KEENABLE_API_KEY`, `TAVILY_API_KEY`, `PERPLEXITY_API_KEY`, `SERPAPI_API_KEY`, `XAI_API_KEY`, `FIRECRAWL_API_KEY` and `BROWSERLESS_API_KEY`. The config file is `~/.config/search/config.toml` on Linux and `~/Library/Application Support/search/config.toml` on macOS, created with mode 0600; [config.example.toml](config.example.toml) lists every setting.
 
 ## Modes
 
@@ -79,11 +79,11 @@ Pass `-m` to choose the mode yourself; an explicit `-m` or `-p` is always obeyed
 | Mode | Use it for | `-q` is | Engines, in order |
 |------|------------|---------|-------------------|
 | `auto` | Default: picks one of the modes below and says why | query or URL | |
-| `general` | Any web lookup | query | serper, exa, jina, brave, linkup, parallel, tavily, perplexity |
+| `general` | Any web lookup | query | serper, exa, jina, brave, linkup, parallel, keenable, tavily, perplexity |
 | `news` | Current events; add `-f day` or `-f week` | query | serper, brave, linkup, parallel, tavily, perplexity |
 | `academic` | Papers and studies on a topic | query | exa, serper, tavily, perplexity |
 | `scholar` | Google Scholar records: citations, versions, PDFs | query | serper, serpapi |
-| `deep` | Wide coverage when recall matters more than cost; use `-c 30` | query | exa, serper, brave, linkup, parallel, tavily, perplexity, xai |
+| `deep` | Wide coverage when recall matters more than cost; use `-c 30` | query | exa, serper, brave, linkup, parallel, keenable, tavily, perplexity, xai |
 | `people` | A person, their role, their LinkedIn profile | query | exa |
 | `social` | What X, TikTok, Instagram and YouTube show: X plus the likeliest other platform, two paid calls at most; a platform cue pins one, and Threads and Facebook pages run on their cue | query | xai, tiktok, instagram, youtube (threads, facebook on a cue) |
 | `community` | What real people say on Reddit and Hacker News | query | reddit, hackernews |
@@ -152,6 +152,7 @@ Typical upstream prices for one call with 10 results, as published by each provi
 |--------|-------|----------|
 | serper | general, news, academic, deep, scholar, patents, images, places | $0.001 |
 | parallel | general, news; deep | $0.001; $0.005 |
+| keenable | general, deep | $0.004 (after 100,000 free searches a month on an account) |
 | jina | general; extract | about $0.0005; about $0.00025 (billed by tokens) |
 | brave | general, news; deep (web plus LLM context) | $0.005; $0.010 |
 | linkup | general, news; deep | $0.005; $0.050 |

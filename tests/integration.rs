@@ -75,7 +75,7 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Ten search engines"))
+        .stdout(predicate::str::contains("Eleven search engines"))
         // Piped help is plain text, not a JSON envelope.
         .stdout(predicate::str::starts_with("{").not())
         .stdout(predicate::str::contains("brave"))
@@ -185,9 +185,9 @@ fn test_agent_info_json() {
             "{p}"
         );
     }
-    // About half of the 0.9 manifest (21 KB): agents pay for every byte.
+    // About half of the 0.9 manifest (21 KB): agents pay for every byte. Raised from 13,000 when Keenable was added.
     assert!(
-        output.stdout.len() < 13_000,
+        output.stdout.len() < 13_500,
         "{} bytes",
         output.stdout.len()
     );

@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
     name = "search",
     version,
     about = "Agent-friendly multi-provider search CLI",
-    long_about = "Ten search engines across 14 modes; TikTok, Instagram, YouTube,\n\
+    long_about = "Eleven search engines across 14 modes; TikTok, Instagram, YouTube,\n\
         Facebook, Threads and X (social mode); Reddit and Hacker News\n\
         (community mode, no key); and page extraction (local fetchers first,\n\
         then Jina Reader, Firecrawl or Browserless).\n\
@@ -23,6 +23,7 @@ use clap::{Parser, Subcommand};
         (--pretty indents it). NO_COLOR turns colour off.\n\n\
         PROVIDERS:\n  \
           parallel   Agent-native search (Parallel AI): LLM-ready excerpts\n  \
+          keenable   Own web index built for agents (Keenable): page text\n  \
           brave      Independent web index (not Google/Bing) + LLM grounding\n  \
           serper     Cheapest raw Google SERP: web, news, scholar, patents, places\n  \
           exa        Neural/semantic search, LinkedIn people, find-similar\n  \
@@ -237,7 +238,7 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub count: Option<usize>,
 
-    /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai,reddit,hackernews,tiktok,instagram,youtube,facebook,threads)
+    /// Use only specific providers (comma-separated: parallel,keenable,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai,reddit,hackernews,tiktok,instagram,youtube,facebook,threads)
     #[arg(short, long, value_delimiter = ',')]
     pub providers: Option<Vec<String>>,
 
