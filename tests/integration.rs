@@ -739,3 +739,57 @@ fn fallback_keys_from_env_lists_and_config_set() {
     let json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_eq!(json["key_counts"]["exa"], 2);
 }
+
+/// A key marked out of credit shows in `search usage` with both dates, and
+/// `search cache clear --keys` forgets it. Never the key itself.
+#[test]
+#[cfg(target_os = "linux")]
+fn usage_shows_out_of_credit_keys_and_cache_clear_keys_forgets_them() {
+    use sha2::{Digest, Sha256};
+    const KEY: &str = "exa-spent-test-key-0001";
+    let home = std::env::temp_dir().join(format!("search-cli-test-spent-{}", std::process::id()));
+    let dir = home.join(".cache").join("search");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fp: String = Sha256::digest(KEY.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 60;
+    std::fs::write(
+        dir.join("out_of_credit_keys.json"),
+        format!(r#"{{"marks":[{{"provider":"exa","fingerprint":"{fp}","since":{since}}}]}}"#),
+    )
+    .unwrap();
+    let usage = || {
+        offline_cmd("spent")
+            .env("HOME", &home)
+            .env("EXA_API_KEY", KEY)
+            .args(["usage", "--json"])
+            .output()
+            .unwrap()
+    };
+    let out = usage();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains(KEY), "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let spent = &json["out_of_credit_keys"][0];
+    assert_eq!(spent["provider"], "exa", "{text}");
+    assert_eq!(spent["key"], 1);
+    assert!(spent["since"].as_str().unwrap().ends_with('Z'));
+    assert!(spent["until"].as_str().unwrap() > spent["since"].as_str().unwrap());
+
+    let cleared = offline_cmd("spent")
+        .env("HOME", &home)
+        .args(["cache", "clear", "--keys", "--json"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&cleared.stdout).unwrap();
+    assert_eq!(json["removed_marks"], 1);
+    let json: serde_json::Value = serde_json::from_slice(&usage().stdout).unwrap();
+    assert!(json["out_of_credit_keys"].as_array().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&home);
+}

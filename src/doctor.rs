@@ -12,6 +12,7 @@ use crate::context::AppContext;
 use crate::errors::redact_secrets;
 use crate::hosted::MetasearchClient;
 use crate::providers::{self, Call};
+use crate::spent;
 use crate::types::{Mode, SearchOpts};
 use serde::Serialize;
 use std::sync::Arc;
@@ -41,6 +42,13 @@ pub struct Check {
     pub key: Option<usize>,
     /// direct | local | hosted | none: how a search would reach it.
     pub transport: String,
+    /// The provider answered this key as out of credit (`credits_exhausted`)
+    /// at `spent_since`; searches try it after the other keys until
+    /// `spent_until`. A probe that answers clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spent_since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spent_until: Option<String>,
     /// Account balance (the `metasearch` row only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance_usd: Option<f64>,
@@ -69,6 +77,8 @@ async fn metasearch_check(ctx: &AppContext) -> Option<Check> {
             error,
             key: None,
             transport: "hosted".to_string(),
+            spent_since: None,
+            spent_until: None,
             balance_usd: balance,
         };
     let client = match MetasearchClient::new(ctx) {
@@ -94,7 +104,9 @@ async fn metasearch_check(ctx: &AppContext) -> Option<Check> {
 }
 
 pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
-    let mut set: JoinSet<Check> = JoinSet::new();
+    // Each probe also says what it learned about its key: answered, out of
+    // credit, or neither.
+    let mut set: JoinSet<(Check, String, Option<bool>)> = JoinSet::new();
     let mut out = Vec::new();
     let account = metasearch_check(&ctx).await;
     let hosted_ok = account.as_ref().is_some_and(|c| c.ok);
@@ -115,6 +127,8 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
                 category: None,
                 key: None,
                 transport: if hosted { "hosted" } else { "none" }.to_string(),
+                spent_since: None,
+                spent_until: None,
                 balance_usd: None,
             });
             continue;
@@ -134,15 +148,37 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
         };
         for (slot, key) in slots {
             let provider = provider.clone();
-            set.spawn(async move { probe(provider.as_ref(), name, slot, &key, transport).await });
+            set.spawn(async move {
+                let (check, learned) = probe(provider.as_ref(), name, slot, &key, transport).await;
+                (check, key, learned)
+            });
         }
     }
 
     // A panicked probe is skipped, not the end of the report.
+    let mut probed: Vec<(Check, String)> = Vec::new();
+    let mut changes = spent::Changes::default();
+    let now = spent::now();
+    let before = spent::Store::load(spent::default_path());
     while let Some(joined) = set.join_next().await {
-        if let Ok(check) = joined {
-            out.push(check);
+        if let Ok((check, key, learned)) = joined {
+            let fp = spent::fingerprint(&key);
+            let marked = before.active(&check.provider, &fp, now).is_some();
+            match learned {
+                Some(true) if marked => changes.answered.push((check.provider.clone(), fp.clone())),
+                Some(false) => changes.spent.push((check.provider.clone(), fp.clone())),
+                _ => {}
+            }
+            probed.push((check, fp));
         }
+    }
+    let marks = before.apply(&changes, now);
+    for (mut check, fp) in probed {
+        if let Some(m) = marks.active(&check.provider, &fp, now) {
+            check.spent_since = Some(spent::rfc3339(m.since));
+            check.spent_until = Some(spent::rfc3339(m.until()));
+        }
+        out.push(check);
     }
     out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.key.cmp(&b.key)));
     out.extend(account);
@@ -156,7 +192,7 @@ async fn probe(
     slot: Option<usize>,
     key: &str,
     transport: crate::types::Transport,
-) -> Check {
+) -> (Check, Option<bool>) {
     let spec = provider.spec();
     let mode = probe_mode(spec.modes);
     let query = if registry_input_is_url(mode) {
@@ -187,21 +223,36 @@ async fn probe(
             category,
             key: slot,
             transport: transport.as_str().to_string(),
+            spent_since: None,
+            spent_until: None,
             balance_usd: None,
         };
+    let keyed = !key.is_empty();
     match outcome {
-        Ok(Ok(output)) => row(true, Some(output.results.len()), None, None),
-        Ok(Err(e)) => row(
-            false,
-            None,
-            Some(e.category().as_str().to_string()),
-            Some(truncate(&redact_secrets(&e.to_string()), 160)),
+        Ok(Ok(output)) => (
+            row(true, Some(output.results.len()), None, None),
+            keyed.then_some(true),
         ),
-        Err(_) => row(
-            false,
+        Ok(Err(e)) => {
+            let out_of_credit = matches!(e, crate::errors::SearchError::CreditsExhausted { .. });
+            (
+                row(
+                    false,
+                    None,
+                    Some(e.category().as_str().to_string()),
+                    Some(truncate(&redact_secrets(&e.to_string()), 160)),
+                ),
+                (keyed && out_of_credit).then_some(false),
+            )
+        }
+        Err(_) => (
+            row(
+                false,
+                None,
+                Some("timeout".to_string()),
+                Some("timed out".to_string()),
+            ),
             None,
-            Some("timeout".to_string()),
-            Some("timed out".to_string()),
         ),
     }
 }
@@ -245,6 +296,15 @@ pub fn render_human(checks: &[Check]) {
                 "ok".green(),
                 c.latency_ms.unwrap_or(0),
                 c.results.unwrap_or(0)
+            );
+        } else if let Some(until) = &c.spent_until {
+            println!(
+                "  {:<12} {} [{}] {} (marked out of credit since {}; tried after the other keys until {until})",
+                label.bold(),
+                "FAIL".red(),
+                c.category.as_deref().unwrap_or("?"),
+                c.error.as_deref().unwrap_or(""),
+                c.spent_since.as_deref().unwrap_or("?"),
             );
         } else {
             println!(

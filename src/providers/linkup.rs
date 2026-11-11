@@ -354,7 +354,12 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         let failed = vec![err.to_provider_failure("linkup")];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed, cost: None }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed,
+                cost: None,
+                out_of_credit_keys: Vec::new(),
+            }
+            .exit_code(),
             2
         );
     }

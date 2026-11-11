@@ -200,7 +200,12 @@ pub struct StatsArgs {
 #[derive(Subcommand)]
 pub enum CacheAction {
     /// Delete all cached query results
-    Clear,
+    Clear {
+        /// Instead, forget which keys were answered as out of credit, so
+        /// every key goes back to its place in the order
+        #[arg(long)]
+        keys: bool,
+    },
 }
 
 #[derive(Parser)]

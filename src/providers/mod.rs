@@ -245,6 +245,13 @@ where
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(Duration::from_secs);
         let body = read_capped(resp, ERROR_BODY_CAP).await;
+        if adapter.spent(code, &body) {
+            return Err(SearchError::CreditsExhausted {
+                provider,
+                status: code,
+                message: http_error_message(code, &body),
+            });
+        }
         let category = classify_http(adapter.classify(code, &body), code, &body);
 
         // A quota or auth body is classified as such, so it never retries;
@@ -347,9 +354,14 @@ pub fn date_days_ago(days: u64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let total_days = now.saturating_sub(days * 86400) / 86400;
-    // Howard Hinnant's civil-from-days algorithm.
-    let z = total_days as i64 + 719_468;
+    let (y, m, d) = civil_from_days((now.saturating_sub(days * 86400) / 86400) as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// (year, month, day) of a day count since 1970-01-01, by Howard Hinnant's
+/// civil-from-days algorithm.
+pub fn civil_from_days(days: i64) -> (i64, u64, u64) {
+    let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -359,7 +371,7 @@ pub fn date_days_ago(days: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    (y, m, d)
 }
 
 /// Days of lookback for a freshness word (day/week/month/year).
@@ -707,9 +719,46 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let failed = vec![err.to_provider_failure("brave")];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed, cost: None }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed,
+                cost: None,
+                out_of_credit_keys: Vec::new(),
+            }
+            .exit_code(),
             4
         );
+    }
+
+    /// What each body becomes through `send` with the real adapter.
+    async fn answer(adapter: &dyn Adapter, reply: &'static str) -> SearchError {
+        let (url, _) = server(Some(reply)).await;
+        let c = client();
+        send(adapter, Duration::from_secs(5), || c.get(&url))
+            .await
+            .unwrap_err()
+    }
+
+    /// Only the provider's documented "out of credit" answer is
+    /// `credits_exhausted` (the key is then remembered); other 402s, rate
+    /// limits and rejected keys keep their usual category and code.
+    #[tokio::test]
+    async fn only_the_documented_out_of_credit_answer_is_credits_exhausted() {
+        let ctx = Arc::new(AppContext::new(AppConfig::default()));
+        let exa = exa::Exa::new(ctx.clone());
+        let par = parallel::Parallel::new(ctx);
+        let cases: [(&dyn Adapter, &'static str, &str, FailureCategory); 6] = [
+            (&exa, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 79\r\n\r\n{\"requestId\":\"r\",\"error\":\"You have run out of credits\",\"tag\":\"NO_MORE_CREDITS\"}", "credits_exhausted", FailureCategory::BillingQuota),
+            (&exa, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 72\r\n\r\n{\"requestId\":\"r\",\"error\":\"Budget exceeded\",\"tag\":\"TEAM_BUDGET_EXCEEDED\"}", "credits_exhausted", FailureCategory::BillingQuota),
+            (&exa, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 72\r\n\r\n{\"requestId\":\"r\",\"error\":\"Payment needed\",\"tag\":\"X402_PAYMENT_REQUIRED\"}", "insufficient_credits", FailureCategory::BillingQuota),
+            (&exa, "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 67\r\n\r\n{\"requestId\":\"r\",\"error\":\"Invalid API key\",\"tag\":\"INVALID_API_KEY\"}", "auth_failed", FailureCategory::Auth),
+            (&par, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 57\r\n\r\n{\"error\":{\"message\":\"Insufficient credit\",\"detail\":null}}", "credits_exhausted", FailureCategory::BillingQuota),
+            (&par, "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 52\r\n\r\n{\"error\":{\"message\":\"Quota exceeded\",\"detail\":null}}", "insufficient_credits", FailureCategory::BillingQuota),
+        ];
+        for (adapter, reply, code, category) in cases {
+            let e = answer(adapter, reply).await;
+            assert_eq!(e.error_code(), code, "{}: {reply}", adapter.name());
+            assert_eq!(e.category(), category, "{}: {reply}", adapter.name());
+        }
     }
 
     #[tokio::test]

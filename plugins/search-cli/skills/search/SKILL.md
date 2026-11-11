@@ -143,6 +143,11 @@ and the same comments as records in `extra.comments[]` (`id`, `parent`,
   hands the call to the next one in the same search; `metadata.key_slots`
   names the key that answered (1 = the first) and `metadata.warnings` each
   key refused before it. The engine fails only when every key has.
+- A key the provider answers as out of credit (failure code
+  `credits_exhausted`) is tried after the other keys for 3 days;
+  `metadata.out_of_credit_keys` names it with `since` and `until`. Other refusals
+  (`auth`, `rate_limit`, …) are never remembered. `search cache clear --keys`
+  forgets the marks.
 - After `search login` (free; searches are paid from a topped-up balance),
   engines without a key go through metasearch.sh as one call per search,
   charged to the account. Without `-p` the server picks the engines: the

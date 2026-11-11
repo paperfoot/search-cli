@@ -22,6 +22,7 @@ use crate::hosted::{
 };
 use crate::providers::{self, Adapter, Call, FilterSupport, Output, ProviderSpec};
 use crate::registry::{self, MergeKind};
+use crate::spent;
 use crate::types::{
     Answer, CostSummary, FailureCategory, Mode, ProviderFailure, ResponseMetadata, ResponseStatus,
     Routing, SearchOpts, SearchResponse, SearchResult, Transport, ENVELOPE_VERSION,
@@ -62,6 +63,7 @@ pub async fn run(
     opts: &SearchOpts,
     hosting: Option<&Hosting>,
 ) -> Result<SearchResponse, SearchError> {
+    let store = spent::Store::load(spent::default_path());
     let request = Request {
         query,
         mode,
@@ -72,6 +74,7 @@ pub async fn run(
         straggler_cap: registry::spec(mode).straggler_cap,
         reranker: hosting.filter(|h| h.rerank).map(|h| h.client.as_ref()),
         fresh: hosting.is_some_and(|h| h.fresh),
+        spent: Some(&store),
     };
     // Specs list extract, never its alias.
     let served = match mode {
@@ -159,6 +162,8 @@ pub(crate) struct Request<'a> {
     pub reranker: Option<&'a MetasearchClient>,
     /// `--no-cache`: the hosted call asks the engines, not the server's cache.
     pub fresh: bool,
+    /// Keys marked out of credit, tried last; `None` remembers nothing.
+    pub spent: Option<&'a spent::Store>,
 }
 
 /// Where the hosted call sits in a plan, and the report it fills.
@@ -356,15 +361,21 @@ enum Outcome {
 /// Which of a provider's own keys a call went out with. A key refused for
 /// its own reasons (auth, credit, rate limit) hands the call to the next
 /// one; `metadata.key_slots` names the key that answered when there are
-/// several, and a warning names each key refused before it.
+/// several, and a warning names each key refused before it. A key the
+/// provider answered as out of credit is remembered (`spent.rs`) and tried
+/// last; `metadata.out_of_credit_keys` names it with both dates.
 #[derive(Debug, Default)]
 struct KeyUse {
     /// How many keys the provider has (0: keyless or hosted).
     of: usize,
-    /// The key the outcome came from (1 = the first).
+    /// How many keys were sent.
+    tried: usize,
+    /// The key the outcome came from, by its place in the list (1 = the first).
     last: usize,
     /// Keys refused before it, with why.
     refused: Vec<(usize, ProviderFailure)>,
+    /// The place of a key that answered while marked out of credit.
+    answered_marked: Option<usize>,
 }
 
 impl KeyUse {
@@ -373,25 +384,94 @@ impl KeyUse {
         if self.refused.is_empty() {
             return last;
         }
+        // "Out of credit" in words, so the provider's raw tag is not the
+        // only sign of it.
+        let part = |slot: &usize, f: &ProviderFailure| {
+            if f.code == "credits_exhausted" {
+                format!("key {slot} (out of credit): {}", f.reason)
+            } else {
+                format!("key {slot}: {}", f.reason)
+            }
+        };
         let earlier = self
             .refused
             .iter()
-            .map(|(slot, f)| format!("key {slot}: {}", f.reason))
+            .map(|(slot, f)| part(slot, f))
             .collect::<Vec<_>>()
             .join("; ");
-        last.reason = if self.last == self.of {
-            format!(
-                "all {} {provider} keys failed: {earlier}; key {}: {}",
-                self.of, self.last, last.reason
-            )
+        let tail = part(&self.last, &last);
+        let label = if last.code == "credits_exhausted" {
+            " (out of credit)"
         } else {
-            format!(
-                "key {} of {}: {}; refused before it: {earlier}",
-                self.last, self.of, last.reason
-            )
+            ""
+        };
+        let stopped = format!(
+            "key {} of {}{label}: {}; refused before it: {earlier}",
+            self.last, self.of, last.reason
+        );
+        // Marked keys go last, so the last answer is often "out of credit"
+        // again; the failure a user can act on is a key's other refusal.
+        if last.code == "credits_exhausted" {
+            if let Some((_, other)) = self
+                .refused
+                .iter()
+                .rev()
+                .find(|(_, f)| f.code != "credits_exhausted")
+            {
+                last.category = other.category;
+                last.code = other.code.clone();
+                last.http_status = other.http_status;
+                last.retryable = other.retryable;
+            }
+        }
+        last.reason = if self.tried == self.of {
+            format!("all {} {provider} keys failed: {earlier}; {tail}", self.of)
+        } else {
+            stopped
         };
         last
     }
+}
+
+/// One key in the order a call tries them. No `Debug`: it holds the key.
+#[derive(Clone)]
+struct Slot {
+    /// Its place in the provider's list (1 = the first; 0: keyless).
+    place: usize,
+    key: String,
+    fingerprint: String,
+    /// Marked out of credit: tried after every other key.
+    marked: bool,
+}
+
+/// The provider's keys in list order, the ones marked out of credit moved
+/// to the end; one empty key for a keyless or hosted adapter.
+fn key_order(adapter: &dyn Adapter, store: Option<&spent::Store>, now: u64) -> Vec<Slot> {
+    let keys = adapter.keys();
+    if keys.is_empty() {
+        return vec![Slot {
+            place: 0,
+            key: String::new(),
+            fingerprint: String::new(),
+            marked: false,
+        }];
+    }
+    let mut order: Vec<Slot> = keys
+        .into_iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let fingerprint = spent::fingerprint(&key);
+            Slot {
+                place: i + 1,
+                marked: store
+                    .is_some_and(|s| s.active(adapter.name(), &fingerprint, now).is_some()),
+                key,
+                fingerprint,
+            }
+        })
+        .collect();
+    order.sort_by_key(|s| s.marked);
+    order
 }
 
 pub(crate) async fn execute_with(
@@ -433,6 +513,11 @@ pub(crate) async fn execute_with(
     let hosted_alone = report_slot.is_some() && plan.len() == 1;
 
     let names: Vec<&'static str> = plan.iter().map(|a| a.name()).collect();
+    // Each provider's keys, for reporting the ones marked out of credit.
+    let plan_keys: Vec<(&'static str, Vec<String>)> =
+        plan.iter().map(|a| (a.name(), a.keys())).collect();
+    // What the calls learn about keys marked out of credit, as they learn it.
+    let learned = Arc::new(Mutex::new(spent::Changes::default()));
     // The filters each call really sends (a hosted call: the manifest's list).
     let applied: HashMap<&'static str, FilterSupport> = plan
         .iter()
@@ -453,9 +538,11 @@ pub(crate) async fn execute_with(
     let mut outcomes: Vec<(&'static str, Outcome, KeyUse)> = match mode_spec.merge {
         MergeKind::Fused => {
             let cap = req.straggler_cap.map(|c| start + c);
-            run_fused(plan, req, mode, deadline, cap).await
+            run_fused(plan, req, &learned, mode, deadline, cap).await
         }
-        MergeKind::Chain | MergeKind::Single => run_chain(plan, req, mode, deadline).await,
+        MergeKind::Chain | MergeKind::Single => {
+            run_chain(plan, req, &learned, mode, deadline).await
+        }
     };
     // Plan order, not completion order, so fusion ties break the same way
     // whichever provider answered first.
@@ -472,13 +559,27 @@ pub(crate) async fn execute_with(
     let mut applied = applied;
     let report: Option<HostedReport> = report_slot.and_then(|s| s.lock().ok()?.take());
     for (name, outcome, keys) in outcomes {
+        if let Some(place) = keys.answered_marked {
+            warnings.push(format!(
+                "{name}: key {place} of {} answered again after being out of credit; its mark is cleared",
+                keys.of
+            ));
+        }
         // A failure already names every key it went through.
         if keys.of > 1 && !matches!(outcome, Outcome::Failed(_)) {
             for (slot, f) in &keys.refused {
+                // "Out of credit" only for the provider's own answer for it;
+                // every other refusal by its category (auth, rate_limit, …).
+                let why = match (f.code.as_str(), f.category) {
+                    ("credits_exhausted", _) => "out of credit".to_string(),
+                    (_, FailureCategory::BillingQuota) => {
+                        "billing or quota, not confirmed out of credit".to_string()
+                    }
+                    (_, c) => c.as_str().to_string(),
+                };
                 warnings.push(format!(
-                    "{name}: key {slot} of {} failed ({}), so the next key was tried",
-                    keys.of,
-                    f.category.as_str()
+                    "{name}: key {slot} of {} failed ({why}), so the next key was tried",
+                    keys.of
                 ));
             }
             if !matches!(outcome, Outcome::TimedOut) {
@@ -563,6 +664,39 @@ pub(crate) async fn execute_with(
         }
     }
 
+    // Remember the keys answered "out of credit" (and forget those that
+    // answered again), then report every mark that applies to an engine of
+    // this search: the key's place and both dates.
+    let now = spent::now();
+    let changes = learned.lock().map(|c| c.clone()).unwrap_or_default();
+    let out_of_credit_keys: Vec<spent::SpentKey> = match req.spent {
+        Some(store) => {
+            let after = store.apply(&changes, now);
+            plan_keys
+                .iter()
+                .filter(|(name, _)| queried.iter().any(|q| q == name))
+                .flat_map(|(name, keys)| after.report(name, keys, now))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    for k in &out_of_credit_keys {
+        let alone = plan_keys
+            .iter()
+            .any(|(name, keys)| *name == k.provider && keys.len() == 1);
+        warnings.push(if alone {
+            format!(
+                "{}: key {} is out of credit since {}; it is the only key, so it is still tried (marked until {})",
+                k.provider, k.key, k.since, k.until
+            )
+        } else {
+            format!(
+                "{}: key {} is out of credit since {}; it is tried after the other keys until {}",
+                k.provider, k.key, k.since, k.until
+            )
+        });
+    }
+
     // A chain that stopped early never reached the rest.
     transport.retain(|name, _| queried.contains(name));
     let cost = (!by_provider.is_empty()).then(|| {
@@ -604,6 +738,7 @@ pub(crate) async fn execute_with(
         return Err(SearchError::AllProvidersFailed {
             failed: failures,
             cost,
+            out_of_credit_keys,
         });
     }
 
@@ -674,6 +809,7 @@ pub(crate) async fn execute_with(
             providers_timed_out: timed_out,
             provider_results,
             key_slots,
+            out_of_credit_keys,
             cached: false,
             cache_age_secs: None,
             provider_failures: failures,
@@ -808,51 +944,85 @@ async fn rerank(client: &MetasearchClient, query: &str, results: &mut Vec<Search
 /// One provider's call. With several own keys, a key refused for its own
 /// reasons ([`providers::next_key_may_help`]) hands the call to the next key
 /// while the deadline allows; any other failure ends it.
+/// A call's keys in the order to try them, and where it notes what it
+/// learns about marked keys.
+struct Keys<'a> {
+    order: &'a [Slot],
+    learned: &'a Mutex<spent::Changes>,
+}
+
 async fn run_one(
     adapter: &dyn Adapter,
+    keys: Keys<'_>,
     mode: Mode,
     query: &str,
     count: usize,
     opts: &SearchOpts,
     deadline: Instant,
 ) -> (Outcome, KeyUse) {
-    let keys = adapter.keys();
+    let Keys { order, learned } = keys;
+    let name = adapter.name();
+    // Written as it happens, so a call the deadline cuts off still counts.
+    let note = |spent: bool, slot: &Slot| {
+        if let Ok(mut c) = learned.lock() {
+            let entry = (name.to_string(), slot.fingerprint.clone());
+            if spent {
+                c.spent.push(entry);
+            } else {
+                c.answered.push(entry);
+            }
+        }
+    };
     let mut used = KeyUse {
-        of: keys.len(),
+        of: order.iter().filter(|s| s.place > 0).count(),
         ..KeyUse::default()
     };
-    let mut slot = 0;
-    loop {
-        let key = keys.get(slot).map_or("", String::as_str);
-        used.last = slot + 1;
+    for (i, slot) in order.iter().enumerate() {
+        used.last = slot.place;
+        used.tried += 1;
         let call = Call {
             mode,
             query,
             count: per_call_count(adapter, count),
             opts,
             timeout: time_left(deadline, adapter),
-            key,
+            key: &slot.key,
         };
         let failure = match tokio::time::timeout_at(deadline.into(), adapter.call(&call)).await {
-            Ok(Ok(out)) => return (Outcome::Done(out), used),
-            Ok(Err(e)) => e.to_provider_failure(adapter.name()),
+            Ok(Ok(out)) => {
+                if slot.marked {
+                    note(false, slot);
+                    used.answered_marked = Some(slot.place);
+                }
+                return (Outcome::Done(out), used);
+            }
+            Ok(Err(e)) => e.to_provider_failure(name),
             Err(_) => return (Outcome::TimedOut, used),
         };
-        let more = slot + 1 < keys.len();
-        let helps = providers::next_key_may_help(failure.category);
-        if more && helps && Instant::now() < deadline {
-            used.refused.push((slot + 1, failure));
-            slot += 1;
+        if failure.code == "credits_exhausted" && slot.place > 0 {
+            note(true, slot);
+        }
+        let rest = &order[i + 1..];
+        // A key refused for its own reasons hands over to the next. Once only
+        // keys marked out of credit are left, they are tried after any
+        // failure that was not billed, so a topped-up key is never missed.
+        let next = providers::next_key_may_help(failure.category)
+            || (!rest.is_empty()
+                && rest.iter().all(|s| s.marked)
+                && !providers::billed_failure(failure.category));
+        if !rest.is_empty() && next && Instant::now() < deadline {
+            used.refused.push((slot.place, failure));
             continue;
         }
-        let mut failure = used.failure(adapter.name(), failure);
-        if more && helps {
+        let mut failure = used.failure(name, failure);
+        if !rest.is_empty() && next {
             failure
                 .reason
                 .push_str("; the search's time ran out before the next key");
         }
         return (Outcome::Failed(failure), used);
     }
+    unreachable!("a key order is never empty")
 }
 
 /// Every provider at once; collect until all finish or the deadline passes.
@@ -862,6 +1032,7 @@ async fn run_one(
 async fn run_fused(
     plan: Vec<Box<dyn Adapter>>,
     req: &Request<'_>,
+    learned: &Arc<Mutex<spent::Changes>>,
     mode: Mode,
     deadline: Instant,
     straggler_cap: Option<Instant>,
@@ -869,15 +1040,29 @@ async fn run_fused(
     let mut set: JoinSet<(&'static str, Outcome, KeyUse)> = JoinSet::new();
     let mut pending: Vec<&'static str> = Vec::new();
     let mut task_names: HashMap<tokio::task::Id, &'static str> = HashMap::new();
+    let now = spent::now();
     for adapter in plan {
+        let order = key_order(adapter.as_ref(), req.spent, now);
         let name = adapter.name();
         pending.push(name);
         let query = req.query.to_string();
         let opts = req.opts.clone();
         let count = req.count;
+        let learned = learned.clone();
         let handle = set.spawn(async move {
-            let (outcome, keys) =
-                run_one(adapter.as_ref(), mode, &query, count, &opts, deadline).await;
+            let (outcome, keys) = run_one(
+                adapter.as_ref(),
+                Keys {
+                    order: &order,
+                    learned: &learned,
+                },
+                mode,
+                &query,
+                count,
+                &opts,
+                deadline,
+            )
+            .await;
             (name, outcome, keys)
         });
         task_names.insert(handle.id(), name);
@@ -938,6 +1123,7 @@ async fn run_fused(
 async fn run_chain(
     plan: Vec<Box<dyn Adapter>>,
     req: &Request<'_>,
+    learned: &Mutex<spent::Changes>,
     mode: Mode,
     deadline: Instant,
 ) -> Vec<(&'static str, Outcome, KeyUse)> {
@@ -958,8 +1144,13 @@ async fn run_chain(
             ));
             continue;
         }
+        let order = key_order(adapter.as_ref(), req.spent, spent::now());
         let (outcome, keys) = run_one(
             adapter.as_ref(),
+            Keys {
+                order: &order,
+                learned,
+            },
             mode,
             req.query,
             req.count,
@@ -1328,6 +1519,18 @@ mod tests {
         only: Option<&[String]>,
         deadline_ms: u64,
     ) -> Result<SearchResponse, SearchError> {
+        search_marked(adapters, mode, count, only, deadline_ms, None).await
+    }
+
+    /// As [`search`], remembering out-of-credit keys in `store`.
+    async fn search_marked(
+        adapters: Vec<Box<dyn Adapter>>,
+        mode: Mode,
+        count: usize,
+        only: Option<&[String]>,
+        deadline_ms: u64,
+        store: Option<&spent::Store>,
+    ) -> Result<SearchResponse, SearchError> {
         let opts = SearchOpts::default();
         let req = Request {
             query: "q",
@@ -1338,6 +1541,7 @@ mod tests {
             deadline: Duration::from_millis(deadline_ms),
             straggler_cap: None,
             fresh: false,
+            spent: store,
             reranker: None,
         };
         execute_with(adapters, &req).await
@@ -1350,6 +1554,8 @@ mod tests {
         tried: Arc<Mutex<Vec<String>>>,
         /// How long each call takes before it answers or fails.
         delay: Duration,
+        /// Keys the provider answers as out of credit (`credits_exhausted`).
+        exhausted: Vec<&'static str>,
     }
 
     #[async_trait::async_trait]
@@ -1366,6 +1572,13 @@ mod tests {
         async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
             self.tried.lock().unwrap().push(call.key.to_string());
             tokio::time::sleep(self.delay).await;
+            if self.exhausted.contains(&call.key) {
+                return Err(SearchError::CreditsExhausted {
+                    provider: self.spec.name,
+                    status: 402,
+                    message: "HTTP 402: {\"tag\":\"NO_MORE_CREDITS\"}".into(),
+                });
+            }
             let (key, fails) = self.keys.iter().find(|(k, _)| *k == call.key).unwrap();
             match fails {
                 // The upstream echoes the key, as some do in error bodies:
@@ -1405,8 +1618,252 @@ mod tests {
             keys: keys.to_vec(),
             tried: tried.clone(),
             delay: Duration::from_millis(delay_ms),
+            exhausted: Vec::new(),
         };
         (Box::new(adapter), tried)
+    }
+
+    /// A keyed fake whose `exhausted` keys answer "out of credit".
+    fn keyed_spent(
+        spec: &'static ProviderSpec,
+        keys: &[(&'static str, Option<FailureCategory>)],
+        exhausted: &[&'static str],
+    ) -> (Box<dyn Adapter>, Arc<Mutex<Vec<String>>>) {
+        let tried = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Keyed {
+            spec,
+            keys: keys.to_vec(),
+            tried: tried.clone(),
+            delay: Duration::ZERO,
+            exhausted: exhausted.to_vec(),
+        };
+        (Box::new(adapter), tried)
+    }
+
+    /// A store in a fresh temporary file.
+    fn temp_store(tag: &str) -> spent::Store {
+        let path = std::env::temp_dir().join(format!(
+            "search-cli-engine-spent-{tag}-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        spent::Store::load(path)
+    }
+
+    fn marks(store: &spent::Store, keys: &[&str]) -> Vec<usize> {
+        let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+        store
+            .report("exa", &keys, spent::now())
+            .iter()
+            .map(|k| k.key)
+            .collect()
+    }
+
+    /// An "out of credit" answer marks the key; the next search tries it
+    /// after the other keys, and names it with both dates.
+    #[tokio::test]
+    async fn an_out_of_credit_key_is_remembered_and_tried_last() {
+        let store = temp_store("remember");
+        let (exa, log) = keyed_spent(&exa::SPEC, &[(K1, None), (K2, None)], &[K1]);
+        let resp = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store))
+            .await
+            .unwrap();
+        assert_eq!(tried(&log), [K1, K2]);
+        assert_eq!(resp.metadata.key_slots.get("exa"), Some(&2));
+        let w = resp.metadata.warnings.join("\n");
+        assert!(w.contains("exa: key 1 of 2 failed (out of credit)"), "{w}");
+        assert_eq!(resp.metadata.out_of_credit_keys.len(), 1, "{w}");
+        let k = &resp.metadata.out_of_credit_keys[0];
+        assert_eq!((k.provider.as_str(), k.key), ("exa", 1));
+        assert!(k.since.ends_with('Z') && k.until > k.since);
+
+        // The next search does not send key 1 while key 2 answers.
+        let store = spent::Store::load(store.path().to_path_buf());
+        let (exa, log) = keyed_spent(&exa::SPEC, &[(K1, None), (K2, None)], &[]);
+        let resp = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store))
+            .await
+            .unwrap();
+        assert_eq!(tried(&log), [K2]);
+        assert_eq!(resp.metadata.key_slots.get("exa"), Some(&2));
+        assert_eq!(resp.metadata.out_of_credit_keys[0].key, 1);
+        assert!(resp
+            .metadata
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("exa: key 1 is out of credit since ")));
+        store.clear();
+    }
+
+    /// No false negative: when every other key fails, the marked key is
+    /// still tried, and one that answers loses its mark.
+    #[tokio::test]
+    async fn a_marked_key_is_still_tried_before_the_engine_fails() {
+        let store = temp_store("lastresort");
+        let store = store.apply(
+            &spent::Changes {
+                spent: vec![("exa".into(), spent::fingerprint(K1))],
+                answered: vec![],
+            },
+            spent::now(),
+        );
+        assert_eq!(marks(&store, &[K1, K2]), [1]);
+        let (exa, log) = keyed(&exa::SPEC, &[(K1, None), (K2, Some(FailureCategory::Auth))]);
+        let resp = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store))
+            .await
+            .unwrap();
+        assert_eq!(tried(&log), [K2, K1]);
+        assert_eq!(resp.metadata.key_slots.get("exa"), Some(&1));
+        assert!(resp.metadata.out_of_credit_keys.is_empty());
+        assert!(resp
+            .metadata
+            .warnings
+            .iter()
+            .any(|w| w.contains("key 1 of 2 answered again after being out of credit")));
+        let store = spent::Store::load(store.path().to_path_buf());
+        assert!(marks(&store, &[K1, K2]).is_empty());
+        store.clear();
+    }
+
+    /// Only the provider's own "out of credit" answer marks a key: a rejected
+    /// key, a rate limit, a quota-sounding answer the provider does not
+    /// document as such, a timeout or a server error never does.
+    #[tokio::test]
+    async fn nothing_but_out_of_credit_marks_a_key() {
+        use FailureCategory::*;
+        for category in [Auth, RateLimit, BillingQuota, Timeout, Server, BadRequest] {
+            let store = temp_store("strict");
+            let (exa, _) = keyed(&exa::SPEC, &[(K1, Some(category)), (K2, None)]);
+            let _ = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store)).await;
+            let store = spent::Store::load(store.path().to_path_buf());
+            assert!(
+                marks(&store, &[K1, K2]).is_empty(),
+                "{category:?} marked a key"
+            );
+            store.clear();
+        }
+    }
+
+    fn mark(store: &spent::Store, key: &str) -> spent::Store {
+        store.apply(
+            &spent::Changes {
+                spent: vec![("exa".into(), spent::fingerprint(key))],
+                answered: vec![],
+            },
+            spent::now(),
+        )
+    }
+
+    /// A call the deadline cuts off still leaves its "out of credit" mark.
+    #[tokio::test]
+    async fn a_mark_survives_the_deadline_cutting_the_call_off() {
+        let store = temp_store("cutoff");
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let exa = Box::new(Keyed {
+            spec: &exa::SPEC,
+            keys: vec![(K1, None), (K2, None)],
+            tried: sent.clone(),
+            delay: Duration::from_millis(150),
+            exhausted: vec![K1],
+        }) as Box<dyn Adapter>;
+        let (others, _) = fakes(&[(&parallel::SPEC, ok(0, 2, "p"))]);
+        let mut plan = vec![exa];
+        plan.extend(others);
+        let _ = search_marked(plan, Mode::General, 10, None, 250, Some(&store)).await;
+        assert_eq!(
+            tried(&sent),
+            [K1, K2],
+            "key 2 was still running at the deadline"
+        );
+        let store = spent::Store::load(store.path().to_path_buf());
+        assert_eq!(marks(&store, &[K1, K2]), [1]);
+        store.clear();
+    }
+
+    /// Once only marked keys are left, they are tried after any failure that
+    /// was not billed (here a bad request), not only after a key refusal.
+    #[tokio::test]
+    async fn marked_keys_follow_any_unbilled_failure() {
+        let store = temp_store("anyfail");
+        let store = mark(&store, K1);
+        let (exa, log) = keyed(
+            &exa::SPEC,
+            &[(K1, None), (K2, Some(FailureCategory::BadRequest))],
+        );
+        let resp = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store))
+            .await
+            .unwrap();
+        assert_eq!(tried(&log), [K2, K1]);
+        assert_eq!(resp.metadata.key_slots.get("exa"), Some(&1));
+        // A billed failure (timeout) does not send the marked key as well.
+        let (exa, log) = keyed(
+            &exa::SPEC,
+            &[(K1, None), (K2, Some(FailureCategory::Timeout))],
+        );
+        let store = mark(&store, K1);
+        let _ = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store)).await;
+        assert_eq!(tried(&log), [K2]);
+        store.clear();
+    }
+
+    /// When the whole search fails, the error carries the marked keys and
+    /// leads with the failure a user can act on, not "out of credit" again.
+    #[tokio::test]
+    async fn a_total_failure_names_marked_keys_and_the_actionable_cause() {
+        let store = temp_store("totalfail");
+        let store = mark(&store, K1);
+        let (exa, _) = keyed_spent(
+            &exa::SPEC,
+            &[(K1, None), (K2, Some(FailureCategory::Auth))],
+            &[K1],
+        );
+        let err = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store))
+            .await
+            .unwrap_err();
+        let SearchError::AllProvidersFailed {
+            failed,
+            out_of_credit_keys,
+            ..
+        } = err
+        else {
+            panic!()
+        };
+        assert_eq!(failed[0].category, FailureCategory::Auth);
+        assert_eq!(failed[0].code, "auth_failed");
+        assert!(
+            failed[0].reason.contains("key 1 (out of credit): "),
+            "{}",
+            failed[0].reason
+        );
+        assert_eq!(out_of_credit_keys.len(), 1);
+        assert_eq!(out_of_credit_keys[0].key, 1);
+        store.clear();
+    }
+
+    /// Every key out of credit: each is still tried, the engine fails once,
+    /// and both are remembered.
+    #[tokio::test]
+    async fn every_key_out_of_credit_tries_each_and_marks_each() {
+        let store = temp_store("allspent");
+        let (exa, log) = keyed_spent(&exa::SPEC, &[(K1, None), (K2, None)], &[K1, K2]);
+        let err = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store))
+            .await
+            .unwrap_err();
+        assert_eq!(tried(&log), [K1, K2]);
+        let SearchError::AllProvidersFailed { failed, .. } = err else {
+            panic!()
+        };
+        assert_eq!(failed[0].code, "credits_exhausted");
+        assert_eq!(failed[0].category, FailureCategory::BillingQuota);
+        let store = spent::Store::load(store.path().to_path_buf());
+        assert_eq!(marks(&store, &[K1, K2]), [1, 2]);
+        // Both marked: the next search still sends them, in list order.
+        let (exa, log) = keyed(&exa::SPEC, &[(K1, None), (K2, None)]);
+        let resp = search_marked(vec![exa], Mode::General, 10, None, 5_000, Some(&store))
+            .await
+            .unwrap();
+        assert_eq!(tried(&log), [K1]);
+        assert_eq!(resp.metadata.key_slots.get("exa"), Some(&1));
+        store.clear();
     }
 
     fn tried(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
@@ -1441,11 +1898,17 @@ mod tests {
                 BTreeMap::from([("exa".to_string(), 3)])
             );
             let warnings = resp.metadata.warnings.join("\n");
+            // A quota answer the provider does not document as "out of
+            // credit" says so, apart from a confirmed one.
+            let said = |c: FailureCategory| match c {
+                BillingQuota => "billing or quota, not confirmed out of credit".to_string(),
+                c => c.as_str().to_string(),
+            };
             assert!(
-                warnings.contains(&format!("exa: key 1 of 3 failed ({})", refusal.as_str())),
+                warnings.contains(&format!("exa: key 1 of 3 failed ({})", said(refusal))),
                 "{warnings}"
             );
-            assert!(warnings.contains("exa: key 2 of 3 failed (billing_quota)"));
+            assert!(warnings.contains(&format!("exa: key 2 of 3 failed ({})", said(BillingQuota))));
         }
     }
 
@@ -1635,6 +2098,7 @@ mod tests {
                     deadline: Duration::from_millis(3_000),
                     straggler_cap: Some(Duration::from_millis(300)),
                     fresh: false,
+                    spent: None,
                     reranker: None,
                 };
                 execute_with(adapters, &req).await
@@ -2183,6 +2647,7 @@ mod tests {
             deadline: Duration::from_millis(2_000),
             straggler_cap: None,
             fresh: false,
+            spent: None,
             reranker: None,
         };
         let _ = execute_with(adapters, &req).await;

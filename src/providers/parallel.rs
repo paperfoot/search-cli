@@ -172,6 +172,13 @@ impl Adapter for Parallel {
         !self.keys().is_empty()
     }
 
+    /// Parallel's error reference: 402 is "insufficient credit in account"
+    /// (it carries no code). Its 429 means "rate limited or quota exceeded",
+    /// which cannot be told apart, so it never marks a key.
+    fn spent(&self, status: u16, _body: &str) -> bool {
+        status == 402
+    }
+
     fn sent_cost(&self, mode: Mode) -> u64 {
         price(mode).estimate(0)
     }

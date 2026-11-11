@@ -14,6 +14,7 @@ mod page;
 mod providers;
 mod registry;
 mod router;
+mod spent;
 mod stats;
 mod types;
 mod usage;
@@ -324,6 +325,12 @@ fn mark_replay(response: &mut types::SearchResponse, age: Option<u64>) {
     response.metadata.cache_age_secs = age;
     response.metadata.cost = None;
     response.metadata.transport.clear();
+    // Marks are read fresh on every search; a replay's would be stale.
+    response.metadata.out_of_credit_keys.clear();
+    response
+        .metadata
+        .warnings
+        .retain(|w| !w.contains("is out of credit since"));
 }
 
 /// How each provider would be reached right now (d direct, l local, h
@@ -861,7 +868,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             // A run where every provider failed still made (possibly billed)
             // calls; log it so `search stats` counts them.
-            if let Err(errors::SearchError::AllProvidersFailed { failed, cost }) = &response {
+            if let Err(errors::SearchError::AllProvidersFailed { failed, cost, .. }) = &response {
                 logging::log_failed_search(
                     &query,
                     &mode.to_string(),
@@ -1042,7 +1049,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         }
 
         Commands::Cache { action } => match action {
-            cli::CacheAction::Clear => {
+            cli::CacheAction::Clear { keys: true } => {
+                let removed = spent::Store::load(spent::default_path()).clear();
+                if ctx.is_json() {
+                    output::json::render_value(&serde_json::json!({
+                        "version": types::ENVELOPE_VERSION,
+                        "status": "success",
+                        "removed_marks": removed,
+                    }));
+                } else if !ctx.suppress_human() {
+                    eprintln!("Forgot {removed} out-of-credit key marks");
+                }
+                Ok(0)
+            }
+            cli::CacheAction::Clear { keys: false } => {
                 let removed = cache::clear();
                 if ctx.is_json() {
                     output::json::render_value(&serde_json::json!({
@@ -1100,12 +1120,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         }
 
         Commands::Usage => {
+            // Keys a provider answered as out of credit, with both dates.
+            let marks = spent::Store::load(spent::default_path());
+            let now = spent::now();
+            let spent_keys: Vec<spent::SpentKey> = providers::build_providers(&app)
+                .iter()
+                .flat_map(|p| marks.report(p.name(), &p.keys(), now))
+                .collect();
             let usages = usage::collect(app).await;
             if ctx.is_json() {
                 output::json::render_value(&serde_json::json!({
                     "version": types::ENVELOPE_VERSION,
                     "status": "success",
                     "providers": usages,
+                    "out_of_credit_keys": spent_keys,
                     "note": "informational only — the CLI never disables a provider based on balance",
                 }));
             } else if !ctx.suppress_human() {
@@ -1140,6 +1168,17 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             unit
                         );
                     }
+                }
+                for k in &spent_keys {
+                    println!(
+                        "  {:<12} {}",
+                        format!("{} key {}", k.provider, k.key).bold(),
+                        format!(
+                            "out of credit since {}; tried after the other keys until {} (search cache clear --keys forgets it)",
+                            k.since, k.until
+                        )
+                        .yellow()
+                    );
                 }
             }
             Ok(0)

@@ -58,6 +58,8 @@ dom_smoothie = "0.19"
 dom_query = { version = "0.29", default-features = false, features = ["markdown"] }
 encoding_rs = "0.8"
 uuid = { version = "1", features = ["v4"] }
+# Fingerprints of keys answered as out of credit (src/spent.rs); already in the tree.
+sha2 = "0.10"
 
 # BoringSSL and OpenSSL export the same symbol names; prefixing BoringSSL's
 # avoids the clash on Linux (wreq README, rc.29 onwards).

@@ -89,6 +89,12 @@ pub trait Adapter: Send + Sync {
     fn classify(&self, _status: u16, _body: &str) -> Option<FailureCategory> {
         None
     }
+    /// True only for the answer the provider documents as "this key's credit
+    /// or quota is used up" (a rate limit, a rejected key or anything
+    /// ambiguous is false). Such a key is tried last for `spent::SPENT_FOR`.
+    fn spent(&self, _status: u16, _body: &str) -> bool {
+        false
+    }
     /// What one call in `mode` costs once sent, before any answer: the price
     /// of a call that times out or whose 2xx fails to parse. Override when a
     /// mode sends more than the base call (Tavily's advanced depth, Brave

@@ -216,6 +216,23 @@ impl Adapter for Exa {
         !self.keys().is_empty()
     }
 
+    /// Exa's error codes page: 402 with the tag `NO_MORE_CREDITS` (no credits
+    /// left), `API_KEY_BUDGET_EXCEEDED` or `TEAM_BUDGET_EXCEEDED` (the key's
+    /// or team's budget for the billing period). Other 402s (the x402 and
+    /// MPP payment tags) are not about the key's account.
+    fn spent(&self, status: u16, body: &str) -> bool {
+        const SPENT: &[&str] = &[
+            "NO_MORE_CREDITS",
+            "API_KEY_BUDGET_EXCEEDED",
+            "TEAM_BUDGET_EXCEEDED",
+        ];
+        status == 402
+            && serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v["tag"].as_str().map(|t| SPENT.contains(&t)))
+                .unwrap_or(false)
+    }
+
     /// Deep sends `type: "deep"`, which costs more than the base call.
     fn sent_cost(&self, mode: Mode) -> u64 {
         if mode == Mode::Deep {
