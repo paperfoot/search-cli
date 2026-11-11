@@ -220,6 +220,10 @@ pub struct ResponseMetadata {
     /// list is auditable: absent name = returned nothing or was cancelled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub provider_results: std::collections::BTreeMap<String, usize>,
+    /// Which of a provider's own keys answered (1 = the first), for each
+    /// provider given more than one. Never the key itself.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub key_slots: std::collections::BTreeMap<String, usize>,
     /// Honesty notes, e.g. providers that don't apply a requested -f/-d filter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,

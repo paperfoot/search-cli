@@ -690,3 +690,52 @@ fn agent_info_lists_auto_first() {
         "{tavily}"
     );
 }
+
+/// Fallback keys: `EXA_API_KEY` then `EXA_API_KEY_2`, a `SEARCH_KEYS_*`
+/// list, and `config set` with comma-separated keys each give a provider
+/// several keys. Only the count and masked keys are ever shown.
+#[test]
+fn fallback_keys_from_env_lists_and_config_set() {
+    const KEYS: [&str; 4] = [
+        "envfirst0000aaaa",
+        "envsecond000bbbb",
+        "listfirst000cccc",
+        "listsecond00dddd",
+    ];
+    let out = offline_cmd("fallback-env")
+        .env("EXA_API_KEY", KEYS[0])
+        .env("EXA_API_KEY_2", KEYS[1])
+        .env(
+            "SEARCH_KEYS_PARALLEL",
+            format!("[{}, {}]", KEYS[2], KEYS[3]),
+        )
+        .args(["config", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["key_counts"]["exa"], 2, "{stdout}");
+    assert_eq!(json["key_counts"]["parallel"], 2, "{stdout}");
+    for k in KEYS {
+        assert!(!stdout.contains(k), "{stdout}");
+    }
+
+    let set = offline_cmd("fallback-set")
+        .args([
+            "config",
+            "set",
+            "keys.exa",
+            &format!("{},{}", KEYS[0], KEYS[1]),
+        ])
+        .output()
+        .unwrap();
+    assert!(set.status.success());
+    assert!(!String::from_utf8_lossy(&set.stdout).contains(KEYS[0]));
+    let show = offline_cmd("fallback-set")
+        .args(["config", "show", "--json"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(json["key_counts"]["exa"], 2);
+}

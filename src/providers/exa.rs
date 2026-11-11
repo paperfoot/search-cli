@@ -58,10 +58,6 @@ impl Exa {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 #[derive(Deserialize)]
@@ -212,8 +208,12 @@ impl Adapter for Exa {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     /// Deep sends `type: "deep"`, which costs more than the base call.
@@ -229,9 +229,9 @@ impl Adapter for Exa {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "exa" });
         }
-        let key = self.api_key();
+        let key = call.key;
         let client = &self.ctx.client;
-        let resp = super::send(self, call.timeout, || request(client, &key, call)).await?;
+        let resp = super::send(self, call.timeout, || request(client, key, call)).await?;
         let body: ExaResponse = resp.json().await?;
         Ok(parse(call.mode, body))
     }
@@ -249,6 +249,7 @@ mod tests {
             count: 12,
             opts,
             timeout: Duration::from_secs(1),
+            key: "",
         };
         let req = request(&reqwest::Client::new(), "test-key", &call)
             .build()

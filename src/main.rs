@@ -250,9 +250,8 @@ async fn main() {
 
     // Every key this process holds is scrubbed from any error text.
     errors::register_secrets(
-        providers::all()
-            .iter()
-            .map(|s| providers::key_for(&config, s))
+        providers::every_key(&config)
+            .into_iter()
             .chain([auth::resolve_token(&config)]),
     );
     let app = Arc::new(AppContext::new(config));
@@ -512,7 +511,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "config": {
             "path": config::config_path().to_string_lossy(),
             "env_prefix": "SEARCH_",
-            "key_precedence": "<PROVIDER>_API_KEY env > SEARCH_KEYS_* env > config file",
+            "key_precedence": "<PROVIDER>_API_KEY env > SEARCH_KEYS_* env > config file; fallbacks: a list or <PROVIDER>_API_KEY_2...",
         },
         "auto_json_when_piped": true,
         "not_suited_for": "GitHub repos, code, issues and PRs: use `gh search repos|code|issues|prs`.",
@@ -923,7 +922,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 ConfigAction::Show => {
                     if ctx.is_json() {
                         // Use the same resolver as `config check` (is_configured ->
-                        // resolve_key) so env-only keys count and all 12 providers
+                        // keys_for) so env-only keys count and all 12 providers
                         // are covered — the old hardcoded list missed parallel +
                         // stealth and ignored env vars.
                         let all = providers::build_providers(&app);
@@ -931,6 +930,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             .iter()
                             .filter(|p| p.is_configured())
                             .map(|p| p.name())
+                            .collect();
+                        // How many own keys each provider tries, never the keys.
+                        let key_counts: serde_json::Map<String, serde_json::Value> = all
+                            .iter()
+                            .map(|p| (p.name(), p.keys().len()))
+                            .filter(|(_, n)| *n > 0)
+                            .map(|(name, n)| (name.to_string(), n.into()))
                             .collect();
                         let info = serde_json::json!({
                             "version": types::ENVELOPE_VERSION,
@@ -940,6 +946,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                 "count": app.config.settings.count,
                             },
                             "providers_configured": configured,
+                            "key_counts": key_counts,
                             "metasearch": {
                                 "logged_in": !auth::resolve_token(&app.config).is_empty(),
                                 "email": app.config.metasearch.email,
@@ -1115,7 +1122,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     } else if !u.configured {
                         println!("  {:<12} {}", u.provider, "not configured".yellow());
                     } else if let Some(err) = &u.error {
-                        println!("  {:<12} {}", u.provider.bold(), err.red());
+                        println!("  {:<12} {}", u.label().bold(), err.red());
                     } else if let Some(data) = &u.data {
                         let remaining = data
                             .get("credits_remaining")
@@ -1128,7 +1135,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             .unwrap_or("credits");
                         println!(
                             "  {:<12} {} {} remaining",
-                            u.provider.bold(),
+                            u.label().bold(),
                             remaining.green(),
                             unit
                         );

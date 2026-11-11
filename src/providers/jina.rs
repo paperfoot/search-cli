@@ -46,10 +46,6 @@ impl Jina {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 #[derive(Deserialize)]
@@ -71,8 +67,12 @@ impl Adapter for Jina {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     fn sent_cost(&self, mode: Mode) -> u64 {
@@ -100,7 +100,7 @@ impl Adapter for Jina {
 impl Jina {
     async fn search(&self, call: &Call<'_>) -> Result<Vec<SearchResult>, SearchError> {
         let client = &self.ctx.client;
-        let auth = format!("Bearer {}", self.api_key());
+        let auth = format!("Bearer {}", call.key);
         let count = call.count.to_string();
         // No native domain filters: rewrite the query with site: operators.
         let q = super::augment_query(call.query, call.opts);
@@ -139,7 +139,7 @@ impl Jina {
         crate::registry::rung_gate("jina", call.query)?;
         let url = call.query;
         let client = &self.ctx.client;
-        let auth = format!("Bearer {}", self.api_key());
+        let auth = format!("Bearer {}", call.key);
 
         let resp = super::send(self, call.timeout, || reader_request(client, &auth, url)).await?;
         let body: serde_json::Value = resp.json().await?;
@@ -232,7 +232,7 @@ mod tests {
     #[tokio::test]
     async fn modes_it_does_not_serve_are_errors_not_empty() {
         let mut config = AppConfig::default();
-        config.keys.jina = "k".into();
+        config.keys.jina = crate::config::KeyList(vec!["k".into()]);
         let jina = Jina::new(Arc::new(AppContext::new(config)));
         let opts = SearchOpts::default();
         let err = jina
@@ -242,6 +242,7 @@ mod tests {
                 count: 1,
                 opts: &opts,
                 timeout: Duration::from_secs(1),
+                key: "k",
             })
             .await
             .unwrap_err();

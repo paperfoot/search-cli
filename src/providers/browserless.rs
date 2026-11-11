@@ -37,10 +37,6 @@ impl Browserless {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 #[async_trait]
@@ -49,8 +45,12 @@ impl Adapter for Browserless {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     /// Render the page in Browserless's cloud browser (the anti-bot last
@@ -71,26 +71,26 @@ impl Adapter for Browserless {
             "waitForSelector": { "selector": "body", "timeout": 10000 }
         });
         let client = &self.ctx.client;
-        let token = self.api_key();
+        let token = call.key;
 
         // Browserless authenticates with `?token=`; `send` strips the URL
         // from transport errors, and `redact` keeps it out of the rest.
         let resp = super::send(self, call.timeout, || {
             client
                 .post(ENDPOINT)
-                .query(&[("token", token.as_str())])
+                .query(&[("token", token)])
                 .header("Content-Type", "application/json")
                 .json(&body)
         })
         .await
-        .map_err(|e| redact(e, &token))?;
+        .map_err(|e| redact(e, token))?;
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
             .or_else(|| Some("text/html".to_string()));
-        let html = resp.text().await.map_err(|e| redact(e.into(), &token))?;
+        let html = resp.text().await.map_err(|e| redact(e.into(), token))?;
         let page = Page {
             final_url: url.to_string(),
             status: 200,

@@ -68,6 +68,19 @@ search doctor                                  # test each engine you have a key
 
 Precedence: `<PROVIDER>_API_KEY` env, then `SEARCH_KEYS_<PROVIDER>` env, then the config file. The variables are `SERPER_API_KEY`, `EXA_API_KEY`, `JINA_API_KEY`, `BRAVE_API_KEY`, `LINKUP_API_KEY`, `PARALLEL_API_KEY`, `TAVILY_API_KEY`, `PERPLEXITY_API_KEY`, `SERPAPI_API_KEY`, `XAI_API_KEY`, `FIRECRAWL_API_KEY` and `BROWSERLESS_API_KEY`. The config file is `~/.config/search/config.toml` on Linux and `~/Library/Application Support/search/config.toml` on macOS, created with mode 0600; [config.example.toml](config.example.toml) lists every setting.
 
+### Fallback keys
+
+An engine can have several keys, tried in order: a second account, or a paid key behind a free one. When a call fails because of its key (refused, out of credit or quota, or rate limited), the same search tries the next key, so you still get that engine's results. A rate limit the provider asks to wait out briefly (`Retry-After` within the time left) is first retried on the same key, then the next key is tried. Timeouts, server errors and bad requests are not about the key and do not move on; a timeout was already billed.
+
+```bash
+export EXA_API_KEY=...                         # the first key
+export EXA_API_KEY_2=...                       # then _2, _3, ... in number order
+export SEARCH_KEYS_EXA='[k1, k2]'              # or a list in the SEARCH_KEYS_ form
+search config set keys.exa k1,k2               # or a list in the config file: exa = ["k1", "k2"]
+```
+
+As with one key, any `EXA_API_KEY*` variable replaces the config file's keys rather than adding to them. A search reports the key that answered in `metadata.key_slots` (`{"exa": 2}`: the second key; only for engines with more than one) and each key refused before it in `metadata.warnings`; the engine is in `providers_failed` only when every key failed, with each key's reason. Every key is tried afresh on each search: a refused key is not billed, and quotas reset on their own. `search config show` masks every key. `search doctor` probes each key (one billed call per key) and `search usage` reports each key's balance: an engine with several keys gets one row per key, each with `key` (its place in the list).
+
 ## Modes
 
 With no `-m`, the mode is `auto`, in `search "…"` and `search search -q "…"` alike. Auto applies fixed rules first: a lone URL is `extract`; "tweets", "Twitter", "on X", `x.com/` or a lone `@handle` is `social` on X; "tiktok", "instagram reels", "youtube", "youtube comments", "on threads" or "facebook page" is `social` on that platform (not "youtube api", "tiktok sdk" or "embed a youtube video"); "reddit", "subreddit", "hacker news", "on HN", `r/<name>`, "what do people say about", "opinions about" or "experiences with" is `community` (not "reddit api", "reddit stock", a unit such as "r/min", or "HN" alone); `similar to <URL>` (or "sites like", "alternatives to") is `similar`; "patent" (not "patent leather"), "prior art" or a patent number such as `US 10123456` or `EP1234567` is `patents`; "images of" or "logo for" is `images`, except system images such as Docker, container or VM images. Web-development uses ("Twitter card", "embed a tweet"), "on X axis", code at-words (`@property`, `@media`, `@types/node`) and email addresses are not X cues. When you are logged in, metasearch.sh's routing model, a small classification model, picks among the remaining modes. Without login, or when the model does not answer within 1.2 s, keyword rules decide (places, scholar, academic, people, then news), and anything else is `general`. Auto never picks `deep`, and picks `social` only on a platform cue: those two cost more and must be asked for.

@@ -2,7 +2,8 @@
 //! real request and reports health, latency, and failure cause. This is the
 //! preflight an agent fleet runs before trusting the tool: `config check`
 //! says a key exists; doctor says it works. Each check is one billed
-//! (minimal) request; scrape-only providers are probed against example.com.
+//! (minimal) request per key, so a spent fallback key shows; scrape-only
+//! providers are probed against example.com.
 //! Providers you have no key for are labelled with their transport (hosted
 //! when logged in) but not probed: a hosted probe would be charged. The
 //! `metasearch` row checks the account itself (`GET /api/v1/me`, free).
@@ -34,6 +35,10 @@ pub struct Check {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Which of the provider's keys this row probed (1 = the first), when
+    /// it has more than one: each key is probed, so a spent one shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<usize>,
     /// direct | local | hosted | none: how a search would reach it.
     pub transport: String,
     /// Account balance (the `metasearch` row only).
@@ -62,6 +67,7 @@ async fn metasearch_check(ctx: &AppContext) -> Option<Check> {
             results: None,
             category: (!ok).then(|| "auth".to_string()),
             error,
+            key: None,
             transport: "hosted".to_string(),
             balance_usd: balance,
         };
@@ -107,68 +113,29 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
                 results: None,
                 error: None,
                 category: None,
+                key: None,
                 transport: if hosted { "hosted" } else { "none" }.to_string(),
                 balance_usd: None,
             });
             continue;
         }
         let transport = provider.transport();
-        set.spawn(async move {
-            let spec = provider.spec();
-            let mode = probe_mode(spec.modes);
-            let query = if registry_input_is_url(mode) {
-                PROBE_URL
-            } else {
-                PROBE_QUERY
-            };
-            let opts = SearchOpts::default();
-            let call = Call {
-                mode,
-                query,
-                count: 1,
-                opts: &opts,
-                timeout: spec.timeout,
-            };
-            let start = Instant::now();
-            let outcome =
-                timeout(spec.timeout + Duration::from_secs(1), provider.call(&call)).await;
-            let latency = start.elapsed().as_millis();
-            match outcome {
-                Ok(Ok(output)) => Check {
-                    provider: name.to_string(),
-                    configured: true,
-                    ok: true,
-                    latency_ms: Some(latency),
-                    results: Some(output.results.len()),
-                    error: None,
-                    category: None,
-                    transport: transport.as_str().to_string(),
-                    balance_usd: None,
-                },
-                Ok(Err(e)) => Check {
-                    provider: name.to_string(),
-                    configured: true,
-                    ok: false,
-                    latency_ms: Some(latency),
-                    results: None,
-                    category: Some(e.category().as_str().to_string()),
-                    error: Some(truncate(&redact_secrets(&e.to_string()), 160)),
-                    transport: transport.as_str().to_string(),
-                    balance_usd: None,
-                },
-                Err(_) => Check {
-                    provider: name.to_string(),
-                    configured: true,
-                    ok: false,
-                    latency_ms: Some(latency),
-                    results: None,
-                    category: Some("timeout".to_string()),
-                    error: Some("timed out".to_string()),
-                    transport: transport.as_str().to_string(),
-                    balance_usd: None,
-                },
-            }
-        });
+        let keys = provider.keys();
+        let provider: Arc<dyn providers::Adapter> = Arc::from(provider);
+        // A keyless provider is probed once, with no key.
+        let slots: Vec<(Option<usize>, String)> = match keys.len() {
+            0 => vec![(None, String::new())],
+            1 => vec![(None, keys.into_iter().next().unwrap_or_default())],
+            _ => keys
+                .into_iter()
+                .enumerate()
+                .map(|(i, k)| (Some(i + 1), k))
+                .collect(),
+        };
+        for (slot, key) in slots {
+            let provider = provider.clone();
+            set.spawn(async move { probe(provider.as_ref(), name, slot, &key, transport).await });
+        }
     }
 
     // A panicked probe is skipped, not the end of the report.
@@ -177,9 +144,66 @@ pub async fn run(ctx: Arc<AppContext>) -> Vec<Check> {
             out.push(check);
         }
     }
-    out.sort_by(|a, b| a.provider.cmp(&b.provider));
+    out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.key.cmp(&b.key)));
     out.extend(account);
     out
+}
+
+/// One minimal real request with one key.
+async fn probe(
+    provider: &dyn providers::Adapter,
+    name: &'static str,
+    slot: Option<usize>,
+    key: &str,
+    transport: crate::types::Transport,
+) -> Check {
+    let spec = provider.spec();
+    let mode = probe_mode(spec.modes);
+    let query = if registry_input_is_url(mode) {
+        PROBE_URL
+    } else {
+        PROBE_QUERY
+    };
+    let opts = SearchOpts::default();
+    let call = Call {
+        mode,
+        query,
+        count: 1,
+        opts: &opts,
+        timeout: spec.timeout,
+        key,
+    };
+    let start = Instant::now();
+    let outcome = timeout(spec.timeout + Duration::from_secs(1), provider.call(&call)).await;
+    let latency = start.elapsed().as_millis();
+    let row =
+        |ok: bool, results: Option<usize>, category: Option<String>, error: Option<String>| Check {
+            provider: name.to_string(),
+            configured: true,
+            ok,
+            latency_ms: Some(latency),
+            results,
+            error,
+            category,
+            key: slot,
+            transport: transport.as_str().to_string(),
+            balance_usd: None,
+        };
+    match outcome {
+        Ok(Ok(output)) => row(true, Some(output.results.len()), None, None),
+        Ok(Err(e)) => row(
+            false,
+            None,
+            Some(e.category().as_str().to_string()),
+            Some(truncate(&redact_secrets(&e.to_string()), 160)),
+        ),
+        Err(_) => row(
+            false,
+            None,
+            Some("timeout".to_string()),
+            Some("timed out".to_string()),
+        ),
+    }
 }
 
 fn registry_input_is_url(mode: Mode) -> bool {
@@ -198,6 +222,10 @@ pub fn render_human(checks: &[Check]) {
     use crate::output::style::Paint;
     eprintln!("\n{}  provider health\n", "doctor".bold().cyan());
     for c in checks {
+        let label = match c.key {
+            Some(k) => format!("{} key {k}", c.provider),
+            None => c.provider.clone(),
+        };
         if c.provider == "metasearch" && c.ok {
             println!(
                 "  {:<12} {} {:>5}ms  balance ${:.2}",
@@ -213,7 +241,7 @@ pub fn render_human(checks: &[Check]) {
         } else if c.ok {
             println!(
                 "  {:<12} {} {:>5}ms  {} result(s)",
-                c.provider.bold(),
+                label.bold(),
                 "ok".green(),
                 c.latency_ms.unwrap_or(0),
                 c.results.unwrap_or(0)
@@ -221,7 +249,7 @@ pub fn render_human(checks: &[Check]) {
         } else {
             println!(
                 "  {:<12} {} [{}] {}",
-                c.provider.bold(),
+                label.bold(),
                 "FAIL".red(),
                 c.category.as_deref().unwrap_or("?"),
                 c.error.as_deref().unwrap_or("")

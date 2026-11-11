@@ -29,10 +29,6 @@ impl Threads {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 fn user(p: &Value) -> String {
@@ -124,8 +120,12 @@ impl Adapter for Threads {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.key().is_empty()
+        !self.keys().is_empty()
     }
 
     fn classify(&self, status: u16, _body: &str) -> Option<FailureCategory> {
@@ -133,7 +133,7 @@ impl Adapter for Threads {
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
-        let key = self.key();
+        let key = call.key;
         match call.mode {
             Mode::Social => {
                 let query = api::clean_query(call.query);
@@ -141,7 +141,7 @@ impl Adapter for Threads {
                 let r = api::get(
                     self,
                     &self.ctx,
-                    &key,
+                    key,
                     "/v1/threads/search",
                     &[("query", &query), ("start_date", &start), ("trim", "true")],
                     call.timeout,
@@ -158,7 +158,7 @@ impl Adapter for Threads {
                 let r = api::get(
                     self,
                     &self.ctx,
-                    &key,
+                    key,
                     "/v1/threads/post",
                     &[("url", url), ("trim", "true")],
                     call.timeout,

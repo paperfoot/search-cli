@@ -353,6 +353,47 @@ enum Outcome {
     TimedOut,
 }
 
+/// Which of a provider's own keys a call went out with. A key refused for
+/// its own reasons (auth, credit, rate limit) hands the call to the next
+/// one; `metadata.key_slots` names the key that answered when there are
+/// several, and a warning names each key refused before it.
+#[derive(Debug, Default)]
+struct KeyUse {
+    /// How many keys the provider has (0: keyless or hosted).
+    of: usize,
+    /// The key the outcome came from (1 = the first).
+    last: usize,
+    /// Keys refused before it, with why.
+    refused: Vec<(usize, ProviderFailure)>,
+}
+
+impl KeyUse {
+    /// One failure for the provider that names every key it went through.
+    fn failure(&self, provider: &str, mut last: ProviderFailure) -> ProviderFailure {
+        if self.refused.is_empty() {
+            return last;
+        }
+        let earlier = self
+            .refused
+            .iter()
+            .map(|(slot, f)| format!("key {slot}: {}", f.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        last.reason = if self.last == self.of {
+            format!(
+                "all {} {provider} keys failed: {earlier}; key {}: {}",
+                self.of, self.last, last.reason
+            )
+        } else {
+            format!(
+                "key {} of {}: {}; refused before it: {earlier}",
+                self.last, self.of, last.reason
+            )
+        };
+        last
+    }
+}
+
 pub(crate) async fn execute_with(
     adapters: Vec<Box<dyn Adapter>>,
     req: &Request<'_>,
@@ -409,7 +450,7 @@ pub(crate) async fn execute_with(
         .map(|a| (a.name().to_string(), a.transport().as_str().to_string()))
         .collect();
 
-    let mut outcomes: Vec<(&'static str, Outcome)> = match mode_spec.merge {
+    let mut outcomes: Vec<(&'static str, Outcome, KeyUse)> = match mode_spec.merge {
         MergeKind::Fused => {
             let cap = req.straggler_cap.map(|c| start + c);
             run_fused(plan, req, mode, deadline, cap).await
@@ -418,7 +459,7 @@ pub(crate) async fn execute_with(
     };
     // Plan order, not completion order, so fusion ties break the same way
     // whichever provider answered first.
-    outcomes.sort_by_key(|(n, _)| names.iter().position(|x| x == n));
+    outcomes.sort_by_key(|(n, _, _)| names.iter().position(|x| x == n));
 
     let mut buckets: Vec<(String, Vec<SearchResult>)> = Vec::new();
     let mut answers: Vec<Answer> = Vec::new();
@@ -427,9 +468,23 @@ pub(crate) async fn execute_with(
     let mut by_provider: BTreeMap<String, u64> = BTreeMap::new();
     let mut queried: Vec<String> = Vec::new();
     let mut hosted_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut key_slots: BTreeMap<String, usize> = BTreeMap::new();
     let mut applied = applied;
     let report: Option<HostedReport> = report_slot.and_then(|s| s.lock().ok()?.take());
-    for (name, outcome) in outcomes {
+    for (name, outcome, keys) in outcomes {
+        // A failure already names every key it went through.
+        if keys.of > 1 && !matches!(outcome, Outcome::Failed(_)) {
+            for (slot, f) in &keys.refused {
+                warnings.push(format!(
+                    "{name}: key {slot} of {} failed ({}), so the next key was tried",
+                    keys.of,
+                    f.category.as_str()
+                ));
+            }
+            if !matches!(outcome, Outcome::TimedOut) {
+                key_slots.insert(name.to_string(), keys.last);
+            }
+        }
         // The hosted call that answered: report the engines the server asked.
         if name == HOSTED_SPEC.name {
             let answered = match &outcome {
@@ -618,6 +673,7 @@ pub(crate) async fn execute_with(
             providers_cancelled: Vec::new(),
             providers_timed_out: timed_out,
             provider_results,
+            key_slots,
             cached: false,
             cache_age_secs: None,
             provider_failures: failures,
@@ -749,6 +805,9 @@ async fn rerank(client: &MetasearchClient, query: &str, results: &mut Vec<Search
     true
 }
 
+/// One provider's call. With several own keys, a key refused for its own
+/// reasons ([`providers::next_key_may_help`]) hands the call to the next key
+/// while the deadline allows; any other failure ends it.
 async fn run_one(
     adapter: &dyn Adapter,
     mode: Mode,
@@ -756,18 +815,43 @@ async fn run_one(
     count: usize,
     opts: &SearchOpts,
     deadline: Instant,
-) -> Outcome {
-    let call = Call {
-        mode,
-        query,
-        count: per_call_count(adapter, count),
-        opts,
-        timeout: time_left(deadline, adapter),
+) -> (Outcome, KeyUse) {
+    let keys = adapter.keys();
+    let mut used = KeyUse {
+        of: keys.len(),
+        ..KeyUse::default()
     };
-    match tokio::time::timeout_at(deadline.into(), adapter.call(&call)).await {
-        Ok(Ok(out)) => Outcome::Done(out),
-        Ok(Err(e)) => Outcome::Failed(e.to_provider_failure(adapter.name())),
-        Err(_) => Outcome::TimedOut,
+    let mut slot = 0;
+    loop {
+        let key = keys.get(slot).map_or("", String::as_str);
+        used.last = slot + 1;
+        let call = Call {
+            mode,
+            query,
+            count: per_call_count(adapter, count),
+            opts,
+            timeout: time_left(deadline, adapter),
+            key,
+        };
+        let failure = match tokio::time::timeout_at(deadline.into(), adapter.call(&call)).await {
+            Ok(Ok(out)) => return (Outcome::Done(out), used),
+            Ok(Err(e)) => e.to_provider_failure(adapter.name()),
+            Err(_) => return (Outcome::TimedOut, used),
+        };
+        let more = slot + 1 < keys.len();
+        let helps = providers::next_key_may_help(failure.category);
+        if more && helps && Instant::now() < deadline {
+            used.refused.push((slot + 1, failure));
+            slot += 1;
+            continue;
+        }
+        let mut failure = used.failure(adapter.name(), failure);
+        if more && helps {
+            failure
+                .reason
+                .push_str("; the search's time ran out before the next key");
+        }
+        return (Outcome::Failed(failure), used);
     }
 }
 
@@ -781,8 +865,8 @@ async fn run_fused(
     mode: Mode,
     deadline: Instant,
     straggler_cap: Option<Instant>,
-) -> Vec<(&'static str, Outcome)> {
-    let mut set: JoinSet<(&'static str, Outcome)> = JoinSet::new();
+) -> Vec<(&'static str, Outcome, KeyUse)> {
+    let mut set: JoinSet<(&'static str, Outcome, KeyUse)> = JoinSet::new();
     let mut pending: Vec<&'static str> = Vec::new();
     let mut task_names: HashMap<tokio::task::Id, &'static str> = HashMap::new();
     for adapter in plan {
@@ -792,8 +876,9 @@ async fn run_fused(
         let opts = req.opts.clone();
         let count = req.count;
         let handle = set.spawn(async move {
-            let outcome = run_one(adapter.as_ref(), mode, &query, count, &opts, deadline).await;
-            (name, outcome)
+            let (outcome, keys) =
+                run_one(adapter.as_ref(), mode, &query, count, &opts, deadline).await;
+            (name, outcome, keys)
         });
         task_names.insert(handle.id(), name);
     }
@@ -806,12 +891,12 @@ async fn run_fused(
             _ => deadline,
         };
         match tokio::time::timeout_at(until.into(), set.join_next()).await {
-            Ok(Some(Ok((name, outcome)))) => {
+            Ok(Some(Ok((name, outcome, keys)))) => {
                 pending.retain(|n| *n != name);
                 if let Outcome::Done(out) = &outcome {
                     answered |= !out.results.is_empty() || !out.answers.is_empty();
                 }
-                outcomes.push((name, outcome));
+                outcomes.push((name, outcome, keys));
             }
             // A crashed adapter is a failure of that provider, not a timeout,
             // and its cost is unknown, so nothing is charged for it.
@@ -828,6 +913,7 @@ async fn run_fused(
                             reason: format!("{name} crashed inside the CLI"),
                             retryable: false,
                         }),
+                        KeyUse::default(),
                     ));
                 }
             }
@@ -840,7 +926,11 @@ async fn run_fused(
             }
         }
     }
-    outcomes.extend(pending.into_iter().map(|n| (n, Outcome::TimedOut)));
+    outcomes.extend(
+        pending
+            .into_iter()
+            .map(|n| (n, Outcome::TimedOut, KeyUse::default())),
+    );
     outcomes
 }
 
@@ -850,7 +940,7 @@ async fn run_chain(
     req: &Request<'_>,
     mode: Mode,
     deadline: Instant,
-) -> Vec<(&'static str, Outcome)> {
+) -> Vec<(&'static str, Outcome, KeyUse)> {
     let mut outcomes = Vec::new();
     for adapter in plan {
         let name = adapter.name();
@@ -861,10 +951,14 @@ async fn run_chain(
         // found blocked, paywalled (402) or gone (404/410) is checked here.
         // The gate's errors are BadRequest or Rejected: never billed.
         if let Err(e) = registry::rung_gate(name, req.query) {
-            outcomes.push((name, Outcome::Failed(e.to_provider_failure(name))));
+            outcomes.push((
+                name,
+                Outcome::Failed(e.to_provider_failure(name)),
+                KeyUse::default(),
+            ));
             continue;
         }
-        match run_one(
+        let (outcome, keys) = run_one(
             adapter.as_ref(),
             mode,
             req.query,
@@ -872,21 +966,21 @@ async fn run_chain(
             req.opts,
             deadline,
         )
-        .await
-        {
+        .await;
+        match outcome {
             Outcome::Done(out) if out.results.is_empty() => {
-                outcomes.push((name, Outcome::Done(out)));
+                outcomes.push((name, Outcome::Done(out), keys));
             }
             Outcome::Done(out) => match registry::accept(mode, &out) {
                 Ok(()) => {
-                    outcomes.push((name, Outcome::Done(out)));
+                    outcomes.push((name, Outcome::Done(out), keys));
                     break;
                 }
                 Err(reason) => {
-                    outcomes.push((name, Outcome::Rejected(rejected(name, reason), out)))
+                    outcomes.push((name, Outcome::Rejected(rejected(name, reason), out), keys))
                 }
             },
-            other => outcomes.push((name, other)),
+            other => outcomes.push((name, other, keys)),
         }
     }
     outcomes
@@ -1249,6 +1343,278 @@ mod tests {
         execute_with(adapters, &req).await
     }
 
+    /// A provider with several keys; each key answers or fails its own way.
+    struct Keyed {
+        spec: &'static ProviderSpec,
+        keys: Vec<(&'static str, Option<FailureCategory>)>,
+        tried: Arc<Mutex<Vec<String>>>,
+        /// How long each call takes before it answers or fails.
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for Keyed {
+        fn spec(&self) -> &'static ProviderSpec {
+            self.spec
+        }
+        fn is_configured(&self) -> bool {
+            !self.keys.is_empty()
+        }
+        fn keys(&self) -> Vec<String> {
+            self.keys.iter().map(|(k, _)| k.to_string()).collect()
+        }
+        async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+            self.tried.lock().unwrap().push(call.key.to_string());
+            tokio::time::sleep(self.delay).await;
+            let (key, fails) = self.keys.iter().find(|(k, _)| *k == call.key).unwrap();
+            match fails {
+                // The upstream echoes the key, as some do in error bodies:
+                // after a marker, and bare.
+                Some(category) => Err(SearchError::Upstream {
+                    provider: self.spec.name,
+                    status: 402,
+                    category: *category,
+                    message: format!("HTTP 402: key={key} refused, Bearer {key}; {key} is spent"),
+                }),
+                None => Ok(Output {
+                    results: vec![result(
+                        &format!("https://{}.example/{key}", self.spec.name),
+                        self.spec.name,
+                    )],
+                    ..Output::default()
+                }),
+            }
+        }
+    }
+
+    fn keyed(
+        spec: &'static ProviderSpec,
+        keys: &[(&'static str, Option<FailureCategory>)],
+    ) -> (Box<dyn Adapter>, Arc<Mutex<Vec<String>>>) {
+        slow_keyed(spec, keys, 0)
+    }
+
+    fn slow_keyed(
+        spec: &'static ProviderSpec,
+        keys: &[(&'static str, Option<FailureCategory>)],
+        delay_ms: u64,
+    ) -> (Box<dyn Adapter>, Arc<Mutex<Vec<String>>>) {
+        let tried = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Keyed {
+            spec,
+            keys: keys.to_vec(),
+            tried: tried.clone(),
+            delay: Duration::from_millis(delay_ms),
+        };
+        (Box::new(adapter), tried)
+    }
+
+    fn tried(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        log.lock().unwrap().clone()
+    }
+
+    const K1: &str = "exa-first-0123456789";
+    const K2: &str = "exa-second-0123456789";
+    const K3: &str = "exa-third-0123456789";
+
+    /// A key refused, out of credit or rate limited hands the call to the
+    /// next key in the same search; the engine keeps its results, and the
+    /// response names the key that answered and the ones refused before it.
+    #[tokio::test]
+    async fn a_refused_key_hands_the_call_to_the_next() {
+        use FailureCategory::*;
+        for refusal in [BillingQuota, Auth, RateLimit] {
+            let (exa, log) = keyed(
+                &exa::SPEC,
+                &[(K1, Some(refusal)), (K2, Some(BillingQuota)), (K3, None)],
+            );
+            let (others, _) = fakes(&[(&parallel::SPEC, ok(0, 2, "p"))]);
+            let mut plan = vec![exa];
+            plan.extend(others);
+            let resp = search(plan, Mode::General, 10, None, 5_000).await.unwrap();
+            assert_eq!(tried(&log), [K1, K2, K3], "{refusal:?}");
+            assert!(resp.metadata.providers_failed.is_empty());
+            assert_eq!(resp.metadata.provider_results.get("exa"), Some(&1));
+            // Only providers with several keys get a slot.
+            assert_eq!(
+                resp.metadata.key_slots,
+                BTreeMap::from([("exa".to_string(), 3)])
+            );
+            let warnings = resp.metadata.warnings.join("\n");
+            assert!(
+                warnings.contains(&format!("exa: key 1 of 3 failed ({})", refusal.as_str())),
+                "{warnings}"
+            );
+            assert!(warnings.contains("exa: key 2 of 3 failed (billing_quota)"));
+        }
+    }
+
+    /// A timeout, a server error, a bad request or a parse failure would
+    /// fail the same way with any key (and a timeout was billed): the next
+    /// key is not tried.
+    #[tokio::test]
+    async fn other_failures_do_not_try_another_key() {
+        use FailureCategory::*;
+        for category in [Server, Timeout, BadRequest, Parse, Network, Other] {
+            let (exa, log) = keyed(&exa::SPEC, &[(K1, Some(category)), (K2, None)]);
+            let err = search(vec![exa], Mode::General, 10, None, 5_000)
+                .await
+                .unwrap_err();
+            assert_eq!(tried(&log), [K1], "{category:?}");
+            let SearchError::AllProvidersFailed { failed, .. } = err else {
+                panic!("{category:?}")
+            };
+            assert_eq!(failed[0].category, category);
+            assert!(!failed[0].reason.contains("keys"), "{}", failed[0].reason);
+        }
+    }
+
+    /// A key refused, then another failure that is not about the key: the
+    /// failure names both, and the third key is never sent.
+    #[tokio::test]
+    async fn a_later_failure_not_about_the_key_ends_the_rotation() {
+        use FailureCategory::*;
+        let (exa, log) = keyed(
+            &exa::SPEC,
+            &[(K1, Some(Auth)), (K2, Some(Server)), (K3, None)],
+        );
+        let err = search(vec![exa], Mode::General, 10, None, 5_000)
+            .await
+            .unwrap_err();
+        assert_eq!(tried(&log), [K1, K2]);
+        let SearchError::AllProvidersFailed { failed, .. } = err else {
+            panic!()
+        };
+        assert_eq!(failed[0].category, Server);
+        assert!(
+            failed[0].reason.starts_with("key 2 of 3: ")
+                && failed[0].reason.contains("refused before it: key 1: "),
+            "{}",
+            failed[0].reason
+        );
+    }
+
+    /// Every key spent: one failure for the engine, naming each key's cause,
+    /// with the last key's category; the rest of the search still answers.
+    #[tokio::test]
+    async fn every_key_failing_is_one_failure_naming_each_key() {
+        use FailureCategory::*;
+        let (exa, log) = keyed(&exa::SPEC, &[(K1, Some(BillingQuota)), (K2, Some(Auth))]);
+        let (others, _) = fakes(&[(&parallel::SPEC, ok(0, 2, "p"))]);
+        let mut plan = vec![exa];
+        plan.extend(others);
+        let resp = search(plan, Mode::General, 10, None, 5_000).await.unwrap();
+        assert_eq!(tried(&log), [K1, K2]);
+        assert_eq!(resp.metadata.providers_failed, ["exa"]);
+        assert!(resp.metadata.key_slots.is_empty());
+        let f = &resp.metadata.provider_failures[0];
+        assert_eq!(f.category, Auth);
+        assert!(
+            f.reason.starts_with("all 2 exa keys failed: key 1: ")
+                && f.reason.contains("; key 2: "),
+            "{}",
+            f.reason
+        );
+        // The failure already names every key: no warning repeats it.
+        assert!(
+            resp.metadata.warnings.is_empty(),
+            "{:?}",
+            resp.metadata.warnings
+        );
+
+        // Alone, the spent keys are the whole search's failure (exit 2:
+        // the user has to act).
+        let (exa, _) = keyed(&exa::SPEC, &[(K1, Some(BillingQuota)), (K2, Some(Auth))]);
+        let err = search(vec![exa], Mode::General, 10, None, 5_000)
+            .await
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    /// One key: a refusal is reported exactly as before, with no key slot.
+    #[tokio::test]
+    async fn one_key_keeps_the_old_report() {
+        let (exa, log) = keyed(&exa::SPEC, &[(K1, Some(FailureCategory::BillingQuota))]);
+        let (others, _) = fakes(&[(&parallel::SPEC, ok(0, 2, "p"))]);
+        let mut plan = vec![exa];
+        plan.extend(others);
+        let resp = search(plan, Mode::General, 10, None, 5_000).await.unwrap();
+        assert_eq!(tried(&log), [K1]);
+        assert!(resp.metadata.key_slots.is_empty());
+        assert!(resp.metadata.warnings.is_empty());
+        let reason = &resp.metadata.provider_failures[0].reason;
+        assert!(
+            reason.starts_with("API error from exa: HTTP 402"),
+            "{reason}"
+        );
+    }
+
+    /// No key value reaches the response, its warnings or its failures,
+    /// even when the upstream echoes the key back bare: every key is
+    /// registered for redaction, fallbacks included, as main.rs does with
+    /// `providers::every_key`.
+    #[tokio::test]
+    async fn no_key_reaches_the_response() {
+        use FailureCategory::*;
+        crate::errors::register_secrets([K1, K2, K3].map(String::from));
+        let (exa, _) = keyed(&exa::SPEC, &[(K1, Some(BillingQuota)), (K2, None)]);
+        let resp = search(vec![exa], Mode::General, 10, None, 5_000)
+            .await
+            .unwrap();
+        // The fake puts the serving key in its result URL; drop that row.
+        let text = serde_json::to_string(&resp.metadata).unwrap();
+        assert!(!text.contains(K1) && !text.contains(K2), "{text}");
+
+        let (exa, _) = keyed(&exa::SPEC, &[(K1, Some(BillingQuota)), (K2, Some(Auth))]);
+        let err = search(vec![exa], Mode::General, 10, None, 5_000)
+            .await
+            .unwrap_err();
+        let SearchError::AllProvidersFailed { failed, .. } = err else {
+            panic!()
+        };
+        let text = serde_json::to_string(&failed).unwrap();
+        assert!(!text.contains(K1) && !text.contains(K2), "{text}");
+    }
+
+    /// Rotation stops at the mode deadline: a key refused after it is the
+    /// failure, and the next key is never sent.
+    #[tokio::test]
+    async fn rotation_stops_at_the_deadline() {
+        use FailureCategory::*;
+        let (exa, log) = slow_keyed(&exa::SPEC, &[(K1, Some(BillingQuota)), (K2, None)], 150);
+        let resp = search(vec![exa], Mode::Similar, 5, None, 200).await;
+        // Key 1 answered at 150 ms; key 2 would end after the 200 ms deadline
+        // and is sent, then still running at the deadline.
+        assert_eq!(tried(&log), [K1, K2]);
+        assert!(resp.is_err());
+
+        let (exa, log) = slow_keyed(&exa::SPEC, &[(K1, Some(BillingQuota)), (K2, None)], 250);
+        let err = search(vec![exa], Mode::Similar, 5, None, 200)
+            .await
+            .unwrap_err();
+        // Key 1 was still running at the deadline: key 2 never went out.
+        assert_eq!(tried(&log), [K1]);
+        let SearchError::AllProvidersFailed { failed, .. } = err else {
+            panic!()
+        };
+        assert_eq!(failed[0].category, Timeout);
+    }
+
+    /// Chain and single modes rotate keys the same way (similar here).
+    #[tokio::test]
+    async fn single_mode_rotates_keys_too() {
+        let (exa, log) = keyed(
+            &exa::SPEC,
+            &[(K1, Some(FailureCategory::BillingQuota)), (K2, None)],
+        );
+        let resp = search(vec![exa], Mode::Similar, 5, None, 5_000)
+            .await
+            .unwrap();
+        assert_eq!(tried(&log), [K1, K2]);
+        assert_eq!(resp.metadata.key_slots.get("exa"), Some(&2));
+        assert_eq!(resp.results.len(), 1);
+    }
+
     /// One slow platform does not hold up the social fan-out: once the wait
     /// has passed and one provider answered, the straggler is dropped (and
     /// its sent call counted as spent); with nothing answered yet, the
@@ -1356,6 +1722,7 @@ mod tests {
             count: 10,
             opts,
             timeout: Duration::from_secs(1),
+            key: "",
         })
     }
 

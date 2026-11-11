@@ -60,6 +60,9 @@ pub struct Call<'a> {
     pub count: u16,
     pub opts: &'a SearchOpts,
     pub timeout: Duration,
+    /// The key this call sends: one of [`Adapter::keys`], chosen by the
+    /// engine; empty for keyless and hosted calls.
+    pub key: &'a str,
 }
 
 #[derive(Debug, Default)]
@@ -75,6 +78,11 @@ pub trait Adapter: Send + Sync {
     fn spec(&self) -> &'static ProviderSpec;
     /// Own key present (env > SEARCH_KEYS_* > file), or keyless.
     fn is_configured(&self) -> bool;
+    /// The own keys, in the order the engine tries them (see
+    /// [`super::keys_for`]); empty for keyless and hosted adapters.
+    fn keys(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// One upstream call for `call.mode`. Errors carry a FailureCategory (via `classify` for non-2xx bodies).
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError>;
     /// Body-aware classification of a non-2xx response, tried before the status-only default.
