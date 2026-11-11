@@ -36,10 +36,6 @@ impl Brave {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 const BASE: &str = "https://api.search.brave.com/res/v1";
@@ -100,8 +96,12 @@ impl Adapter for Brave {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     /// Brave names the cause in `error.code`. Its per-second 429 also lists
@@ -141,11 +141,11 @@ impl Adapter for Brave {
             return Err(SearchError::AuthMissing { provider: "brave" });
         }
         let per_call = SPEC.price.per_call as u64;
-        let key = self.api_key();
+        let key = call.key;
         let client = &self.ctx.client;
         match call.mode {
             Mode::News => {
-                let body: BraveSearch = self.get(call, || news_request(client, &key, call)).await?;
+                let body: BraveSearch = self.get(call, || news_request(client, key, call)).await?;
                 Ok(Output {
                     results: news_results(body),
                     cost_micros: Some(per_call),
@@ -156,8 +156,8 @@ impl Adapter for Brave {
             // provider call, so `-p` governs both and the cost is one line.
             Mode::Deep => {
                 let (web, grounding) = tokio::join!(
-                    self.get::<BraveSearch, _>(call, || web_request(client, &key, call)),
-                    self.get::<BraveContext, _>(call, || context_request(client, &key, call)),
+                    self.get::<BraveSearch, _>(call, || web_request(client, key, call)),
+                    self.get::<BraveContext, _>(call, || context_request(client, key, call)),
                 );
                 // Each half that reached Brave is billed, answered or not.
                 let billed = billed_half(&web) + billed_half(&grounding);
@@ -182,7 +182,7 @@ impl Adapter for Brave {
                 })
             }
             _ => {
-                let body: BraveSearch = self.get(call, || web_request(client, &key, call)).await?;
+                let body: BraveSearch = self.get(call, || web_request(client, key, call)).await?;
                 Ok(Output {
                     results: web_results(body),
                     cost_micros: Some(per_call),
@@ -457,6 +457,7 @@ mod tests {
             count,
             opts,
             timeout: Duration::from_secs(1),
+            key: "",
         }
     }
 

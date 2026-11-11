@@ -21,6 +21,10 @@ pub struct ProviderUsage {
     pub supported: bool,
     /// Whether the provider is configured locally (has a key).
     pub configured: bool,
+    /// Which of the provider's keys this row reports (1 = the first), when
+    /// it has more than one: each key is its own account and balance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<usize>,
     /// direct | local | hosted | none: how a search would reach it.
     pub transport: String,
     /// Provider-reported usage figures, normalized where possible. Keys vary
@@ -32,11 +36,31 @@ pub struct ProviderUsage {
     pub error: Option<String>,
 }
 
+impl ProviderUsage {
+    /// The provider's name, with the key's number when it has several.
+    pub fn label(&self) -> String {
+        match self.key {
+            Some(k) => format!("{} key {k}", self.provider),
+            None => self.provider.clone(),
+        }
+    }
+
+    /// The name its balance history is kept under: the first key keeps the
+    /// provider's bare name, as before fallback keys, so its series goes on.
+    fn history_name(&self) -> String {
+        match self.key {
+            Some(k) if k > 1 => self.label(),
+            _ => self.provider.clone(),
+        }
+    }
+}
+
 fn unsupported(name: &str, configured: bool, transport: &str) -> ProviderUsage {
     ProviderUsage {
         provider: name.to_string(),
         supported: false,
         configured,
+        key: None,
         transport: transport.to_string(),
         data: None,
         error: None,
@@ -49,6 +73,7 @@ async fn metasearch_usage(ctx: &AppContext) -> Option<ProviderUsage> {
         provider: "metasearch".to_string(),
         supported: true,
         configured: true,
+        key: None,
         transport: "hosted".to_string(),
         data,
         error,
@@ -296,45 +321,38 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
                         provider: name.to_string(),
                         supported: true,
                         configured: false,
+                        key: None,
                         transport: transport.to_string(),
                         data: None,
                         error: None,
                     });
                     continue;
                 }
-                let transport = transport.to_string();
-                let key = resolve_provider_key(&ctx, name);
-                let ctx2 = ctx.clone();
-                let name = name.to_string();
-                set.spawn(async move {
-                    let result = timeout(USAGE_TIMEOUT, fetch(&ctx2, key)).await;
-                    match result {
-                        Ok(Ok(data)) => ProviderUsage {
+                let keys = p.keys();
+                let several = keys.len() > 1;
+                for (i, key) in keys.into_iter().enumerate() {
+                    let transport = transport.to_string();
+                    let ctx2 = ctx.clone();
+                    let name = name.to_string();
+                    let slot = several.then_some(i + 1);
+                    set.spawn(async move {
+                        let result = timeout(USAGE_TIMEOUT, fetch(&ctx2, key)).await;
+                        let (data, error) = match result {
+                            Ok(Ok(data)) => (Some(data), None),
+                            Ok(Err(e)) => (None, Some(crate::errors::redact_secrets(&e))),
+                            Err(_) => (None, Some("timed out".to_string())),
+                        };
+                        ProviderUsage {
                             provider: name,
                             supported: true,
                             configured: true,
+                            key: slot,
                             transport,
-                            data: Some(data),
-                            error: None,
-                        },
-                        Ok(Err(e)) => ProviderUsage {
-                            provider: name,
-                            supported: true,
-                            configured: true,
-                            transport,
-                            data: None,
-                            error: Some(crate::errors::redact_secrets(&e)),
-                        },
-                        Err(_) => ProviderUsage {
-                            provider: name,
-                            supported: true,
-                            configured: true,
-                            transport,
-                            data: None,
-                            error: Some("timed out".to_string()),
-                        },
-                    }
-                });
+                            data,
+                            error,
+                        }
+                    });
+                }
             }
         }
     }
@@ -344,25 +362,17 @@ pub async fn collect(ctx: Arc<AppContext>) -> Vec<ProviderUsage> {
             out.push(u);
         }
     }
-    out.sort_by(|a, b| a.provider.cmp(&b.provider));
+    out.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.key.cmp(&b.key)));
     out.extend(account);
 
     // Snapshot balances so `search stats` can report measured burn over time.
     let snapshot: serde_json::Map<String, serde_json::Value> = out
         .iter()
-        .filter_map(|u| u.data.clone().map(|d| (u.provider.clone(), d)))
+        .filter_map(|u| u.data.clone().map(|d| (u.history_name(), d)))
         .collect();
     if !snapshot.is_empty() {
         crate::logging::log_balances(&serde_json::Value::Object(snapshot));
     }
 
     out
-}
-
-/// The provider's effective key, with the same env > config precedence the
-/// adapters use.
-fn resolve_provider_key(ctx: &AppContext, name: &str) -> String {
-    providers::find(name)
-        .map(|spec| providers::key_for(&ctx.config, spec))
-        .unwrap_or_default()
 }

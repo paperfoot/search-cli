@@ -11,6 +11,11 @@
 #
 # Set keys without leaving them in shell history:
 #   echo "$KEY" | search config set keys.brave -
+#
+# Fallback keys: a list is tried in order, the next key whenever one is
+# refused, out of credit or rate limited (exa = ["k1", "k2"]). In the
+# environment: EXA_API_KEY, then EXA_API_KEY_2, _3, ... (these replace the
+# file's list), or SEARCH_KEYS_EXA='[k1, k2]'.
 
 [keys]
 serper = ""

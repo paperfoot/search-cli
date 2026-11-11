@@ -67,10 +67,6 @@ impl Parallel {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 /// The v1 request: `objective`, `search_queries`, `mode` and
@@ -168,8 +164,19 @@ impl Adapter for Parallel {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
+    }
+
+    /// Parallel's error reference: 402 is "insufficient credit in account"
+    /// (it carries no code). Its 429 means "rate limited or quota exceeded",
+    /// which cannot be told apart, so it never marks a key.
+    fn spent(&self, status: u16, _body: &str) -> bool {
+        status == 402
     }
 
     fn sent_cost(&self, mode: Mode) -> u64 {
@@ -184,11 +191,11 @@ impl Adapter for Parallel {
         }
         let body = body(call);
         let client = &self.ctx.client;
-        let api_key = self.api_key();
+        let api_key = call.key;
         let resp = super::send(self, call.timeout, || {
             client
                 .post(ENDPOINT)
-                .header("x-api-key", api_key.as_str())
+                .header("x-api-key", api_key)
                 .json(&body)
         })
         .await?;
@@ -210,6 +217,7 @@ mod tests {
             count,
             opts,
             timeout: Duration::from_secs(5),
+            key: "",
         }
     }
 

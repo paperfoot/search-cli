@@ -42,10 +42,6 @@ impl SerpApi {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 /// Google Scholar honours `num` from 1 to 20 (SerpApi's google_scholar
@@ -163,8 +159,12 @@ impl Adapter for SerpApi {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     fn classify(&self, _status: u16, body: &str) -> Option<FailureCategory> {
@@ -177,9 +177,9 @@ impl Adapter for SerpApi {
                 provider: "serpapi",
             });
         }
-        let key = self.api_key();
+        let key = call.key;
         let client = &self.ctx.client;
-        let resp = super::send(self, call.timeout, || request(client, &key, call)).await?;
+        let resp = super::send(self, call.timeout, || request(client, key, call)).await?;
         // A decode error would print the URL, key included.
         let body: Value = resp
             .json()
@@ -207,6 +207,7 @@ mod tests {
             count: 50,
             opts: &opts,
             timeout: Duration::from_secs(1),
+            key: "",
         };
         let req = request(&reqwest::Client::new(), "test-key", &call)
             .build()

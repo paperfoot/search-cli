@@ -54,10 +54,6 @@ impl Serper {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 fn endpoint(mode: Mode) -> &'static str {
@@ -287,8 +283,12 @@ impl Adapter for Serper {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     /// Serper answers an empty balance with a 400 "Not enough credits".
@@ -307,9 +307,9 @@ impl Adapter for Serper {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "serper" });
         }
-        let key = self.api_key();
+        let key = call.key;
         let client = &self.ctx.client;
-        let resp = super::send(self, call.timeout, || request(client, &key, call)).await?;
+        let resp = super::send(self, call.timeout, || request(client, key, call)).await?;
         let body: Value = resp.json().await?;
         Ok(parse(call.mode, &body))
     }
@@ -328,6 +328,7 @@ mod tests {
             count,
             opts,
             timeout: Duration::from_secs(1),
+            key: "",
         };
         let req = request(&reqwest::Client::new(), "test-key", &call)
             .build()

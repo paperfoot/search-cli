@@ -38,10 +38,6 @@ impl Firecrawl {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 /// Firecrawl bills one credit per page and one per PDF page; this caps a
@@ -89,8 +85,12 @@ impl Adapter for Firecrawl {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
@@ -103,7 +103,7 @@ impl Adapter for Firecrawl {
         crate::registry::rung_gate("firecrawl", call.query)?;
         let url = call.query;
         let client = &self.ctx.client;
-        let auth = format!("Bearer {}", self.api_key());
+        let auth = format!("Bearer {}", call.key);
         let body = scrape_body(url);
 
         let resp = super::send(self, call.timeout, || {

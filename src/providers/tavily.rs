@@ -40,10 +40,6 @@ impl Tavily {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 /// Academic and deep buy the advanced depth; general and news the basic one.
@@ -163,8 +159,12 @@ impl Adapter for Tavily {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     /// 432 is the plan limit and 433 the pay-as-you-go limit: billing, not a
@@ -186,9 +186,9 @@ impl Adapter for Tavily {
         if !self.is_configured() {
             return Err(SearchError::AuthMissing { provider: "tavily" });
         }
-        let key = self.api_key();
+        let key = call.key;
         let client = &self.ctx.client;
-        let resp = super::send(self, call.timeout, || request(client, &key, call)).await?;
+        let resp = super::send(self, call.timeout, || request(client, key, call)).await?;
         let resp: TavilyResponse = resp.json().await?;
         Ok(parse(call.mode, resp))
     }
@@ -211,6 +211,7 @@ mod tests {
             count: 50,
             opts,
             timeout: Duration::from_secs(1),
+            key: "",
         };
         let req = request(&reqwest::Client::new(), "tvly-test", &call)
             .build()

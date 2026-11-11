@@ -200,7 +200,12 @@ pub struct StatsArgs {
 #[derive(Subcommand)]
 pub enum CacheAction {
     /// Delete all cached query results
-    Clear,
+    Clear {
+        /// Instead, forget which keys were answered as out of credit, so
+        /// every key goes back to its place in the order
+        #[arg(long)]
+        keys: bool,
+    },
 }
 
 #[derive(Parser)]
@@ -318,7 +323,8 @@ pub enum ConfigAction {
         /// Config key (e.g. keys.brave, settings.count, metasearch.url)
         key: String,
         /// Value to set. Pass "-" to read it from stdin, keeping secrets out
-        /// of shell history and process listings
+        /// of shell history and process listings. For keys.<provider>,
+        /// comma-separated keys (k1,k2) are fallbacks tried in order
         value: String,
     },
     /// Health-check which providers are configured and ready

@@ -24,6 +24,17 @@ pub enum SearchError {
         message: String,
     },
 
+    /// The provider answered that this key's credit or quota is used up, in
+    /// the answer its documentation gives for that (`Adapter::spent`), not a
+    /// guess from words in the body. Category `billing_quota`, code
+    /// `credits_exhausted`; the engine remembers the key (`spent.rs`).
+    #[error("API error from {provider}: {message}")]
+    CreditsExhausted {
+        provider: &'static str,
+        status: u16,
+        message: String,
+    },
+
     #[error("Authentication missing for {provider}")]
     AuthMissing { provider: &'static str },
 
@@ -42,6 +53,8 @@ pub enum SearchError {
     AllProvidersFailed {
         failed: Vec<ProviderFailure>,
         cost: Option<CostSummary>,
+        /// Keys marked out of credit, as on a success envelope.
+        out_of_credit_keys: Vec<crate::spent::SpentKey>,
     },
 
     #[error("DNS resolver error: {0}")]
@@ -69,7 +82,11 @@ impl SearchError {
             Self::AllProvidersFailed { failed, .. } => exit_code_for_failures(failed),
             #[cfg(feature = "stealth")]
             Self::Wreq(_) => 1,
-            Self::Api { .. } | Self::Upstream { .. } | Self::Http(_) | Self::Resolver(_) => 1,
+            Self::Api { .. }
+            | Self::Upstream { .. }
+            | Self::CreditsExhausted { .. }
+            | Self::Http(_)
+            | Self::Resolver(_) => 1,
             Self::Json(_) | Self::Io(_) => 1,
         }
     }
@@ -79,6 +96,7 @@ impl SearchError {
             Self::Api { code, .. } => code,
             // The code follows the cause, so a 429 reads "rate_limited"
             // again instead of a generic "api_error" for every non-2xx.
+            Self::CreditsExhausted { .. } => "credits_exhausted",
             Self::Upstream { category, .. } => match category {
                 FailureCategory::Auth => "auth_failed",
                 FailureCategory::BillingQuota => "insufficient_credits",
@@ -109,6 +127,7 @@ impl SearchError {
         match self {
             Self::AuthMissing { .. } => C::Auth,
             Self::Upstream { category, .. } => *category,
+            Self::CreditsExhausted { .. } => C::BillingQuota,
             Self::Api { status, code, .. } => {
                 if *code == "json_error" {
                     return C::Parse;
@@ -140,7 +159,7 @@ impl SearchError {
     pub fn http_status(&self) -> Option<u16> {
         match self {
             Self::Api { status, .. } => *status,
-            Self::Upstream { status, .. } => Some(*status),
+            Self::Upstream { status, .. } | Self::CreditsExhausted { status, .. } => Some(*status),
             Self::Http(e) => e.status().map(|s| s.as_u16()),
             _ => None,
         }
@@ -185,9 +204,13 @@ impl SearchError {
     }
 
     pub fn to_error_response(&self) -> ErrorResponse {
-        let (provider_failures, cost) = match self {
-            Self::AllProvidersFailed { failed, cost } => (failed.clone(), cost.clone()),
-            _ => (Vec::new(), None),
+        let (provider_failures, cost, out_of_credit_keys) = match self {
+            Self::AllProvidersFailed {
+                failed,
+                cost,
+                out_of_credit_keys,
+            } => (failed.clone(), cost.clone(), out_of_credit_keys.clone()),
+            _ => (Vec::new(), None, Vec::new()),
         };
         ErrorResponse {
             version: ENVELOPE_VERSION.to_string(),
@@ -198,6 +221,7 @@ impl SearchError {
                 suggestion: self.suggestion(),
                 provider_failures,
                 cost,
+                out_of_credit_keys,
             },
         }
     }
@@ -504,7 +528,8 @@ mod tests {
         assert_eq!(
             SearchError::AllProvidersFailed {
                 failed: auth,
-                cost: None
+                cost: None,
+                out_of_credit_keys: Vec::new(),
             }
             .exit_code(),
             2
@@ -513,7 +538,8 @@ mod tests {
         assert_eq!(
             SearchError::AllProvidersFailed {
                 failed: rate,
-                cost: None
+                cost: None,
+                out_of_credit_keys: Vec::new(),
             }
             .exit_code(),
             4
@@ -525,7 +551,8 @@ mod tests {
         assert_eq!(
             SearchError::AllProvidersFailed {
                 failed: mixed,
-                cost: None
+                cost: None,
+                out_of_credit_keys: Vec::new(),
             }
             .exit_code(),
             1
@@ -573,7 +600,12 @@ mod tests {
         }
         .to_provider_failure("brave")];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed, cost: None }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed,
+                cost: None,
+                out_of_credit_keys: Vec::new(),
+            }
+            .exit_code(),
             4
         );
         // A key named like a credential is not an auth message either.

@@ -30,10 +30,6 @@ impl YouTube {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 fn channel(v: &Value) -> String {
@@ -150,8 +146,12 @@ impl Adapter for YouTube {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.key().is_empty()
+        !self.keys().is_empty()
     }
 
     fn classify(&self, status: u16, _body: &str) -> Option<FailureCategory> {
@@ -159,7 +159,7 @@ impl Adapter for YouTube {
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
-        let key = self.key();
+        let key = call.key;
         match call.mode {
             Mode::Social => {
                 let query = api::clean_query(call.query);
@@ -173,7 +173,7 @@ impl Adapter for YouTube {
                 let r = api::get(
                     self,
                     &self.ctx,
-                    &key,
+                    key,
                     "/v1/youtube/search",
                     &[("query", &query), ("uploadDate", upload)],
                     call.timeout,
@@ -188,7 +188,7 @@ impl Adapter for YouTube {
             Mode::Extract | Mode::Scrape => {
                 let url = call.query.trim();
                 let get = |path: &'static str| {
-                    api::get(self, &self.ctx, &key, path, &[("url", url)], call.timeout)
+                    api::get(self, &self.ctx, key, path, &[("url", url)], call.timeout)
                 };
                 // A missing caption track costs nothing.
                 let (video, transcript, comments) = tokio::join!(

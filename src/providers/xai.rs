@@ -61,10 +61,6 @@ impl Xai {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 /// X handles from the domain filters, bare (no `@`). Deep mode's domains are
@@ -435,8 +431,12 @@ impl Adapter for Xai {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
@@ -448,9 +448,9 @@ impl Adapter for Xai {
         }
         let body = body(call);
         let client = &self.ctx.client;
-        let key = self.api_key();
+        let key = call.key;
         let resp = super::send(self, call.timeout, || {
-            client.post(ENDPOINT).bearer_auth(&key).json(&body)
+            client.post(ENDPOINT).bearer_auth(key).json(&body)
         })
         .await?;
         let data: XaiResponse = resp.json().await?;
@@ -470,6 +470,7 @@ mod tests {
             count,
             opts,
             timeout: Duration::from_secs(5),
+            key: "",
         }
     }
 

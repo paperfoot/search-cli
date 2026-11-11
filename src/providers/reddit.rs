@@ -987,14 +987,17 @@ impl Reddit {
     /// hosted when metasearch.sh offers Reddit.
     async fn global_search(&self, call: &Call<'_>) -> Result<Output, String> {
         use super::social_api as api;
-        let key = super::resolve_key("", api::ENV_KEYS[0]);
-        if !key.is_empty() {
+        // The platforms' keys, fallbacks included: a key refused or out of
+        // credit hands the call to the next, as in the engine.
+        let keys = super::keys_for(&self.ctx.config, &super::tiktok::SPEC);
+        let mut refused: Vec<String> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
             // -f is already one of day, week, month, year.
             let timeframe = call.opts.freshness.as_deref().unwrap_or_default();
             let r = api::get(
                 self,
                 &self.ctx,
-                &key,
+                key,
                 "/v1/reddit/search",
                 &[
                     ("query", call.query),
@@ -1003,13 +1006,27 @@ impl Reddit {
                 ],
                 call.timeout,
             )
-            .await
-            .map_err(|e| format!("global search: {e}"))?;
-            return Ok(api::search_output(
-                parse_global_search(&r.body),
-                call.count,
-                r.credits,
-            ));
+            .await;
+            match r {
+                Ok(r) => {
+                    return Ok(api::search_output(
+                        parse_global_search(&r.body),
+                        call.count,
+                        r.credits,
+                    ))
+                }
+                Err(e) if i + 1 < keys.len() && super::next_key_may_help(e.category()) => {
+                    refused.push(format!("key {}: {e}", i + 1));
+                }
+                Err(e) if refused.is_empty() => return Err(format!("global search: {e}")),
+                Err(e) => {
+                    return Err(format!(
+                        "global search: key {}: {e}; refused before it: {}",
+                        i + 1,
+                        refused.join("; ")
+                    ))
+                }
+            }
         }
         let client = crate::hosted::MetasearchClient::new(&self.ctx)
             .ok()

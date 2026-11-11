@@ -372,6 +372,7 @@ mod tests {
             count: 5,
             opts: &opts,
             timeout: Duration::from_secs(1),
+            key: "",
         };
         assert_eq!(search_params(&call)[0].1, "mechanical keyboard");
     }

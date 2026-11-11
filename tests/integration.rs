@@ -690,3 +690,106 @@ fn agent_info_lists_auto_first() {
         "{tavily}"
     );
 }
+
+/// Fallback keys: `EXA_API_KEY` then `EXA_API_KEY_2`, a `SEARCH_KEYS_*`
+/// list, and `config set` with comma-separated keys each give a provider
+/// several keys. Only the count and masked keys are ever shown.
+#[test]
+fn fallback_keys_from_env_lists_and_config_set() {
+    const KEYS: [&str; 4] = [
+        "envfirst0000aaaa",
+        "envsecond000bbbb",
+        "listfirst000cccc",
+        "listsecond00dddd",
+    ];
+    let out = offline_cmd("fallback-env")
+        .env("EXA_API_KEY", KEYS[0])
+        .env("EXA_API_KEY_2", KEYS[1])
+        .env(
+            "SEARCH_KEYS_PARALLEL",
+            format!("[{}, {}]", KEYS[2], KEYS[3]),
+        )
+        .args(["config", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["key_counts"]["exa"], 2, "{stdout}");
+    assert_eq!(json["key_counts"]["parallel"], 2, "{stdout}");
+    for k in KEYS {
+        assert!(!stdout.contains(k), "{stdout}");
+    }
+
+    let set = offline_cmd("fallback-set")
+        .args([
+            "config",
+            "set",
+            "keys.exa",
+            &format!("{},{}", KEYS[0], KEYS[1]),
+        ])
+        .output()
+        .unwrap();
+    assert!(set.status.success());
+    assert!(!String::from_utf8_lossy(&set.stdout).contains(KEYS[0]));
+    let show = offline_cmd("fallback-set")
+        .args(["config", "show", "--json"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(json["key_counts"]["exa"], 2);
+}
+
+/// A key marked out of credit shows in `search usage` with both dates, and
+/// `search cache clear --keys` forgets it. Never the key itself.
+#[test]
+#[cfg(target_os = "linux")]
+fn usage_shows_out_of_credit_keys_and_cache_clear_keys_forgets_them() {
+    use sha2::{Digest, Sha256};
+    const KEY: &str = "exa-spent-test-key-0001";
+    let home = std::env::temp_dir().join(format!("search-cli-test-spent-{}", std::process::id()));
+    let dir = home.join(".cache").join("search");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fp: String = Sha256::digest(KEY.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 60;
+    std::fs::write(
+        dir.join("out_of_credit_keys.json"),
+        format!(r#"{{"marks":[{{"provider":"exa","fingerprint":"{fp}","since":{since}}}]}}"#),
+    )
+    .unwrap();
+    let usage = || {
+        offline_cmd("spent")
+            .env("HOME", &home)
+            .env("EXA_API_KEY", KEY)
+            .args(["usage", "--json"])
+            .output()
+            .unwrap()
+    };
+    let out = usage();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains(KEY), "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let spent = &json["out_of_credit_keys"][0];
+    assert_eq!(spent["provider"], "exa", "{text}");
+    assert_eq!(spent["key"], 1);
+    assert!(spent["since"].as_str().unwrap().ends_with('Z'));
+    assert!(spent["until"].as_str().unwrap() > spent["since"].as_str().unwrap());
+
+    let cleared = offline_cmd("spent")
+        .env("HOME", &home)
+        .args(["cache", "clear", "--keys", "--json"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&cleared.stdout).unwrap();
+    assert_eq!(json["removed_marks"], 1);
+    let json: serde_json::Value = serde_json::from_slice(&usage().stdout).unwrap();
+    assert!(json["out_of_credit_keys"].as_array().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&home);
+}

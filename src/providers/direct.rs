@@ -284,6 +284,7 @@ mod tests {
             count: 1,
             opts: &opts,
             timeout: Duration::from_secs(5),
+            key: "",
         })
         .await
     }
@@ -385,6 +386,7 @@ mod tests {
                 count: 1,
                 opts: &opts,
                 timeout: Duration::from_secs(1),
+                key: "",
             })
             .await
             .unwrap_err();

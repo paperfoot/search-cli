@@ -14,6 +14,7 @@ mod page;
 mod providers;
 mod registry;
 mod router;
+mod spent;
 mod stats;
 mod types;
 mod usage;
@@ -250,9 +251,8 @@ async fn main() {
 
     // Every key this process holds is scrubbed from any error text.
     errors::register_secrets(
-        providers::all()
-            .iter()
-            .map(|s| providers::key_for(&config, s))
+        providers::every_key(&config)
+            .into_iter()
             .chain([auth::resolve_token(&config)]),
     );
     let app = Arc::new(AppContext::new(config));
@@ -325,6 +325,12 @@ fn mark_replay(response: &mut types::SearchResponse, age: Option<u64>) {
     response.metadata.cache_age_secs = age;
     response.metadata.cost = None;
     response.metadata.transport.clear();
+    // Marks are read fresh on every search; a replay's would be stale.
+    response.metadata.out_of_credit_keys.clear();
+    response
+        .metadata
+        .warnings
+        .retain(|w| !w.contains("is out of credit since"));
 }
 
 /// How each provider would be reached right now (d direct, l local, h
@@ -512,7 +518,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "config": {
             "path": config::config_path().to_string_lossy(),
             "env_prefix": "SEARCH_",
-            "key_precedence": "<PROVIDER>_API_KEY env > SEARCH_KEYS_* env > config file",
+            "key_precedence": "<PROVIDER>_API_KEY env > SEARCH_KEYS_* env > config file; fallbacks: a list or <PROVIDER>_API_KEY_2...",
         },
         "auto_json_when_piped": true,
         "not_suited_for": "GitHub repos, code, issues and PRs: use `gh search repos|code|issues|prs`.",
@@ -862,7 +868,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
 
             // A run where every provider failed still made (possibly billed)
             // calls; log it so `search stats` counts them.
-            if let Err(errors::SearchError::AllProvidersFailed { failed, cost }) = &response {
+            if let Err(errors::SearchError::AllProvidersFailed { failed, cost, .. }) = &response {
                 logging::log_failed_search(
                     &query,
                     &mode.to_string(),
@@ -923,7 +929,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 ConfigAction::Show => {
                     if ctx.is_json() {
                         // Use the same resolver as `config check` (is_configured ->
-                        // resolve_key) so env-only keys count and all 12 providers
+                        // keys_for) so env-only keys count and all 12 providers
                         // are covered — the old hardcoded list missed parallel +
                         // stealth and ignored env vars.
                         let all = providers::build_providers(&app);
@@ -931,6 +937,13 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             .iter()
                             .filter(|p| p.is_configured())
                             .map(|p| p.name())
+                            .collect();
+                        // How many own keys each provider tries, never the keys.
+                        let key_counts: serde_json::Map<String, serde_json::Value> = all
+                            .iter()
+                            .map(|p| (p.name(), p.keys().len()))
+                            .filter(|(_, n)| *n > 0)
+                            .map(|(name, n)| (name.to_string(), n.into()))
                             .collect();
                         let info = serde_json::json!({
                             "version": types::ENVELOPE_VERSION,
@@ -940,6 +953,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                                 "count": app.config.settings.count,
                             },
                             "providers_configured": configured,
+                            "key_counts": key_counts,
                             "metasearch": {
                                 "logged_in": !auth::resolve_token(&app.config).is_empty(),
                                 "email": app.config.metasearch.email,
@@ -1035,7 +1049,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         }
 
         Commands::Cache { action } => match action {
-            cli::CacheAction::Clear => {
+            cli::CacheAction::Clear { keys: true } => {
+                let removed = spent::Store::load(spent::default_path()).clear();
+                if ctx.is_json() {
+                    output::json::render_value(&serde_json::json!({
+                        "version": types::ENVELOPE_VERSION,
+                        "status": "success",
+                        "removed_marks": removed,
+                    }));
+                } else if !ctx.suppress_human() {
+                    eprintln!("Forgot {removed} out-of-credit key marks");
+                }
+                Ok(0)
+            }
+            cli::CacheAction::Clear { keys: false } => {
                 let removed = cache::clear();
                 if ctx.is_json() {
                     output::json::render_value(&serde_json::json!({
@@ -1093,12 +1120,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         }
 
         Commands::Usage => {
+            // Keys a provider answered as out of credit, with both dates.
+            let marks = spent::Store::load(spent::default_path());
+            let now = spent::now();
+            let spent_keys: Vec<spent::SpentKey> = providers::build_providers(&app)
+                .iter()
+                .flat_map(|p| marks.report(p.name(), &p.keys(), now))
+                .collect();
             let usages = usage::collect(app).await;
             if ctx.is_json() {
                 output::json::render_value(&serde_json::json!({
                     "version": types::ENVELOPE_VERSION,
                     "status": "success",
                     "providers": usages,
+                    "out_of_credit_keys": spent_keys,
                     "note": "informational only — the CLI never disables a provider based on balance",
                 }));
             } else if !ctx.suppress_human() {
@@ -1115,7 +1150,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                     } else if !u.configured {
                         println!("  {:<12} {}", u.provider, "not configured".yellow());
                     } else if let Some(err) = &u.error {
-                        println!("  {:<12} {}", u.provider.bold(), err.red());
+                        println!("  {:<12} {}", u.label().bold(), err.red());
                     } else if let Some(data) = &u.data {
                         let remaining = data
                             .get("credits_remaining")
@@ -1128,11 +1163,22 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             .unwrap_or("credits");
                         println!(
                             "  {:<12} {} {} remaining",
-                            u.provider.bold(),
+                            u.label().bold(),
                             remaining.green(),
                             unit
                         );
                     }
+                }
+                for k in &spent_keys {
+                    println!(
+                        "  {:<12} {}",
+                        format!("{} key {}", k.provider, k.key).bold(),
+                        format!(
+                            "out of credit since {}; tried after the other keys until {} (search cache clear --keys forgets it)",
+                            k.since, k.until
+                        )
+                        .yellow()
+                    );
                 }
             }
             Ok(0)

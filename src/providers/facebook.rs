@@ -31,10 +31,6 @@ impl Facebook {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 /// True for a post, reel, video or share link; false for a page.
@@ -229,8 +225,12 @@ impl Adapter for Facebook {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.key().is_empty()
+        !self.keys().is_empty()
     }
 
     fn classify(&self, status: u16, _body: &str) -> Option<FailureCategory> {
@@ -238,14 +238,14 @@ impl Adapter for Facebook {
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
-        let key = self.key();
+        let key = call.key;
         match call.mode {
             Mode::Social => {
                 let query = api::clean_query(call.query);
                 let r = api::get(
                     self,
                     &self.ctx,
-                    &key,
+                    key,
                     "/v1/facebook/adLibrary/search/companies",
                     &[("query", &query)],
                     call.timeout,
@@ -263,7 +263,7 @@ impl Adapter for Facebook {
                     let post = api::get(
                         self,
                         &self.ctx,
-                        &key,
+                        key,
                         "/v1/facebook/post",
                         &[("url", url), ("get_transcript", "true")],
                         call.timeout,
@@ -271,7 +271,7 @@ impl Adapter for Facebook {
                     let comments = api::get(
                         self,
                         &self.ctx,
-                        &key,
+                        key,
                         "/v1/facebook/post/comments",
                         &[("url", url)],
                         call.timeout,
@@ -287,7 +287,7 @@ impl Adapter for Facebook {
                     let profile = api::get(
                         self,
                         &self.ctx,
-                        &key,
+                        key,
                         "/v1/facebook/profile",
                         &[("url", url)],
                         call.timeout,
@@ -295,7 +295,7 @@ impl Adapter for Facebook {
                     let posts = api::get(
                         self,
                         &self.ctx,
-                        &key,
+                        key,
                         "/v1/facebook/profile/posts",
                         &[("url", url)],
                         call.timeout,

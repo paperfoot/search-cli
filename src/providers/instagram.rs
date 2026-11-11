@@ -30,10 +30,6 @@ impl Instagram {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 /// Reels search windows: a week, a month or a year. There is no day window.
@@ -168,8 +164,12 @@ impl Adapter for Instagram {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.key().is_empty()
+        !self.keys().is_empty()
     }
 
     fn classify(&self, status: u16, _body: &str) -> Option<FailureCategory> {
@@ -183,14 +183,14 @@ impl Adapter for Instagram {
     }
 
     async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
-        let key = self.key();
+        let key = call.key;
         match call.mode {
             Mode::Social => {
                 let query = api::clean_query(call.query);
                 let r = api::get(
                     self,
                     &self.ctx,
-                    &key,
+                    key,
                     "/v2/instagram/reels/search",
                     &[
                         ("query", &query),
@@ -210,7 +210,7 @@ impl Adapter for Instagram {
                 let post = api::get(
                     self,
                     &self.ctx,
-                    &key,
+                    key,
                     "/v1/instagram/post",
                     &[("url", url), ("trim", "true")],
                     call.timeout,
@@ -219,7 +219,7 @@ impl Adapter for Instagram {
                 let transcript = api::get(
                     self,
                     &self.ctx,
-                    &key,
+                    key,
                     "/v2/instagram/media/transcript",
                     &[("url", url)],
                     call.timeout,

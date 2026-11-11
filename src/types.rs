@@ -220,6 +220,15 @@ pub struct ResponseMetadata {
     /// list is auditable: absent name = returned nothing or was cancelled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub provider_results: std::collections::BTreeMap<String, usize>,
+    /// Which of a provider's own keys answered (1 = the first), for each
+    /// provider given more than one. Never the key itself.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub key_slots: std::collections::BTreeMap<String, usize>,
+    /// Keys a provider answered as out of credit (failure code
+    /// `credits_exhausted`): tried after the provider's other keys until
+    /// `until`. Each names the key's place in the list, never the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_credit_keys: Vec<crate::spent::SpentKey>,
     /// Honesty notes, e.g. providers that don't apply a requested -f/-d filter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -376,6 +385,9 @@ pub struct ErrorDetail {
     /// What the failed run still cost (billed timeouts, rejected pages).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<CostSummary>,
+    /// Keys marked out of credit (see `metadata.out_of_credit_keys`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_credit_keys: Vec<crate::spent::SpentKey>,
 }
 
 #[cfg(test)]

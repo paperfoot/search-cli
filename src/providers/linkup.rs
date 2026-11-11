@@ -57,10 +57,6 @@ impl Linkup {
     pub fn new(ctx: Arc<AppContext>) -> Self {
         Self { ctx }
     }
-
-    fn api_key(&self) -> String {
-        super::key_for(&self.ctx.config, &SPEC)
-    }
 }
 
 fn body(call: &Call<'_>) -> Value {
@@ -133,8 +129,12 @@ impl Adapter for Linkup {
         &SPEC
     }
 
+    fn keys(&self) -> Vec<String> {
+        super::keys_for(&self.ctx.config, &SPEC)
+    }
+
     fn is_configured(&self) -> bool {
-        !self.api_key().is_empty()
+        !self.keys().is_empty()
     }
 
     /// An empty balance (429 `INSUFFICIENT_FUNDS_CREDITS`) and the key's own
@@ -156,9 +156,9 @@ impl Adapter for Linkup {
         }
         let body = body(call);
         let client = &self.ctx.client;
-        let key = self.api_key();
+        let key = call.key;
         let resp = match super::send(self, call.timeout, || {
-            client.post(ENDPOINT).bearer_auth(&key).json(&body)
+            client.post(ENDPOINT).bearer_auth(key).json(&body)
         })
         .await
         {
@@ -201,6 +201,7 @@ mod tests {
             count: 10,
             opts,
             timeout: Duration::from_secs(5),
+            key: "",
         }
     }
 
@@ -353,7 +354,12 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         let failed = vec![err.to_provider_failure("linkup")];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed, cost: None }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed,
+                cost: None,
+                out_of_credit_keys: Vec::new(),
+            }
+            .exit_code(),
             2
         );
     }

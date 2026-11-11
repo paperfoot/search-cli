@@ -112,29 +112,67 @@ pub fn build_providers(ctx: &Arc<AppContext>) -> Vec<Box<dyn Adapter>> {
     ]
 }
 
-/// Resolve a provider API key. **Environment variable wins over the config
-/// file** — CI/session credentials and a freshly-exported key must be able to
-/// override stale local config. (Previously config won, so an out-of-date
-/// `keys.brave` silently shadowed a working `BRAVE_API_KEY` and every brave
-/// request failed.) Because figment already merges `SEARCH_KEYS_*` env over
-/// TOML into `config_value`, the full precedence is:
-/// bare env var (e.g. `BRAVE_API_KEY`) > `SEARCH_KEYS_*` env > config file.
-pub fn resolve_key(config_value: &str, env_var: &str) -> String {
-    if let Ok(v) = std::env::var(env_var) {
-        if !v.is_empty() {
-            return v;
-        }
+/// A provider's keys in the order they are tried, empty when unset or
+/// keyless. **The environment wins over the config file**: CI/session
+/// credentials and a freshly-exported key must be able to override stale
+/// local config (a stale `keys.brave` once shadowed a working
+/// `BRAVE_API_KEY`). It replaces the file's keys as a whole:
+/// `<PROVIDER>_API_KEY`, then `<PROVIDER>_API_KEY_2`, `_3`, … in number
+/// order; when none of those is set, `keys.<provider>` (a string or a list,
+/// from the file or `SEARCH_KEYS_<PROVIDER>`).
+pub fn keys_for(config: &AppConfig, spec: &ProviderSpec) -> Vec<String> {
+    let Some(env) = spec.env_keys.first() else {
+        return Vec::new();
+    };
+    let from_env = env_keys(env);
+    if !from_env.is_empty() {
+        return from_env;
     }
-    config_value.to_string()
+    config
+        .keys
+        .get(spec.name)
+        .map(<[String]>::to_vec)
+        .unwrap_or_default()
 }
 
-/// The effective key for a provider (empty when unset or keyless).
-pub fn key_for(config: &AppConfig, spec: &ProviderSpec) -> String {
-    match (spec.env_keys.first(), config.keys.get(spec.name)) {
-        (Some(env), Some(file)) => resolve_key(file, env),
-        (Some(env), None) => resolve_key("", env),
-        _ => String::new(),
-    }
+/// Every key of every provider, fallbacks included: the values redaction
+/// scrubs from any text the CLI prints.
+pub fn every_key(config: &AppConfig) -> Vec<String> {
+    ALL.iter().flat_map(|s| keys_for(config, s)).collect()
+}
+
+/// `var`, then `var_2`, `var_3`, … in number order. The numbered names leave
+/// `var` itself one key, as the provider's own SDKs read it.
+fn env_keys(var: &str) -> Vec<String> {
+    let mut numbered: Vec<(u32, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| {
+            let n = k.to_str()?.strip_prefix(var)?.strip_prefix('_')?;
+            // `_2`, `_3`, …: digits, no leading zero, so no two names share a place.
+            if n.is_empty() || n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            Some((n.parse().ok()?, v.into_string().ok()?))
+        })
+        .collect();
+    numbered.sort_by_key(|(n, _)| *n);
+    let first = std::env::var(var).ok();
+    crate::config::clean_keys(
+        first
+            .into_iter()
+            .chain(numbered.into_iter().map(|(_, v)| v)),
+    )
+}
+
+/// A failure that the next key may not hit: the provider refused this key
+/// (auth), its account is out of credit or quota, or it is rate limited.
+/// Keys are separate accounts, so each has its own credit and rate limit.
+/// Timeouts, server errors, bad requests and parse failures would fail the
+/// same way with any key, and a timeout or parse failure was already billed.
+pub fn next_key_may_help(category: FailureCategory) -> bool {
+    matches!(
+        category,
+        FailureCategory::Auth | FailureCategory::BillingQuota | FailureCategory::RateLimit
+    )
 }
 
 /// A failure that still cost a billed call: the request reached the
@@ -207,6 +245,13 @@ where
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(Duration::from_secs);
         let body = read_capped(resp, ERROR_BODY_CAP).await;
+        if adapter.spent(code, &body) {
+            return Err(SearchError::CreditsExhausted {
+                provider,
+                status: code,
+                message: http_error_message(code, &body),
+            });
+        }
         let category = classify_http(adapter.classify(code, &body), code, &body);
 
         // A quota or auth body is classified as such, so it never retries;
@@ -309,9 +354,14 @@ pub fn date_days_ago(days: u64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let total_days = now.saturating_sub(days * 86400) / 86400;
-    // Howard Hinnant's civil-from-days algorithm.
-    let z = total_days as i64 + 719_468;
+    let (y, m, d) = civil_from_days((now.saturating_sub(days * 86400) / 86400) as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// (year, month, day) of a day count since 1970-01-01, by Howard Hinnant's
+/// civil-from-days algorithm.
+pub fn civil_from_days(days: i64) -> (i64, u64, u64) {
+    let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -321,7 +371,7 @@ pub fn date_days_ago(days: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    (y, m, d)
 }
 
 /// Days of lookback for a freshness word (day/week/month/year).
@@ -457,35 +507,83 @@ mod tests {
         assert_eq!(augment_query("q", &NO_FILTERS), "q");
     }
 
-    // Uses uniquely-named env vars so parallel tests don't race on shared state.
+    /// `<VAR>`, then `<VAR>_2`, `_3`, … in number order (not name order),
+    /// skipping empty values, repeats and names that are not numbered.
     #[test]
-    fn env_var_wins_over_config() {
-        let var = "SEARCH_TEST_KEY_ENV_WINS";
-        std::env::set_var(var, "from-env");
-        assert_eq!(resolve_key("from-config", var), "from-env");
+    fn numbered_env_keys_follow_the_bare_one_in_number_order() {
+        let var = "SEARCH_TEST_ORDER_API_KEY";
+        let vars = [
+            (var.to_string(), "first"),
+            (format!("{var}_10"), "fourth"),
+            (format!("{var}_2"), "second"),
+            (format!("{var}_3"), "third"),
+            (format!("{var}_4"), ""),
+            (format!("{var}_5"), "second"),
+            (format!("{var}_X"), "not a key"),
+            (format!("{var}_+6"), "not a key"),
+            (format!("{var}_07"), "not a key"),
+        ];
+        for (k, v) in &vars {
+            std::env::set_var(k, v);
+        }
+        assert_eq!(env_keys(var), ["first", "second", "third", "fourth"]);
+        // Numbered keys work without the bare one.
         std::env::remove_var(var);
+        assert_eq!(env_keys(var), ["second", "third", "fourth"]);
+        for (k, _) in &vars {
+            std::env::remove_var(k);
+        }
+    }
+
+    /// The environment replaces the file's keys as a whole, as it always
+    /// replaced the one key; a file list is used when no variable is set.
+    #[test]
+    fn env_keys_replace_the_file_list() {
+        static SPEC: ProviderSpec = ProviderSpec {
+            env_keys: &["SEARCH_TEST_REPLACE_API_KEY"],
+            ..exa::SPEC
+        };
+        let mut config = AppConfig::default();
+        config.keys.exa = crate::config::KeyList(vec!["file-1".into(), "file-2".into()]);
+        std::env::remove_var("SEARCH_TEST_REPLACE_API_KEY");
+        std::env::remove_var("SEARCH_TEST_REPLACE_API_KEY_2");
+        assert_eq!(keys_for(&config, &SPEC), ["file-1", "file-2"]);
+        // An empty variable does not shadow the file.
+        std::env::set_var("SEARCH_TEST_REPLACE_API_KEY", "");
+        assert_eq!(keys_for(&config, &SPEC), ["file-1", "file-2"]);
+        std::env::set_var("SEARCH_TEST_REPLACE_API_KEY_2", "env-2");
+        assert_eq!(keys_for(&config, &SPEC), ["env-2"]);
+        std::env::remove_var("SEARCH_TEST_REPLACE_API_KEY");
+        std::env::remove_var("SEARCH_TEST_REPLACE_API_KEY_2");
+        // Keyless providers have none, whatever the file says.
+        assert!(keys_for(&config, &direct::SPEC).is_empty());
+    }
+
+    /// Fallback keys are registered for redaction like the first key.
+    #[test]
+    fn every_key_includes_the_fallbacks() {
+        for v in ["BROWSERLESS_API_KEY", "BROWSERLESS_API_KEY_2"] {
+            std::env::remove_var(v);
+        }
+        let mut config = AppConfig::default();
+        config.keys.browserless =
+            crate::config::KeyList(vec!["bl-first-0001".into(), "bl-second-0002".into()]);
+        let all = every_key(&config);
+        assert!(all.contains(&"bl-first-0001".to_string()));
+        assert!(all.contains(&"bl-second-0002".to_string()));
     }
 
     #[test]
-    fn falls_back_to_config_when_env_unset() {
-        let var = "SEARCH_TEST_KEY_FALLBACK";
-        std::env::remove_var(var);
-        assert_eq!(resolve_key("from-config", var), "from-config");
-    }
-
-    #[test]
-    fn empty_env_does_not_shadow_config() {
-        let var = "SEARCH_TEST_KEY_EMPTY";
-        std::env::set_var(var, "");
-        assert_eq!(resolve_key("from-config", var), "from-config");
-        std::env::remove_var(var);
-    }
-
-    #[test]
-    fn empty_when_neither_set() {
-        let var = "SEARCH_TEST_KEY_NONE";
-        std::env::remove_var(var);
-        assert_eq!(resolve_key("", var), "");
+    fn only_key_failures_move_to_the_next_key() {
+        use FailureCategory::*;
+        for c in [Auth, BillingQuota, RateLimit] {
+            assert!(next_key_may_help(c), "{c:?}");
+        }
+        for c in [
+            Timeout, Server, BadRequest, Parse, Network, Config, Rejected, Other,
+        ] {
+            assert!(!next_key_may_help(c), "{c:?}");
+        }
     }
 
     #[test]
@@ -621,9 +719,46 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let failed = vec![err.to_provider_failure("brave")];
         assert_eq!(
-            SearchError::AllProvidersFailed { failed, cost: None }.exit_code(),
+            SearchError::AllProvidersFailed {
+                failed,
+                cost: None,
+                out_of_credit_keys: Vec::new(),
+            }
+            .exit_code(),
             4
         );
+    }
+
+    /// What each body becomes through `send` with the real adapter.
+    async fn answer(adapter: &dyn Adapter, reply: &'static str) -> SearchError {
+        let (url, _) = server(Some(reply)).await;
+        let c = client();
+        send(adapter, Duration::from_secs(5), || c.get(&url))
+            .await
+            .unwrap_err()
+    }
+
+    /// Only the provider's documented "out of credit" answer is
+    /// `credits_exhausted` (the key is then remembered); other 402s, rate
+    /// limits and rejected keys keep their usual category and code.
+    #[tokio::test]
+    async fn only_the_documented_out_of_credit_answer_is_credits_exhausted() {
+        let ctx = Arc::new(AppContext::new(AppConfig::default()));
+        let exa = exa::Exa::new(ctx.clone());
+        let par = parallel::Parallel::new(ctx);
+        let cases: [(&dyn Adapter, &'static str, &str, FailureCategory); 6] = [
+            (&exa, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 79\r\n\r\n{\"requestId\":\"r\",\"error\":\"You have run out of credits\",\"tag\":\"NO_MORE_CREDITS\"}", "credits_exhausted", FailureCategory::BillingQuota),
+            (&exa, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 72\r\n\r\n{\"requestId\":\"r\",\"error\":\"Budget exceeded\",\"tag\":\"TEAM_BUDGET_EXCEEDED\"}", "credits_exhausted", FailureCategory::BillingQuota),
+            (&exa, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 72\r\n\r\n{\"requestId\":\"r\",\"error\":\"Payment needed\",\"tag\":\"X402_PAYMENT_REQUIRED\"}", "insufficient_credits", FailureCategory::BillingQuota),
+            (&exa, "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 67\r\n\r\n{\"requestId\":\"r\",\"error\":\"Invalid API key\",\"tag\":\"INVALID_API_KEY\"}", "auth_failed", FailureCategory::Auth),
+            (&par, "HTTP/1.1 402 Payment Required\r\nConnection: close\r\nContent-Length: 57\r\n\r\n{\"error\":{\"message\":\"Insufficient credit\",\"detail\":null}}", "credits_exhausted", FailureCategory::BillingQuota),
+            (&par, "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 52\r\n\r\n{\"error\":{\"message\":\"Quota exceeded\",\"detail\":null}}", "insufficient_credits", FailureCategory::BillingQuota),
+        ];
+        for (adapter, reply, code, category) in cases {
+            let e = answer(adapter, reply).await;
+            assert_eq!(e.error_code(), code, "{}: {reply}", adapter.name());
+            assert_eq!(e.category(), category, "{}: {reply}", adapter.name());
+        }
     }
 
     #[tokio::test]

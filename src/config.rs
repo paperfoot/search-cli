@@ -57,38 +57,92 @@ fn de_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
     de_num(d).map(|n| n as usize)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One provider's keys, in the order they are tried. The file takes one key
+/// (`exa = "k1"`) or several (`exa = ["k1", "k2"]`, or `"k1,k2"`, as
+/// `SEARCH_KEYS_EXA=k1,k2` arrives); an empty string is no key. When a call fails because of its key (rejected, out of credit, rate
+/// limited) the engine tries the next one in the same search.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyList(pub Vec<String>);
+
+impl KeyList {
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl Serialize for KeyList {
+    // One key (or none) stays a plain string, as files have always held it.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [] => s.serialize_str(""),
+            [one] => s.serialize_str(one),
+            many => many.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyList {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged, expecting = "a key, comma-separated keys, or a list of keys")]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        let list = match OneOrMany::deserialize(d)? {
+            // No provider's key holds a comma.
+            OneOrMany::One(k) => k.split(',').map(str::to_string).collect(),
+            OneOrMany::Many(ks) => ks,
+        };
+        Ok(KeyList(clean_keys(list)))
+    }
+}
+
+/// Trimmed, without empty entries or repeats, order kept: a key listed twice
+/// would only be refused twice.
+pub fn clean_keys(keys: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for k in keys {
+        let k = k.trim();
+        if !k.is_empty() && !out.iter().any(|o| o == k) {
+            out.push(k.to_string());
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiKeys {
     #[serde(default)]
-    pub parallel: String,
+    pub parallel: KeyList,
     #[serde(default)]
-    pub brave: String,
+    pub brave: KeyList,
     #[serde(default)]
-    pub serper: String,
+    pub serper: KeyList,
     #[serde(default)]
-    pub exa: String,
+    pub exa: KeyList,
     #[serde(default)]
-    pub jina: String,
+    pub jina: KeyList,
     #[serde(default)]
-    pub linkup: String,
+    pub linkup: KeyList,
     #[serde(default)]
-    pub firecrawl: String,
+    pub firecrawl: KeyList,
     #[serde(default)]
-    pub tavily: String,
+    pub tavily: KeyList,
     #[serde(default)]
-    pub serpapi: String,
+    pub serpapi: KeyList,
     #[serde(default)]
-    pub perplexity: String,
+    pub perplexity: KeyList,
     #[serde(default)]
-    pub browserless: String,
+    pub browserless: KeyList,
     #[serde(default)]
-    pub xai: String,
+    pub xai: KeyList,
 }
 
 impl ApiKeys {
-    /// The file/`SEARCH_KEYS_*` value for a provider, or None when the
+    /// The file/`SEARCH_KEYS_*` keys for a provider, or None when the
     /// provider takes no key.
-    pub fn get(&self, provider: &str) -> Option<&str> {
+    pub fn get(&self, provider: &str) -> Option<&[String]> {
         let v = match provider {
             "parallel" => &self.parallel,
             "brave" => &self.brave,
@@ -104,7 +158,7 @@ impl ApiKeys {
             "xai" => &self.xai,
             _ => return None,
         };
-        Some(v.as_str())
+        Some(v.as_slice())
     }
 }
 
@@ -123,20 +177,7 @@ fn default_count() -> usize {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            keys: ApiKeys {
-                parallel: String::new(),
-                brave: String::new(),
-                serper: String::new(),
-                exa: String::new(),
-                jina: String::new(),
-                linkup: String::new(),
-                firecrawl: String::new(),
-                tavily: String::new(),
-                serpapi: String::new(),
-                perplexity: String::new(),
-                browserless: String::new(),
-                xai: String::new(),
-            },
+            keys: ApiKeys::default(),
             settings: Settings {
                 count: default_count(),
             },
@@ -196,13 +237,26 @@ pub fn provider_keys() -> Vec<&'static str> {
         .collect()
 }
 
-/// Keyed providers with their effective key (env > SEARCH_KEYS_* > file).
-fn effective_keys(config: &AppConfig) -> Vec<(&'static crate::providers::ProviderSpec, String)> {
+/// Keyed providers with their effective keys (env > SEARCH_KEYS_* > file).
+fn effective_keys(
+    config: &AppConfig,
+) -> Vec<(&'static crate::providers::ProviderSpec, Vec<String>)> {
     crate::providers::all()
         .iter()
         .filter(|s| !s.env_keys.is_empty())
-        .map(|s| (*s, crate::providers::key_for(config, s)))
+        .map(|s| (*s, crate::providers::keys_for(config, s)))
         .collect()
+}
+
+/// Every key masked, in the order they are tried.
+fn mask_keys(keys: &[String]) -> String {
+    if keys.is_empty() {
+        return mask_key("");
+    }
+    keys.iter()
+        .map(|k| mask_key(k))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Valid setting names for `config set settings.<name>`.
@@ -249,7 +303,7 @@ pub fn config_show(config: &AppConfig) {
     }
     for (spec, effective) in effective_keys(config) {
         let name = spec.name;
-        let masked = mask_key(&effective);
+        let masked = mask_keys(&effective);
         if c {
             let val = if effective.is_empty() {
                 masked.red().to_string()
@@ -342,7 +396,7 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
                             valid.join(", ")
                         )));
                     }
-                    toml::Value::String(value.to_string())
+                    key_value(value)
                 }
                 "settings" => parse_setting(name, value)?,
                 "metasearch" => {
@@ -385,6 +439,17 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
     }
 
     write_config_atomic(&path, &doc)
+}
+
+/// A `keys.<provider>` value: one key as a string, as before, or a list for
+/// comma-separated keys (`k1,k2`), tried in that order.
+fn key_value(value: &str) -> toml::Value {
+    let keys = clean_keys(value.split(',').map(str::to_string));
+    if keys.len() > 1 {
+        toml::Value::Array(keys.into_iter().map(toml::Value::String).collect())
+    } else {
+        toml::Value::String(keys.into_iter().next().unwrap_or_default())
+    }
 }
 
 /// Remove a dotted key (e.g. `metasearch.token`) from the config file.
@@ -472,6 +537,10 @@ pub fn config_check(config: &AppConfig) {
             .collect::<Vec<_>>()
             .join(", ");
         let is_configured = !key.is_empty();
+        let desc = match key.len() {
+            0 | 1 => desc,
+            n => format!("{desc} ({n} keys)"),
+        };
         if !is_configured {
             if c {
                 println!(
@@ -545,6 +614,64 @@ mod tests {
         // Nothing reads settings.timeout any more.
         assert!(parse_setting("timeout", "30").is_err());
         assert!(parse_setting("unknown_setting", "1").is_err());
+    }
+
+    fn load(toml: &str) -> super::AppConfig {
+        use figment::providers::Format;
+        figment::Figment::new()
+            .merge(figment::providers::Serialized::defaults(
+                super::AppConfig::default(),
+            ))
+            .merge(figment::providers::Toml::string(toml))
+            .extract()
+            .unwrap()
+    }
+
+    /// A key is a string, as always, or a list of fallbacks tried in order;
+    /// blanks and repeats are dropped.
+    #[test]
+    fn keys_load_as_a_string_or_a_list() {
+        let cfg = load(
+            "[keys]\nexa = \"e1\"\nparallel = [\"p1\", \" p2 \", \"\", \"p1\"]\nbrave = \"\"\nserper = []\nlinkup = \"l1, l2,\"\n",
+        );
+        assert_eq!(cfg.keys.get("exa").unwrap(), ["e1"]);
+        assert_eq!(cfg.keys.get("linkup").unwrap(), ["l1", "l2"]);
+        assert_eq!(cfg.keys.get("parallel").unwrap(), ["p1", "p2"]);
+        assert!(cfg.keys.get("brave").unwrap().is_empty());
+        assert!(cfg.keys.get("serper").unwrap().is_empty());
+        assert!(cfg.keys.get("jina").unwrap().is_empty());
+        assert!(cfg.keys.get("direct").is_none());
+    }
+
+    /// One key is written back as the plain string older versions read.
+    #[test]
+    fn one_key_serializes_as_a_string() {
+        use super::KeyList;
+        let one = toml::Value::try_from(KeyList(vec!["k".into()])).unwrap();
+        assert_eq!(one, toml::Value::String("k".into()));
+        let none = toml::Value::try_from(KeyList::default()).unwrap();
+        assert_eq!(none, toml::Value::String(String::new()));
+        let two = toml::Value::try_from(KeyList(vec!["a".into(), "b".into()])).unwrap();
+        assert_eq!(two.as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn config_set_writes_a_list_for_comma_separated_keys() {
+        use super::key_value;
+        assert_eq!(key_value("k1"), toml::Value::String("k1".into()));
+        assert_eq!(key_value(""), toml::Value::String(String::new()));
+        assert_eq!(key_value("k1, k1,"), toml::Value::String("k1".into()));
+        assert_eq!(
+            key_value("k1, k2"),
+            toml::Value::Array(vec!["k1".into(), "k2".into()])
+        );
+    }
+
+    #[test]
+    fn every_key_is_masked() {
+        let shown = super::mask_keys(&["abcdefghijklmnop".into(), "qrstuvwxyz123456".into()]);
+        assert_eq!(shown, "abcd...mnop, qrst...3456");
+        assert_eq!(super::mask_keys(&[]), "(not set)");
     }
 
     /// Old versions wrote numbers as strings; loading must coerce, not fail.

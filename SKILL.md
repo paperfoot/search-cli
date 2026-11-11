@@ -138,6 +138,16 @@ and the same comments as records in `extra.comments[]` (`id`, `parent`,
 ## Keys, login and cost
 
 - Engines with the user's own key go direct (env vars beat the config file).
+- An engine can have fallback keys (`keys.exa = ["k1", "k2"]`, or
+  `EXA_API_KEY_2`, `_3`…). A key refused, out of credit or rate limited
+  hands the call to the next one in the same search; `metadata.key_slots`
+  names the key that answered (1 = the first) and `metadata.warnings` each
+  key refused before it. The engine fails only when every key has.
+- A key the provider answers as out of credit (failure code
+  `credits_exhausted`) is tried after the other keys for 3 days;
+  `metadata.out_of_credit_keys` names it with `since` and `until`. Other refusals
+  (`auth`, `rate_limit`, …) are never remembered. `search cache clear --keys`
+  forgets the marks.
 - After `search login` (free; searches are paid from a topped-up balance),
   engines without a key go through metasearch.sh as one call per search,
   charged to the account. Without `-p` the server picks the engines: the
@@ -177,8 +187,9 @@ and the same comments as records in `extra.comments[]` (`id`, `parent`,
 - `metadata.provider_failures[]`: per failed engine, a `category` (`auth`,
   `billing_quota`, `rate_limit`, `timeout`, `rejected`, …) and message.
   `metadata.providers_timed_out` lists engines still running at the deadline.
-- `metadata.warnings`: filters an engine did not apply. In `social` mode `-d`
-  and `--exclude-domain` filter X handles.
+- `metadata.warnings`: filters an engine did not apply, and fallback keys
+  refused before the one that answered. In `social` mode `-d` and
+  `--exclude-domain` filter X handles.
 - `metadata.routing.escalated` names engines whose list metasearch.sh set
   aside for a better engine's; they cost nothing (0 in `cost.by_provider`).
 - `cached: true` marks a free replay from this machine's 5-minute cache.
