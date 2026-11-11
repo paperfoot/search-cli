@@ -18,6 +18,8 @@ use std::time::Duration;
 
 const ENDPOINT: &str = "https://api.parallel.ai/v1/search";
 const EXCERPT_CHARS: u32 = 1_500;
+/// Parallel cuts each `search_queries` entry at this many characters.
+const QUERY_MAX: usize = 200;
 
 pub static SPEC: ProviderSpec = ProviderSpec {
     name: "parallel",
@@ -100,10 +102,41 @@ fn body(call: &Call<'_>) -> Value {
     }
     json!({
         "objective": call.query,
-        "search_queries": [call.query],
+        "search_queries": [keyword_query(call.query)],
         "mode": if call.mode == Mode::Deep { "advanced" } else { "fast" },
         "advanced_settings": advanced,
     })
+}
+
+/// The query as the keyword query. Parallel cuts a longer entry at
+/// [`QUERY_MAX`] characters (it counts characters, not bytes), with a warning
+/// and sometimes mid-word; the whole text still goes in `objective`, which
+/// has no such limit, and the keyword query is its first words up to the
+/// limit (a single word longer than the limit, such as a pasted URL, is
+/// skipped). A short query is sent as is.
+fn keyword_query(query: &str) -> String {
+    if query.chars().count() <= QUERY_MAX {
+        return query.to_string();
+    }
+    let mut out = String::new();
+    for word in query.split_whitespace() {
+        let n = word.chars().count();
+        if n > QUERY_MAX {
+            continue;
+        }
+        if out.chars().count() + usize::from(!out.is_empty()) + n > QUERY_MAX {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        // One word longer than the limit.
+        out = query.chars().take(QUERY_MAX).collect();
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -272,6 +305,44 @@ mod tests {
         assert_eq!(sp["include_domains"], json!(["docs.rs"]));
         assert!(sp.get("exclude_domains").is_none());
         assert!(b["advanced_settings"].get("location").is_none());
+    }
+
+    /// A query over 200 characters goes whole into `objective`, and its
+    /// first words up to 200 characters are the keyword query, so Parallel
+    /// cuts nothing; a short query is sent unchanged.
+    #[test]
+    fn a_long_query_is_never_cut() {
+        let opts = SearchOpts::default();
+        let long = "Google announced a new Gemini model on 28 October 2026. What is it called, \
+            and what score and rank did Artificial Analysis give it on its Intelligence Index v5, \
+            and how does that compare with the previous number one?";
+        assert!(long.chars().count() > QUERY_MAX);
+        let mut c = call(Mode::General, 10, &opts);
+        c.query = long;
+        let b = body(&c);
+        assert_eq!(b["objective"], long);
+        let kw = b["search_queries"][0].as_str().unwrap();
+        assert!(kw.chars().count() <= QUERY_MAX, "{kw}");
+        assert!(
+            long.starts_with(kw) && long[kw.len()..].starts_with(' '),
+            "cut at a word: {kw}"
+        );
+        let short = "rust async runtime";
+        c.query = short;
+        assert_eq!(body(&c)["search_queries"], json!([short]));
+        let one_word = "x".repeat(250);
+        assert_eq!(keyword_query(&one_word).len(), QUERY_MAX);
+        // Characters, not bytes; an over-long word is skipped, not the rest.
+        let danish = format!("{} ord", "æ".repeat(250));
+        assert_eq!(keyword_query(&danish), "ord");
+        let url = format!("compare https://example.com/{} with that", "a".repeat(260));
+        assert_eq!(keyword_query(&url), "compare with that");
+        let wide = "smørrebrød på Nørrebro ".repeat(12);
+        let kw = keyword_query(&wide);
+        assert!(
+            kw.chars().count() <= QUERY_MAX && kw.len() > QUERY_MAX,
+            "{kw}"
+        );
     }
 
     #[test]
