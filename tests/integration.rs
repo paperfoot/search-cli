@@ -690,3 +690,41 @@ fn agent_info_lists_auto_first() {
         "{tavily}"
     );
 }
+
+/// A platform key saved with `config set` used to be written under a name
+/// nothing read, so TikTok, Instagram, YouTube, Facebook and Threads stayed
+/// unconfigured for every process whose shell did not export the variable.
+/// One stored key now serves all five, whichever name it is saved under.
+#[test]
+fn stored_platforms_key_configures_every_platform() {
+    for name in ["platforms", "tiktok"] {
+        let tag = format!("platkey-{name}");
+        offline_cmd(&tag)
+            .args([
+                "config",
+                "set",
+                &format!("keys.{name}"),
+                "test-key",
+                "--json",
+            ])
+            .assert()
+            .success();
+        let out = offline_cmd(&tag)
+            .args(["config", "check", "--json"])
+            .output()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let configured: Vec<&str> = json["configured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        for platform in ["tiktok", "instagram", "youtube", "facebook", "threads"] {
+            assert!(
+                configured.contains(&platform),
+                "keys.{name}: {platform} not configured in {configured:?}"
+            );
+        }
+    }
+}

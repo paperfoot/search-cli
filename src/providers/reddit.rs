@@ -15,8 +15,9 @@
 //!
 //! - **Global search fallback:** when the live route refuses a search that
 //!   names no subreddit, the social platforms' upstream (ScrapeCreators'
-//!   Reddit search) answers it: directly with `SCRAPECREATORS_API_KEY`, else
-//!   through metasearch.sh when logged in and the server offers it.
+//!   Reddit search) answers it: directly with `SCRAPECREATORS_API_KEY` (or
+//!   the stored `keys.platforms`), else through metasearch.sh when logged in
+//!   and the server offers it.
 //!
 //! `SEARCH_REDDIT_ROUTE=archive` skips the live route; `live` skips the
 //! archive.
@@ -987,7 +988,7 @@ impl Reddit {
     /// hosted when metasearch.sh offers Reddit.
     async fn global_search(&self, call: &Call<'_>) -> Result<Output, String> {
         use super::social_api as api;
-        let key = super::resolve_key("", api::ENV_KEYS[0]);
+        let key = super::resolve_key(&self.ctx.config.keys.platforms, api::ENV_KEYS[0]);
         if !key.is_empty() {
             // -f is already one of day, week, month, year.
             let timeframe = call.opts.freshness.as_deref().unwrap_or_default();

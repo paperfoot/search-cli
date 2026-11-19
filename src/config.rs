@@ -83,13 +83,30 @@ pub struct ApiKeys {
     pub browserless: String,
     #[serde(default)]
     pub xai: String,
+    /// One key for the social platforms (`social_api::PLATFORMS`) and
+    /// Reddit's global search: the file form of `social_api::ENV_KEYS`, so
+    /// the key reaches every process on the machine, not only shells that
+    /// export the variable. Internal use, like the variable: no doc, help or
+    /// agent-info entry mentions it.
+    #[serde(default)]
+    pub platforms: String,
+}
+
+/// The `[keys]` field a provider's key is stored in: the platforms share
+/// one, every other provider has its own.
+pub fn key_slot(provider: &str) -> &str {
+    if crate::providers::social_api::PLATFORMS.contains(&provider) {
+        "platforms"
+    } else {
+        provider
+    }
 }
 
 impl ApiKeys {
     /// The file/`SEARCH_KEYS_*` value for a provider, or None when the
     /// provider takes no key.
     pub fn get(&self, provider: &str) -> Option<&str> {
-        let v = match provider {
+        let v = match key_slot(provider) {
             "parallel" => &self.parallel,
             "brave" => &self.brave,
             "serper" => &self.serper,
@@ -102,6 +119,7 @@ impl ApiKeys {
             "perplexity" => &self.perplexity,
             "browserless" => &self.browserless,
             "xai" => &self.xai,
+            "platforms" => &self.platforms,
             _ => return None,
         };
         Some(v.as_str())
@@ -136,6 +154,7 @@ impl Default for AppConfig {
                 perplexity: String::new(),
                 browserless: String::new(),
                 xai: String::new(),
+                platforms: String::new(),
             },
             settings: Settings {
                 count: default_count(),
@@ -336,7 +355,7 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
             let typed_value = match *section {
                 "keys" => {
                     let valid = provider_keys();
-                    if !valid.contains(name) {
+                    if !valid.contains(name) && *name != "platforms" {
                         return Err(SearchError::Config(format!(
                             "Unknown provider 'keys.{name}'. Valid: {}",
                             valid.join(", ")
@@ -364,9 +383,16 @@ pub fn config_set(key: &str, value: &str) -> Result<(), crate::errors::SearchErr
             let entry = doc
                 .entry(*section)
                 .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            // A platform's key goes to the field every platform reads;
+            // `keys.tiktok` used to be saved under a name nothing loaded.
+            let field = if *section == "keys" {
+                key_slot(name)
+            } else {
+                name
+            };
             match entry {
                 toml::Value::Table(t) => {
-                    t.insert(name.to_string(), typed_value);
+                    t.insert(field.to_string(), typed_value);
                 }
                 // Don't silently no-op (the old `if let Table` did) — that
                 // reported success while writing nothing.
@@ -545,6 +571,22 @@ mod tests {
         // Nothing reads settings.timeout any more.
         assert!(parse_setting("timeout", "30").is_err());
         assert!(parse_setting("unknown_setting", "1").is_err());
+    }
+
+    /// The platforms share one stored key; without the field a key in the
+    /// file was never read, so the platforms worked only where the shell
+    /// exported the variable.
+    #[test]
+    fn platforms_key_in_the_file_serves_every_platform() {
+        let mut cfg = super::AppConfig::default();
+        cfg.keys.platforms = "file-key".into();
+        for name in crate::providers::social_api::PLATFORMS {
+            assert_eq!(cfg.keys.get(name), Some("file-key"), "{name}");
+            assert_eq!(super::key_slot(name), "platforms");
+        }
+        assert_eq!(cfg.keys.get("exa"), Some(""));
+        assert_eq!(super::key_slot("exa"), "exa");
+        assert_eq!(cfg.keys.get("reddit"), None);
     }
 
     /// Old versions wrote numbers as strings; loading must coerce, not fail.

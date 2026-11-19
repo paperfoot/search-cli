@@ -6,8 +6,9 @@
 //! `x-api-key`); every answer reports `credits_charged`. Public text names the
 //! platforms only, never this upstream: the providers are documented as
 //! running through metasearch.sh, which holds the key. When
-//! `SCRAPECREATORS_API_KEY` is set the CLI calls the upstream directly
-//! (internal use; no doc, help or agent-info entry mentions the variable).
+//! `SCRAPECREATORS_API_KEY` is set, or the config file holds
+//! `keys.platforms`, the CLI calls the upstream directly (internal use; no
+//! doc, help or agent-info entry mentions the variable or the field).
 
 use super::spec::{FilterSupport, Price};
 use super::thread;
