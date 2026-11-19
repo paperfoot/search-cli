@@ -1,17 +1,19 @@
 ---
 name: search
 description: >
-  Web search, news, papers, people, TikTok, Instagram, YouTube, Facebook,
-  Threads and X posts, Reddit and Hacker News threads, video transcripts,
-  images, places, patents and page extraction through the `search` CLI, which
-  sends a query to several of its ten search engines at once and fuses the
-  results. Use when you need to look something up, get current information or
-  the latest news, find sources or papers for a claim, read the text of a URL,
-  see what people say or show on TikTok, YouTube, Instagram, X, Reddit or
-  Hacker News, read a video's transcript and comments, or research a person or
-  company. The mode defaults to auto and is reported;
-  every result envelope carries its cost. Run `search agent-info` for the
-  full manifest.
+  Web search, news, papers, people, images, places, patents and page
+  extraction, and what people say and show on X, TikTok, Instagram, YouTube,
+  Facebook, Threads, Reddit and Hacker News (posts, threads, video
+  transcripts, comments), through the `search` CLI, which sends a query to
+  several of its ten search engines at once and fuses the results. Use when
+  you need to look something up, get current information or the latest news,
+  find sources or papers for a claim, read the text of a URL, or research a
+  person, company, product or market. Posts are sources too: when the
+  question turns on opinions, reviews, experiences, reputation, trends or
+  what customers want, also run `-m social` (X, TikTok, Instagram, YouTube)
+  and `-m community` (Reddit, Hacker News) and cite the posts. The mode
+  defaults to auto and is reported; every result envelope carries its cost.
+  Run `search agent-info` for the full manifest.
 compatibility: Requires the search binary (brew install paperfoot/tap/search-cli) and network access
 allowed-tools: Bash(search:*)
 ---
@@ -22,6 +24,30 @@ allowed-tools: Bash(search:*)
 document: a single compact line when piped or with `--json`, indented with
 `--pretty`. Run `search agent-info` for every command, flag, mode, engine and
 exit code.
+
+## Ask people as well as pages
+
+A web search returns what sites publish. What customers, users and critics
+say is on X, TikTok, Instagram, YouTube, Reddit and Hacker News, and auto
+seldom goes there unless the query names a platform or asks for opinions.
+When the task is about a product, company, person, market, trend,
+reputation, review or lived experience, run all three and cite the posts
+beside the pages:
+
+- `search "…" --json`: the web.
+- `search search -q "…" -m community --json`: Reddit and Hacker News
+  threads. It runs on this machine with no key and is the cheapest of the
+  three, usually free.
+- `search search -q "…" -m social --json`: X and, unless the query is
+  breaking news, one of TikTok, Instagram or YouTube. X is the costly call;
+  `--tiktok`, `--youtube` or `--instagram` alone costs a small fraction of
+  it, and `--x "…"` is X alone. `search agent-info` lists each price.
+
+Then extract the best thread, post or video URL to read the whole
+discussion, the transcript and the top comments. Facebook has no keyword
+search of posts: find posts and groups with
+`search search -q "…" -d facebook.com`, then extract the URL for the post
+and its comments.
 
 ## Choosing a mode
 
