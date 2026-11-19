@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.13.0 — 2026-11-19
+
+- Auto adds posts to a search that asks what people think. A query with an
+  opinion, buying or comparing cue ("what do people say about", "reviews",
+  "worth it", "vs", "alternatives to", "best", "backlash", "viral", "legit")
+  keeps its pages, and `social` and `community` run beside it: of ten
+  results, five are pages, three are social posts and two are Reddit or
+  Hacker News threads. `metadata.routing.auto.added` lists the modes that
+  were added; their engines, failures and cost are in the same envelope.
+  Until now auto reached `social` only when the query named a platform.
+- The pages stay what they would have been: `general`, or `news` with its
+  freshness filter when the query has a news word ("latest iphone
+  reviews").
+- Such a search is dearer and slower than a plain one: the social search
+  usually asks X, which costs more than the rest together and takes about
+  25 s. `-m general` returns pages only. Nothing is added with `-p`, `-d`
+  or `--exclude-domain`, or to a quoted phrase or a `site:` query. The
+  shorter cues do not count in a lookup of documents, code, papers,
+  places, people or a biomedical question ("api", "docs", "error",
+  "github", "best practices", "vs code", "systematic reviews", "metformin
+  vs placebo"); a question's frame ("what do people say about", "opinions
+  about", "experiences with", "thoughts on") always counts.
+- "what do people say about", "opinions about" and "experiences with" used
+  to search `community` alone; they now give pages with posts added. A
+  query that names Reddit or Hacker News still searches `community`.
+- The added modes search the subject without the question's frame ("what
+  do people say about the Framework laptop" searches "the Framework
+  laptop"), because Reddit, Hacker News and the platforms match the words
+  they are given.
+- An added mode that cannot run (no key and not logged in) leaves a line
+  in `metadata.notes`; one that fails is in `provider_failures`. Neither
+  fails the search while pages came back. When the posts answer and no
+  web engine does, the search still succeeds (`partial_success`) and a
+  note says the results are posts only.
+- `social` with your own keys waits 40 s for a slow platform once another
+  has answered, up from 20 s. X's median answer took 24 s over 163
+  searches, so the 20 s wait cut X off, after it was billed, in about
+  seven of ten searches that paired it with a faster platform; 40 s keeps
+  96 in 100.
+- `search social "standing desk wobble"` and `search extract <url>` read
+  the first word as the mode when one quoted query (or, for `extract` and
+  `similar`, one URL) follows. It used to be searched as text in auto
+  mode, so an agent that asked for social got a web search for
+  "social …". `deep` and `auto` are never read this way, nor a pair that
+  is a phrase ("social" "media marketing").
+- `-n` is `-c` in `search search`, and after a shorthand query it is
+  refused like `-c` instead of being searched as text ("… -n 6").
+- `search stats` counts the added searches under `added_by_auto`.
+- The skill tells agents to phrase a people question so auto adds the
+  posts, and to run `-m social` and `-m community` themselves only when
+  `added` is absent, so X is not paid for twice.
+
 ## 0.12.2 — 2026-11-19
 
 - The skill tells agents to ask people as well as pages. For a product,
