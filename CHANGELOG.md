@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.2 — 2026-11-19
+
+- The skill tells agents to ask people as well as pages. For a product,
+  company, person, market, trend, review or opinion, it has them run
+  `-m community` (Reddit, Hacker News) and `-m social` (X, TikTok, Instagram,
+  YouTube) beside the web search and cite the posts. Its description, which
+  agents read before they choose a tool, now leads with those sources.
+  Agents used to reach them only when the query named a platform or asked
+  for opinions.
+- The skill says how to find Facebook posts and groups, which Facebook's own
+  search does not offer: `search search -q "…" -d facebook.com`, then extract
+  the URL for the post and its comments.
+- Run `search skill install` after upgrading to replace the installed skill.
+
 ## 0.12.1 — 2026-11-04
 
 - Logged in, the engines you have no key for now go to metasearch.sh as one
