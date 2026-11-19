@@ -957,10 +957,15 @@ fn rejected(provider: &str, reason: &str) -> ProviderFailure {
     }
 }
 
+/// How a [`timeout_failure`]'s reason reads. A provider's own timeout
+/// (its HTTP client's, an upstream 408) has the same category and code, so
+/// the words are what tells the two apart.
+const STILL_RUNNING: &str = "was still running when the search stopped waiting";
+
 /// `f` is a [`timeout_failure`]: the provider was still running when the
-/// search stopped waiting (a provider's own timeout has another code).
+/// search stopped waiting.
 pub(crate) fn still_running(f: &ProviderFailure) -> bool {
-    f.category == FailureCategory::Timeout && f.code == "timeout"
+    f.category == FailureCategory::Timeout && f.reason.contains(STILL_RUNNING)
 }
 
 /// Failure record for a provider still running at the mode deadline.
@@ -971,7 +976,7 @@ fn timeout_failure(provider: &str) -> ProviderFailure {
         http_status: None,
         code: "timeout".to_string(),
         reason: format!(
-            "{provider} was still running when the search stopped waiting (the mode deadline; in social, {0} s once another platform had answered, or {0} s in all when social was added to another search)",
+            "{provider} {STILL_RUNNING} (the mode deadline; in social, {0} s once another platform had answered, or {0} s in all when social was added to another search)",
             registry::SOCIAL_WAIT.as_secs()
         ),
         retryable: true,
@@ -1311,6 +1316,47 @@ mod tests {
             reranker: None,
         };
         execute_with(adapters, &req).await
+    }
+
+    /// A capped run (a mode added to another search) whose calls all go
+    /// straight to their providers stops at the cap, not the mode deadline,
+    /// and the call still out is reported as timed out and counted as spent.
+    #[tokio::test]
+    async fn a_capped_direct_run_stops_at_the_cap_and_counts_the_sent_call() {
+        let opts = SearchOpts::default();
+        // "right now": the pick is X alone, so no other answer arms the wait.
+        let (adapters, log) = fakes(&[(&xai::SPEC, ok(30_000, 3, "x"))]);
+        let req = Request {
+            query: "earthquake right now",
+            mode: Mode::Social,
+            count: 10,
+            only: None,
+            opts: &opts,
+            deadline: Duration::from_millis(5_000),
+            straggler_cap: Some(Duration::from_millis(300)),
+            fresh: false,
+            direct_cap: Some(Duration::from_millis(300)),
+            reranker: None,
+        };
+        let started = Instant::now();
+        let err = execute_with(adapters, &req).await.err().unwrap();
+        let took = started.elapsed();
+        assert_eq!(called(&log), ["xai"]);
+        assert!(took >= Duration::from_millis(280), "{took:?}");
+        assert!(
+            took < Duration::from_millis(2_000),
+            "ran past the cap: {took:?}"
+        );
+        match err {
+            SearchError::AllProvidersFailed { failed, cost } => {
+                assert!(still_running(&failed[0]), "{:?}", failed[0]);
+                assert_eq!(
+                    cost.unwrap().by_provider["xai"],
+                    xai::SPEC.price.per_call as u64
+                );
+            }
+            e => panic!("{e}"),
+        }
     }
 
     /// One slow platform does not hold up the social fan-out: once the wait

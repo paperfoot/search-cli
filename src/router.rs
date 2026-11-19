@@ -1164,6 +1164,14 @@ const PEOPLE_NOT: &[&str] = &[
     "app store review",
     "app review",
     "in review",
+    "under review",
+    "judicial review",
+    "scoping review",
+    "narrative review",
+    "rapid review",
+    "umbrella review",
+    "integrative review",
+    "best western",
     "court opinions",
     "judicial opinions",
     "advisory opinions",
@@ -1251,7 +1259,7 @@ const SCIENCE_WORDS: &[&str] = &[
     "genes",
     "genome",
     "cells",
-    "mice",
+    "in mice",
     "in vivo",
     "in vitro",
     "rna",
@@ -1285,7 +1293,7 @@ const SCIENCE_WORDS: &[&str] = &[
 /// Rule 12's cue, or None.
 /// - Never on an exact-phrase or operator query (a quote, `site:`, a URL).
 /// - A question's frame ("what do people say about", [`PEOPLE_FRAMES`]) is
-///   an explicit request and always counts.
+///   an explicit request and counts beside a lookup or biomedical word.
 /// - Any other cue yields to a lookup word, a biomedical word, and a places,
 ///   scholar, academic or people signal (rules 6-9): those ask for a page, a
 ///   paper, a place or a person. "X review" counts only as the last words.
@@ -1295,14 +1303,18 @@ pub fn people_cue(query: &str) -> Option<String> {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if lower.contains('"')
+    // An exact phrase has two quotes; one is an inch mark (`27" monitor`).
+    if lower.matches('"').count() >= 2
         || lower.contains("site:")
         || lower.contains("http://")
         || lower.contains("https://")
     {
         return None;
     }
-    if let Some(frame) = first_phrase(&lower, PEOPLE_FRAMES) {
+    // Cut first, so "court opinions about ..." is not the frame "opinions
+    // about".
+    let cut = cut_phrases(&lower, PEOPLE_NOT);
+    if let Some(frame) = first_phrase(&cut, PEOPLE_FRAMES) {
         return Some(frame);
     }
     if first_phrase(&lower, LOOKUP_WORDS).is_some()
@@ -1311,18 +1323,22 @@ pub fn people_cue(query: &str) -> Option<String> {
     {
         return None;
     }
-    let cut = cut_phrases(&lower, PEOPLE_NOT);
     first_phrase(&cut, PEOPLE_PHRASES).or_else(|| {
         let cut = cut.trim_end();
         (cut.ends_with(" review") && cut.len() > " review".len()).then(|| "review".to_string())
     })
 }
 
-/// Rule 12 as a hit. The pages stay what they would have been: `news` when
-/// the query has a news word (rule 10), else `general`.
+/// Rule 10's words that say when ("best news apps" and "best breaking bad
+/// episodes" have a rule 10 word and are not news).
+const NEWS_TIME_WORDS: &[&str] = &["today", "yesterday", "this week", "latest"];
+
+/// Rule 12 as a hit. The pages are `news` when the query says when
+/// ([`NEWS_TIME_WORDS`], each of which also sets the freshness filter),
+/// else `general`.
 pub fn people_hit(query: &str) -> Option<Hit> {
     let cue = people_cue(query)?;
-    let base = if signals(query).iter().any(|h| h.rule == 10) {
+    let base = if first_phrase(&query.to_lowercase(), NEWS_TIME_WORDS).is_some() {
         Mode::News
     } else {
         Mode::General
@@ -1338,18 +1354,21 @@ const PEOPLE_FRAMES: &[&str] = &[
     "what are people saying about",
     "opinions about",
     "experiences with",
-    "thoughts on",
 ];
-// Every frame is ASCII: `people_query` relies on it.
+// Every frame is ASCII: `people_query` relies on it. "thoughts on" is a cue
+// but not a frame: "suicidal thoughts on SSRIs" is not a question about
+// what people think.
 
 /// The query the added modes search: `query` without a frame such as "what
 /// do people say about", because Reddit, Hacker News and the platforms match
 /// the words they are given. Unchanged when nothing else would be left.
 pub fn people_query(query: &str) -> String {
-    // ASCII lowercasing keeps every byte offset, whatever else the query
-    // holds (full lowercasing can move them: "İ" shrinks, "K" grows).
-    let mut low = query.to_ascii_lowercase();
-    let mut text = query.to_string();
+    // Collapsed first, like the cue check, so a frame typed with two spaces
+    // is still cut. ASCII lowercasing keeps every byte offset, whatever
+    // else the query holds (full lowercasing can move them: "İ" shrinks,
+    // "K" grows).
+    let mut text = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut low = text.to_ascii_lowercase();
     for p in PEOPLE_FRAMES {
         while let Some(i) = low
             .match_indices(p)
@@ -1761,8 +1780,14 @@ mod tests {
                 "what do people say about the stripe api",
                 "what do people say about",
             ),
-            ("thoughts on the ceo of stripe", "thoughts on"),
             ("experiences with rapamycin dosage", "experiences with"),
+            ("thoughts on tailwind v4", "thoughts on"),
+            // One quote is an inch mark, and gaming mice are not lab mice.
+            ("best 27\" monitor", "best"),
+            ("best gaming mice 2026", "best"),
+            // A rule 10 word that is not about when leaves the pages general.
+            ("best breaking bad episodes", "best"),
+            ("best news apps", "best"),
         ] {
             let h = people_hit(q).unwrap_or_else(|| panic!("{q}: no rule"));
             assert_eq!(
@@ -1880,6 +1905,16 @@ mod tests {
             "app store review",
             "year in review",
             "review",
+            // Second review (19 Nov): reviews that are not of a product, a
+            // court's opinions, a symptom, a hotel chain, lab mice.
+            "what is judicial review",
+            "visa application under review",
+            "microplastics health effects scoping review",
+            "court opinions about qualified immunity",
+            "suicidal thoughts on ssris in patients",
+            "thoughts on the ceo of stripe",
+            "best western hotel lisbon",
+            "rapamycin vs everolimus lifespan in mice",
         ] {
             assert_eq!(people_cue(q), None, "{q}");
         }
@@ -1907,13 +1942,15 @@ mod tests {
         // Letters whose lowercase has another byte length keep their
         // offsets: these used to cut inside a character.
         assert_eq!(
-            people_query("\u{0130}\u{0130} thoughts on \u{212B}\u{212B}"),
+            people_query("\u{0130}\u{0130} opinions about \u{212B}\u{212B}"),
             "\u{0130}\u{0130} \u{212B}\u{212B}"
         );
         assert_eq!(
-            people_query("\u{0130}stanbul thoughts on \u{1E9E}"),
+            people_query("\u{0130}stanbul opinions about \u{1E9E}"),
             "\u{0130}stanbul \u{1E9E}"
         );
+        // A frame typed with two spaces is still a frame.
+        assert_eq!(people_query("opinions  about   tailwind v4"), "tailwind v4");
     }
 
     /// Rule 2's platform cues: one per cue, each pinning its platform, and

@@ -140,6 +140,32 @@ const MODE_PHRASES: &[(&str, &[&str])] = &[
             "proof",
             "anxiety",
             "credit",
+            "distancing",
+            "work",
+            "worker",
+            "workers",
+            "justice",
+            "care",
+            "class",
+            "skills",
+            "psychology",
+            "contract",
+            "housing",
+            "democrats",
+            "democracy",
+            "enterprise",
+            "capital",
+            "mobility",
+            "norms",
+            "movements",
+            "welfare",
+            "impact",
+            "life",
+            "learning",
+            "commerce",
+            "listening",
+            "selling",
+            "engineering",
         ],
     ),
     (
@@ -639,7 +665,9 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             .filter(|w| !GLOBAL_FLAG_TOKENS.contains(&w.as_str()))
             .cloned()
             .collect();
-        match shorthand_mode(&words) {
+        // After `--` every word is the query, as the caller said.
+        let literal = std::env::args().any(|a| a == "--");
+        match (!literal).then(|| shorthand_mode(&words)).flatten() {
             Some((mode, query)) => {
                 let mut args = default_search_args(query);
                 args.mode = mode;

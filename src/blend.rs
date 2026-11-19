@@ -24,10 +24,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// How long an added mode may run: the social wait, which keeps 96% of X's
-/// answers (see `registry::SOCIAL_WAIT`). X is billed when sent, so a
-/// shorter cap would pay for posts and then drop them; the price is that a
-/// search with posts added takes X's time, about 24 s, not general's 3 s.
+/// How long an added mode may run when its calls go straight to their
+/// providers: the social wait, which keeps 96% of X's answers (see
+/// `registry::SOCIAL_WAIT`). X is billed when sent, so a shorter cap would
+/// pay for posts and then drop them; the price is that a search with posts
+/// added takes X's time, about 24 s. An added mode with a hosted call keeps
+/// its own deadline (`engine::run_capped`).
 pub const LANE_CAP: Duration = registry::SOCIAL_WAIT;
 
 /// The merged search and the added modes that were sent.
@@ -50,6 +52,16 @@ pub async fn run(
     lanes: &[Mode],
 ) -> Result<Blend, SearchError> {
     let start = Instant::now();
+    // A mode with no slot is not run: at -c 1 the one row is a page, and X
+    // would be paid for posts that cannot appear.
+    let share = shares(count, lanes.len());
+    let lanes: Vec<Mode> = lanes
+        .iter()
+        .zip(&share[1..])
+        .filter(|(_, slots)| **slots > 0)
+        .map(|(m, _)| *m)
+        .collect();
+    let lanes = lanes.as_slice();
     let posts_query = router::people_query(query);
     let lane = |mode: Option<Mode>| {
         let ctx = ctx.clone();
@@ -73,7 +85,15 @@ pub async fn run(
         .copied()
         .zip([a, b].into_iter().flatten())
         .collect();
-    merge(query, base, count, pages, added, start.elapsed())
+    merge(
+        query,
+        base,
+        count,
+        pages,
+        added,
+        start.elapsed(),
+        hosting.is_some(),
+    )
 }
 
 /// Result slots per part for `count` rows: the pages keep half (the odd one
@@ -102,6 +122,9 @@ struct Totals {
     notes: Vec<String>,
     /// A part answered, with or without rows.
     answered: bool,
+    /// Logged in: a provider with a key variable may have been reached
+    /// through metasearch.sh, so a failed one's transport is not known.
+    logged_in: bool,
 }
 
 /// Add `name` once: two parts can each have made a hosted call, and both
@@ -147,13 +170,16 @@ impl Totals {
                 add_name(&mut self.timed_out, &f.provider);
             }
             let reached = match providers::find(&f.provider) {
-                _ if f.provider == HOSTED_SPEC.name => "hosted",
-                Some(spec) if spec.env_keys.is_empty() => "local",
-                _ => "direct",
+                _ if f.provider == HOSTED_SPEC.name => Some("hosted"),
+                Some(spec) if spec.env_keys.is_empty() => Some("local"),
+                Some(_) if !self.logged_in => Some("direct"),
+                _ => None,
             };
-            self.transport
-                .entry(f.provider.clone())
-                .or_insert_with(|| reached.to_string());
+            if let Some(reached) = reached {
+                self.transport
+                    .entry(f.provider.clone())
+                    .or_insert_with(|| reached.to_string());
+            }
         }
         self.failures.extend(failed);
         self.costs.extend(cost);
@@ -179,7 +205,8 @@ impl Totals {
 /// One envelope from the pages run and the added modes' runs. A part that
 /// could not run or failed never fails the search while another part
 /// answered: it leaves a note or its `provider_failures`. With no answer
-/// from any part the error is the pages run's: "no providers" when no web
+/// from any part, or with pages that did not answer and posts that came
+/// back empty, the error is the pages run's: "no providers" when no web
 /// engine is configured (a setup problem, unless a failed added call was
 /// billed and has to be reported), else every failure with every cost.
 pub fn merge(
@@ -189,8 +216,12 @@ pub fn merge(
     pages: Run,
     added: Vec<(Mode, Run)>,
     elapsed: Duration,
+    logged_in: bool,
 ) -> Result<Blend, SearchError> {
-    let mut t = Totals::default();
+    let mut t = Totals {
+        logged_in,
+        ..Totals::default()
+    };
     let mut routing = Routing::default();
     let mut no_pages: Option<SearchError> = None;
     let mut pages_failed = false;
@@ -240,7 +271,11 @@ pub fn merge(
         });
     }
 
-    if !t.answered {
+    // No answer at all, or the pages did not answer and the posts that did
+    // are empty: the pages' failure is the result (a setup or provider
+    // error with its exit code), not "no results".
+    let rows = parts.iter().any(|p| !p.is_empty()) || !t.answers.is_empty();
+    if !t.answered || ((no_pages.is_some() || pages_failed) && !rows) {
         return Err(match no_pages {
             Some(e) if t.cost().is_none_or(|c| c.micros == 0) => e,
             _ => SearchError::AllProvidersFailed {
@@ -491,6 +526,7 @@ mod tests {
                 ),
             ],
             Duration::from_millis(1200),
+            false,
         )
         .unwrap();
         let r = &b.response;
@@ -542,6 +578,7 @@ mod tests {
                 ),
             ],
             Duration::ZERO,
+            false,
         )
         .unwrap();
         let got = hosts(&b.response);
@@ -576,6 +613,7 @@ mod tests {
                 answered(Mode::Community, "reddit", 0, "estimate", threads),
             )],
             Duration::ZERO,
+            false,
         )
         .unwrap();
         let r = &b.response;
@@ -609,6 +647,7 @@ mod tests {
                 ),
             ],
             Duration::ZERO,
+            false,
         )
         .unwrap();
         let r = &b.response;
@@ -645,6 +684,7 @@ mod tests {
                 ),
             )],
             Duration::ZERO,
+            false,
         )
         .unwrap();
         assert_eq!(hosts(&b.response), ["reddit"; 4]);
@@ -662,6 +702,7 @@ mod tests {
             all_failed("serper", None),
             vec![(Mode::Social, all_failed("xai", Some(45_000)))],
             Duration::ZERO,
+            false,
         )
         .err()
         .unwrap();
@@ -682,6 +723,7 @@ mod tests {
                 Err(SearchError::NoProviders("social".to_string())),
             )],
             Duration::ZERO,
+            false,
         )
         .err()
         .unwrap();
@@ -705,6 +747,7 @@ mod tests {
                 ),
             )],
             Duration::ZERO,
+            false,
         )
         .err()
         .unwrap();
@@ -724,6 +767,7 @@ mod tests {
             Err(SearchError::NoProviders("general".to_string())),
             vec![(Mode::Community, all_failed("reddit", None))],
             Duration::ZERO,
+            false,
         )
         .err()
         .unwrap();
@@ -735,6 +779,7 @@ mod tests {
             Err(SearchError::NoProviders("general".to_string())),
             vec![(Mode::Social, all_failed("xai", Some(45_000)))],
             Duration::ZERO,
+            false,
         )
         .err()
         .unwrap();
@@ -752,6 +797,7 @@ mod tests {
     fn a_failed_part_keeps_its_timed_out_calls_and_transport() {
         let mut still = failure("xai", FailureCategory::Timeout);
         still.code = "timeout".to_string();
+        still.reason = "xai was still running when the search stopped waiting".to_string();
         let b = merge(
             "q",
             Mode::News,
@@ -774,6 +820,7 @@ mod tests {
                 (Mode::Community, all_failed("reddit", None)),
             ],
             Duration::ZERO,
+            false,
         )
         .unwrap();
         let m = &b.response.metadata;
@@ -807,6 +854,7 @@ mod tests {
                 ),
             ],
             Duration::ZERO,
+            false,
         )
         .unwrap();
         let m = &b.response.metadata;
@@ -819,5 +867,74 @@ mod tests {
             m.notes,
             ["posts only: every web engine failed (see provider_failures)"]
         );
+    }
+
+    /// At -c 1 the one row is a page: no added mode has a slot, so none is
+    /// worth running (X would be paid for posts that cannot appear).
+    #[test]
+    fn a_mode_with_no_slot_has_no_share() {
+        assert_eq!(shares(1, 2)[1..], [0, 0]);
+        assert_eq!(shares(2, 2)[1..], [1, 0]);
+        assert_eq!(shares(3, 2)[1..], [1, 0]);
+        assert_eq!(shares(4, 2)[1..], [1, 1]);
+    }
+
+    /// Pages that did not answer plus posts that came back empty is the
+    /// pages' error, not "no results": no web engine stays a setup error.
+    #[test]
+    fn empty_posts_do_not_hide_that_the_pages_did_not_answer() {
+        let empty = || answered(Mode::Community, "reddit", 0, "estimate", Vec::new());
+        let err = merge(
+            "q",
+            Mode::General,
+            4,
+            Err(SearchError::NoProviders("general".to_string())),
+            vec![(Mode::Community, empty())],
+            Duration::ZERO,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, SearchError::NoProviders(_)), "{err}");
+        let err = merge(
+            "q",
+            Mode::General,
+            4,
+            all_failed("serper", None),
+            vec![(Mode::Community, empty())],
+            Duration::ZERO,
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            matches!(err, SearchError::AllProvidersFailed { .. }),
+            "{err}"
+        );
+    }
+
+    /// Logged in, a failed provider that has a key variable may have been
+    /// reached through metasearch.sh: its transport is left out, not guessed.
+    #[test]
+    fn a_failed_keyed_provider_has_no_guessed_transport_when_logged_in() {
+        let b = merge(
+            "q",
+            Mode::General,
+            4,
+            answered(
+                Mode::General,
+                "serper",
+                1_000,
+                "charged",
+                rows("serper", "web.example", 4),
+            ),
+            vec![(Mode::Social, all_failed("tiktok", None))],
+            Duration::ZERO,
+            true,
+        )
+        .unwrap();
+        assert!(!b.response.metadata.transport.contains_key("tiktok"));
+        // A provider's own timeout is not "still running at the deadline".
+        assert!(b.response.metadata.providers_timed_out.is_empty());
     }
 }
