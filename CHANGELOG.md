@@ -13,6 +13,9 @@
   search does not offer: `search search -q "…" -d facebook.com`, then extract
   the URL for the post and its comments.
 - Run `search skill install` after upgrading to replace the installed skill.
+- The DNS library behind `search verify` is updated to 0.26.3, which fixes
+  23 advisories published since 0.12.1 (panics and wasted queries on
+  malformed or hostile DNS answers).
 
 ## 0.12.1 — 2026-11-04
 

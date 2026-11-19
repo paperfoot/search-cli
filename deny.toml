@@ -12,6 +12,10 @@ ignore = [
     # `search update` uses the GitHub backend. Drop once self_update moves.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # hyper 1.x -> pin-utils: its repository was archived, no upgrade is
+    # published and no defect is reported; it is two pinning macros. Drop
+    # once hyper stops depending on it.
+    "RUSTSEC-2026-0441",
 ]
 
 [licenses]
