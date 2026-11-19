@@ -50,8 +50,8 @@ or lived experience, cite posts beside the pages.
   `search search -q "…" -m community --json` (Reddit and Hacker News,
   usually free) and `search search -q "…" -m social --json` (X and, unless
   the query is breaking news, one of TikTok, Instagram or YouTube).
-- X is the costly call and takes about 25 s (up to 40), so a search with
-  posts added is dearer and slower than a plain one; `--tiktok`, `--youtube` or
+- X is the costly call and takes about 25 s, so a search with posts added
+  is dearer and slower than a plain one; `--tiktok`, `--youtube` or
   `--instagram` alone costs a small fraction of X, and `--x "…"` is X
   alone. `search agent-info` lists each price. `-m general` returns pages
   only.

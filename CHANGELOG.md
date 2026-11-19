@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.13.1 — 2026-11-19
+
+- A search with posts added no longer runs a mode that has no result slot:
+  at `-c 1` the one row is a page, and X used to be asked, and paid, for
+  posts that could not appear (`-c 2` and `-c 3` leave community out).
+- Fewer false cues. A final "review" no longer counts in "judicial
+  review", "under review" or a "scoping review"; "court opinions about …"
+  is not the frame "opinions about"; "thoughts on" is a cue but no longer
+  a frame, so "suicidal thoughts on SSRIs in patients" stays a lookup; the
+  pages turn to `news` only on a word that says when ("latest", "today"),
+  not on "best news apps" or "best breaking bad episodes".
+- Fewer missed cues: one quote is an inch mark, not an exact phrase
+  (`best 27" monitor`), and "best gaming mice" is not about lab mice.
+- When no web engine answers and the posts come back empty, the search
+  fails with the pages' error (exit 2 with no web engine set up) instead
+  of reporting `no_results`.
+- `providers_timed_out` lists only calls still running when the search
+  stopped waiting, and a failed provider's `transport` is left out when it
+  cannot be known (logged in, with a key variable).
+- `search -- social "two words"` is a query, as `--` says, and more
+  phrases that open with "social" stay queries ("social distancing rules").
+
 ## 0.13.0 — 2026-11-19
 
 - Auto adds posts to a search that asks what people think. A query with an
@@ -32,8 +54,8 @@
 - An added mode that cannot run (no key and not logged in) leaves a line
   in `metadata.notes`; one that fails is in `provider_failures`. Neither
   fails the search while pages came back. When the posts answer and no
-  web engine does, the search still succeeds (`partial_success`) and a
-  note says the results are posts only.
+  web engine does, the search still succeeds and a note says the results
+  are posts only.
 - `social` with your own keys waits 40 s for a slow platform once another
   has answered, up from 20 s. X's median answer took 24 s over 163
   searches, so the 20 s wait cut X off, after it was billed, in about
