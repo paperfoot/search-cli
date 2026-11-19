@@ -10,9 +10,11 @@ description: >
   find sources or papers for a claim, read the text of a URL, or research a
   person, company, product or market. Posts are sources too: when the
   question turns on opinions, reviews, experiences, reputation, trends or
-  what customers want, also run `-m social` (X, TikTok, Instagram, YouTube)
-  and `-m community` (Reddit, Hacker News) and cite the posts. The mode
-  defaults to auto and is reported; every result envelope carries its cost.
+  what customers want, cite them. Auto adds social and community posts to
+  a query phrased that way ("… reviews", "is … worth it"); otherwise run
+  `-m social` (X, TikTok, Instagram, YouTube) and `-m community` (Reddit,
+  Hacker News). The mode defaults to auto and is reported; every result
+  envelope carries its cost.
   Run `search agent-info` for the full manifest.
 compatibility: Requires the search binary (brew install paperfoot/tap/search-cli) and network access
 allowed-tools: Bash(search:*)
@@ -28,20 +30,31 @@ exit code.
 ## Ask people as well as pages
 
 A web search returns what sites publish. What customers, users and critics
-say is on X, TikTok, Instagram, YouTube, Reddit and Hacker News, and auto
-seldom goes there unless the query names a platform or asks for opinions.
-When the task is about a product, company, person, market, trend,
-reputation, review or lived experience, run all three and cite the posts
-beside the pages:
+say is on X, TikTok, Instagram, YouTube, Reddit and Hacker News. When the
+task is about a product, company, person, market, trend, reputation, review
+or lived experience, cite posts beside the pages.
 
-- `search "…" --json`: the web.
-- `search search -q "…" -m community --json`: Reddit and Hacker News
-  threads. It runs on this machine with no key and is the cheapest of the
-  three, usually free.
-- `search search -q "…" -m social --json`: X and, unless the query is
-  breaking news, one of TikTok, Instagram or YouTube. X is the costly call;
-  `--tiktok`, `--youtube` or `--instagram` alone costs a small fraction of
-  it, and `--x "…"` is X alone. `search agent-info` lists each price.
+- Auto adds the posts itself when the query asks what people think: "what
+  do people say about …", "… reviews", "is … worth it", "… vs …", "best …",
+  "alternatives to …", "… backlash", "viral …". Half of the results are then
+  posts (of ten: five pages, three social posts, two Reddit or Hacker News
+  threads), and `metadata.routing.auto.added` lists `social` and
+  `community`. Phrase the query that way and one search does it; running
+  `-m social` for the same query as well pays for X a second time.
+- "what do people say about …", "opinions about …", "experiences with …"
+  and "thoughts on …" always add the posts. The shorter cues do not when
+  the query reads as a lookup: "api", "docs", "error", "github", a
+  biomedical term, a paper, a place or a person.
+- When `added` is absent (no such words, a `-p` or `-d`, or a lookup), ask
+  for the posts:
+  `search search -q "…" -m community --json` (Reddit and Hacker News,
+  usually free) and `search search -q "…" -m social --json` (X and, unless
+  the query is breaking news, one of TikTok, Instagram or YouTube).
+- X is the costly call and takes about 25 s (up to 40), so a search with
+  posts added is dearer and slower than a plain one; `--tiktok`, `--youtube` or
+  `--instagram` alone costs a small fraction of X, and `--x "…"` is X
+  alone. `search agent-info` lists each price. `-m general` returns pages
+  only.
 
 Then extract the best thread, post or video URL to read the whole
 discussion, the transcript and the top comments. Facebook has no keyword
@@ -56,18 +69,19 @@ The mode defaults to `auto`: fixed rules first (a lone URL is `extract`;
 but never code like `@property` or an email; "tiktok", "instagram reels",
 "youtube", "on threads" or "facebook page" is `social` on that platform,
 never "youtube api" or "embed a youtube video"; "reddit", "hacker news",
-"on HN", `r/<name>`, "what do people say about", "opinions about" or
-"experiences with" is `community`, never "reddit api", "r/min" or a bare
-"HN"; `similar to <URL>` is
+"on HN" or `r/<name>` is `community`, never "reddit api", "r/min" or a bare
+"HN"; a question about what people think ("opinions about", "reviews",
+"worth it", "vs", "best") is `general` (`news` with a news word) with
+`social` and `community` posts added, never with `-p` or `-d`;
+`similar to <URL>` is
 `similar`;
 "patent" or "prior art" is `patents`, never "patent leather"; "images of" is
 `images`, never Docker or VM images), then metasearch.sh's routing model when
 logged in, else keyword rules, else `general`. In `news` and `social`, a time word sets `-f` unless
 you passed one ("today", "yesterday" → `day`;
 "this week", "latest", "breaking" → `week`; "this month", "this year" →
-`month`, `year`). Auto never picks `deep`, and picks `social` only on a
-platform cue: ask for those two with `-m`. An explicit `-m` or `-p` always
-wins; if the `-p` engines cannot serve the mode auto picked, the search runs
+`month`, `year`). Auto never picks `deep`: ask for it with `-m`. An explicit
+`-m` or `-p` always wins; if the `-p` engines cannot serve the mode auto picked, the search runs
 as `general` (as `community` for `-p reddit` or `-p hackernews`, `social` for
 `-p tiktok` and the other platforms).
 
@@ -80,6 +94,7 @@ Pass `-m` when auto is not what you want:
 | Papers on a topic | `-m academic` |
 | A paper's citations, versions, PDF | `-m scholar` |
 | A person, their role, their LinkedIn | `-m people` |
+| Pages and posts about a product, company or opinion | `search "… reviews"`, `"is … worth it"`, `"… vs …"` (auto adds the posts) |
 | What X, TikTok, Instagram and YouTube show about something | `-m social` |
 | One platform | `"… on tiktok"`, or `--tiktok`, `--instagram`, `--youtube`, `--threads`, `--x` |
 | What real people say (Reddit, Hacker News) | `-m community` |
@@ -119,7 +134,8 @@ Examples:
 
 `-m social` with no platform named searches X plus the platform likeliest to
 hold the answer (TikTok, Instagram reels or YouTube), two paid calls at most,
-and fuses the hits; once one has answered it waits at most 20 s for the other
+and fuses the hits; once one has answered, a search with your own keys
+waits at most 40 s for the other
 (stragglers are listed in `metadata.providers_timed_out`). Name platforms with
 `-p` to search more of them. Naming a platform
 ("on tiktok", "instagram reels", "youtube comments", "on threads", "facebook
@@ -192,7 +208,11 @@ and the same comments as records in `extra.comments[]` (`id`, `parent`,
 
 - `mode` is the mode that ran (e.g. `news`), never `auto`.
   `metadata.routing.auto` repeats it with `source` (`rule`, `model`,
-  `heuristic`, `fallback`), a one-sentence `reason` and any `filters_applied`.
+  `heuristic`, `fallback`), a one-sentence `reason`, any `filters_applied`
+  and `added`: the modes whose posts were added to the pages. Each row's
+  `source` names its engine; a post's is `xai`, `tiktok`, `instagram`,
+  `youtube`, `reddit` or `hackernews`. Added posts are not reranked and
+  carry no `extra.relevance`.
 - `results[]` are deduplicated and, in fused modes, ranked by agreement:
   `extra.also_found_by` lists the engines that also returned a URL. Logged
   in, general, news, academic, scholar, people and deep results are then
