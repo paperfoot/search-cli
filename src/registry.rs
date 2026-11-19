@@ -94,10 +94,13 @@ const EXTRACT_CHAIN: &[&str] = &[
 /// Threads and Facebook (page search) run on their cue or `-p`.
 const SOCIAL_FAN_OUT: &[&str] = &["xai", "tiktok", "instagram", "youtube"];
 
-/// How long the social fan-out waits before it takes the answers it has:
-/// the platforms answer in 3 to 14 s (measured 4 Nov 2026) and X's median
-/// is 18 s, so 20 s keeps a typical X answer and drops only a straggler.
-pub const SOCIAL_WAIT: Duration = Duration::from_secs(20);
+/// How long the social fan-out waits before it takes the answers it has.
+/// The platforms answer in 3 to 14 s (measured 4 Nov 2026). X is the slow
+/// one: over 163 searches in the 30 days to 19 Nov 2026 its median was
+/// 24 s, 28% had answered by 20 s, 82% by 30 s and 96% by 40 s. The wait
+/// was 20 s until 0.13, which cut X off, after it was billed, in about
+/// seven of ten searches that paired it with a faster platform.
+pub const SOCIAL_WAIT: Duration = Duration::from_secs(40);
 
 pub const MODES: &[ModeSpec] = &[
     ModeSpec {

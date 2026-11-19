@@ -40,8 +40,8 @@ pub const PRICE: Price = Price {
 
 /// Per-provider deadline. Measured on 4 Nov 2026: TikTok 4 to 13 s,
 /// Threads 9 s, Instagram 11 to 14 s, YouTube 3 to 5 s; 20 s leaves room
-/// for a slow Instagram page without letting one platform hold up the
-/// social fan-out (whose wait for stragglers is the same 20 s).
+/// for a slow Instagram page. (The social fan-out waits longer for
+/// stragglers, `registry::SOCIAL_WAIT`, because X is slower than these.)
 pub const TIMEOUT: Duration = Duration::from_secs(20);
 
 pub const fn filters(freshness: bool) -> FilterSupport {
