@@ -106,6 +106,7 @@ const SEARCH_FLAG_TOKENS: &[&str] = &[
     "-p",
     "--providers",
     "-c",
+    "-n",
     "--count",
     "-f",
     "--freshness",
@@ -119,6 +120,89 @@ const SEARCH_FLAG_TOKENS: &[&str] = &[
     "--max-chars",
     "--allow-private",
 ];
+
+/// Words that follow a mode's name in ordinary English ("social media",
+/// "general relativity", "news about"): the pair is then a query, not a
+/// mode and its query.
+const MODE_PHRASES: &[(&str, &[&str])] = &[
+    (
+        "social",
+        &[
+            "media",
+            "network",
+            "networks",
+            "networking",
+            "security",
+            "science",
+            "sciences",
+            "studies",
+            "proof",
+            "anxiety",
+            "credit",
+        ],
+    ),
+    (
+        "general",
+        &[
+            "relativity",
+            "motors",
+            "electric",
+            "election",
+            "elections",
+            "anesthesia",
+            "anaesthesia",
+            "strike",
+            "ledger",
+            "purpose",
+        ],
+    ),
+    ("news", &["about", "on", "of", "from", "for"]),
+    ("people", &["also", "who", "of", "with", "in"]),
+    (
+        "community",
+        &["college", "colleges", "notes", "service", "guidelines"],
+    ),
+    (
+        "academic",
+        &["calendar", "writing", "year", "integrity", "freedom"],
+    ),
+];
+
+/// `search social "standing desk wobble"` and `search extract <url>`: the
+/// mode written as if it were a subcommand. It used to be searched as text
+/// in auto mode (55 of the 5,289 searches logged on one machine in the 30
+/// days to 19 Nov 2026), so an agent that asked for social got a web search
+/// for "social …". Read as `-m <mode>` only when exactly one argument
+/// follows and it fits the mode: a URL for a mode that takes one (extract,
+/// scrape, similar), else a quoted query (it holds a space) that does not
+/// carry on a phrase the mode's name opens ("social" "media marketing").
+/// So `search social media trends`, `search similar "triangles proof"` and
+/// `search auto "insurance quotes"` stay queries. Never `deep`: it costs
+/// several times a general search, and "deep learning …" opens many queries.
+fn shorthand_mode(words: &[String]) -> Option<(cli::ModeArg, String)> {
+    let [first, rest] = words else {
+        return None;
+    };
+    let cli::ModeArg::Fixed(mode) = cli::parse_mode_arg(first).ok()? else {
+        return None;
+    };
+    if mode == types::Mode::Deep {
+        return None;
+    }
+    let scheme = rest.get(..8).unwrap_or(rest).to_ascii_lowercase();
+    let url = scheme.starts_with("http://") || scheme.starts_with("https://");
+    let fits = if registry::spec(mode).input == registry::InputKind::Url {
+        url
+    } else {
+        let mut tail = rest.split_whitespace();
+        let next = tail.next().unwrap_or_default().to_lowercase();
+        let phrase = MODE_PHRASES
+            .iter()
+            .any(|(m, after)| first.eq_ignore_ascii_case(m) && after.contains(&next.as_str()));
+        !url && tail.next().is_some() && !phrase
+    };
+    fits.then(|| (cli::ModeArg::Fixed(mode), rest.clone()))
+}
 
 /// The first search flag among shorthand query words, `--flag=value` included.
 fn shorthand_search_flag(words: &[String]) -> Option<&str> {
@@ -541,14 +625,20 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
         }
         // Drop any global-flag tokens trailing_var_arg swallowed into the query
         // (their effect was already applied via the pre-scan merge in main).
-        let query = cli
+        let words: Vec<String> = cli
             .query_words
             .iter()
             .filter(|w| !GLOBAL_FLAG_TOKENS.contains(&w.as_str()))
             .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
-        Commands::Search(default_search_args(query))
+            .collect();
+        match shorthand_mode(&words) {
+            Some((mode, query)) => {
+                let mut args = default_search_args(query);
+                args.mode = mode;
+                Commands::Search(args)
+            }
+            None => Commands::Search(default_search_args(words.join(" "))),
+        }
     } else {
         use clap::CommandFactory;
         if cli.json {

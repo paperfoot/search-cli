@@ -234,7 +234,7 @@ pub struct SearchArgs {
     pub no_rerank: bool,
 
     /// Number of results to return
-    #[arg(short, long)]
+    #[arg(short, long, visible_short_alias = 'n')]
     pub count: Option<usize>,
 
     /// Use only specific providers (comma-separated: parallel,brave,serper,exa,jina,linkup,firecrawl,tavily,serpapi,perplexity,browserless,direct,stealth,xai,reddit,hackernews,tiktok,instagram,youtube,facebook,threads)
@@ -295,7 +295,7 @@ impl std::fmt::Display for ModeArg {
     }
 }
 
-fn parse_mode_arg(s: &str) -> Result<ModeArg, String> {
+pub fn parse_mode_arg(s: &str) -> Result<ModeArg, String> {
     use clap::ValueEnum;
     if s.eq_ignore_ascii_case("auto") {
         return Ok(ModeArg::Auto);

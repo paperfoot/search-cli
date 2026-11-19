@@ -728,3 +728,65 @@ fn stored_platforms_key_configures_every_platform() {
         }
     }
 }
+
+/// Agents write the mode as if it were a subcommand (`search social "…"`,
+/// `search extract <url>`). The word used to be searched as text in auto
+/// mode; it is the mode now, but only before one quoted argument or a URL.
+#[test]
+fn shorthand_reads_a_mode_word_before_a_quoted_query_or_url() {
+    let run = |args: &[&str]| {
+        let out = offline_cmd("modeword").args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    // No key, no login: the error names the mode that was asked for.
+    let social = run(&["social", "standing desk wobble", "--json"]);
+    assert!(social.contains("mode 'social'"), "{social}");
+    let people = run(&["People", "head of design at stripe", "--json"]);
+    assert!(people.contains("mode 'people'"), "{people}");
+    // A URL after `extract` is extracted, not searched for.
+    let extract = run(&["extract", "http://127.0.0.1:9/page", "--json"]);
+    assert!(!extract.contains("mode 'general'"), "{extract}");
+    // Bare words, a lone word, `deep`, `auto`, a phrase the mode's name
+    // opens, and a URL mode without a URL all stay queries.
+    for args in [
+        &["social", "media", "trends", "--json"][..],
+        &["social", "--json"][..],
+        &["deep", "learning for navigation", "--json"][..],
+        &["auto", "insurance quotes", "--json"][..],
+        &["social", "media marketing", "--json"][..],
+        &["general", "relativity explained simply", "--json"][..],
+        &["similar", "triangles proof", "--json"][..],
+        &["extract", "text from pdf", "--json"][..],
+    ] {
+        let plain = run(args);
+        assert!(plain.contains("mode 'general'"), "{args:?}: {plain}");
+    }
+}
+
+/// `-n 6` after a shorthand query used to be searched as text ("… -n 6"):
+/// it is refused like `-c`, and the full form takes `-n` as `-c`.
+#[test]
+fn n_is_count_and_is_refused_after_a_shorthand_query() {
+    let out = offline_cmd("nflag")
+        .args(["rust async", "-n", "3", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("search search -q"), "{stdout}");
+    let out = offline_cmd("nflag")
+        .args([
+            "search",
+            "-q",
+            "rust async",
+            "-m",
+            "general",
+            "-n",
+            "3",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("mode 'general'"), "{stdout}");
+}
