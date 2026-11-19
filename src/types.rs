@@ -283,6 +283,10 @@ pub struct AutoDecision {
     pub filters_applied: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
+    /// Modes whose results were added to this search's own (rule 12:
+    /// `social` and `community` beside `general`). Only those that ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<String>,
 }
 
 /// The sources an envelope may show. Anything else (an older server named

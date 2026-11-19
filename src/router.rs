@@ -1,13 +1,22 @@
 //! `auto` mode: the deterministic rules of ROUTING.md, as a pure function.
 //!
 //! Rules 1-5 and 11 are decisive (the first match decides, the routing
-//! model is skipped); rule 11, a community cue (Reddit, Hacker News, "what
-//! do people say about"), is checked right after rule 2. Rules 6-10 are signals: when not logged in the first one in table
-//! order decides; logged in, metasearch.sh's routing model decides. Auto never picks `deep`, and
-//! picks `social` only on an explicit platform cue: X/Twitter, TikTok,
-//! Instagram, YouTube, Threads or a Facebook page. The cue also pins the
-//! social call to the platforms it names ([`social_pins`]). The server runs the same
-//! patterns; the table tests below mirror its vectors.
+//! model is skipped); rule 11, a community source named in the query
+//! (Reddit, Hacker News), is checked right after rule 2. Rules 6-10 are signals: when not logged in the first one in table
+//! order decides; logged in, metasearch.sh's routing model decides. Auto never picks `deep`.
+//! A platform cue (X/Twitter, TikTok, Instagram, YouTube, Threads or a
+//! Facebook page) makes the search `social` and pins it to the platforms it
+//! names ([`social_pins`]). The server runs the same
+//! patterns for rules 1-10 and for rule 11's named sources; the table tests
+//! below mirror its vectors. (Its rule 11 still holds the phrases that are
+//! rule 12's here.)
+//!
+//! Rule 12 is the CLI's own (19 Nov 2026): a query that asks what people
+//! think, whether something is worth buying, how two things compare or what
+//! is spreading stays `general` (`news` when it has a news word) and has
+//! `social` and `community` added to it ([`people_cue`], [`PEOPLE_LANES`]).
+//! Until that day auto reached `social` only on a platform cue, and "what do
+//! people say about" was a rule 11 phrase that searched `community` alone.
 
 use crate::types::{AutoDecision, Mode};
 
@@ -62,6 +71,7 @@ pub fn fit_pinned(mode: Mode, pinned: &[String]) -> Option<AutoDecision> {
         probabilities: None,
         filters_applied: None,
         latency_ms: None,
+        added: Vec::new(),
     })
 }
 
@@ -211,10 +221,14 @@ pub fn freshness(query: &str) -> Option<(&'static str, String)> {
         .find_map(|(value, words)| first_phrase(&lower, words).map(|w| (*value, w)))
 }
 
-/// The decision without the routing model: decisive rules, then the first signal, then general.
-pub fn resolve_local(query: &str) -> (AutoDecision, Option<String>) {
+/// The decision without the routing model: decisive rules, then rule 12
+/// when `people` allows it, then the first signal, then general.
+pub fn resolve_local(query: &str, people: bool) -> (AutoDecision, Option<String>) {
     if let Some(h) = decisive(query) {
         return (decision_for(&h, "rule"), h.query);
+    }
+    if let Some(h) = people.then(|| people_hit(query)).flatten() {
+        return (decision_for(&h, "rule"), None);
     }
     if let Some(h) = signals(query).into_iter().next() {
         return (decision_for(&h, "heuristic"), None);
@@ -227,6 +241,7 @@ pub fn resolve_local(query: &str) -> (AutoDecision, Option<String>) {
             probabilities: None,
             filters_applied: None,
             latency_ms: None,
+            added: Vec::new(),
         },
         None,
     )
@@ -241,16 +256,24 @@ pub fn decision_for(h: &Hit, source: &str) -> AutoDecision {
             h.cue
         ),
         3 => "Asked for sites similar to a URL".to_string(),
-        11 => format!("Asks what people say ('{}')", h.cue),
+        11 => format!("Names a community source ('{}')", h.cue),
+        12 => format!("Asks what people think ('{}')", h.cue),
         _ => format!("Matched '{}'", h.cue),
     };
+    let added: Vec<String> = if h.rule == 12 {
+        PEOPLE_LANES.iter().map(|m| m.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+    let tail = if added.is_empty() { "" } else { PEOPLE_TAIL };
     AutoDecision {
         mode: h.mode.to_string(),
         source: source.to_string(),
-        reason: format!("{why} (rule {}); used {}.", h.rule, h.mode),
+        reason: format!("{why} (rule {}); used {}{tail}.", h.rule, h.mode),
         probabilities: None,
         filters_applied: None,
         latency_ms: None,
+        added,
     }
 }
 
@@ -939,7 +962,10 @@ pub fn strip_platform_cues(query: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Phrases that ask what real people say.
+/// Words that name a community source. The phrases that ask what people
+/// say without naming one ("what do people say about", "opinions about",
+/// "experiences with") were here until 19 Nov 2026; they are rule 12's now
+/// ([`PEOPLE_PHRASES`]), which keeps the pages and adds the posts.
 const COMMUNITY_PHRASES: &[&str] = &[
     "reddit",
     "subreddit",
@@ -947,12 +973,6 @@ const COMMUNITY_PHRASES: &[&str] = &[
     "hackernews",
     "ask hn",
     "show hn",
-    "what do people say about",
-    "what do people think about",
-    "what do people think of",
-    "what are people saying about",
-    "opinions about",
-    "experiences with",
 ];
 
 /// Words after "reddit" that make it the company, not its threads.
@@ -964,11 +984,10 @@ const UNIT_NAMES: &[&str] = &[
     "revs", "mol", "kg", "km", "mph", "kmh", "rpm", "ms",
 ];
 
-/// Rule 11: a community cue. "reddit" (not "reddit api" or "reddit
-/// stock"), Hacker News or "on HN" (capitals; bare "HN" is also Honduras),
-/// an `r/<name>` of 3+ characters that is not a unit (`r/min`), or a phrase
-/// that asks what people say ("opinions on" is not one: "supreme court
-/// opinions on ...").
+/// Rule 11: a community source named in the query. "reddit" (not "reddit
+/// api" or "reddit stock"), Hacker News or "on HN" (capitals; bare "HN" is
+/// also Honduras), or an `r/<name>` of 3+ characters that is not a unit
+/// (`r/min`).
 fn community_cue(q: &str) -> Option<String> {
     let lower = q.to_lowercase();
     for p in COMMUNITY_PHRASES {
@@ -1006,6 +1025,363 @@ fn community_cue(q: &str) -> Option<String> {
                 && !UNIT_NAMES.contains(&name.to_ascii_lowercase().as_str())
         })
         .map(|w| w.trim_start_matches('/').to_string())
+}
+
+/// The modes rule 12 adds to a general search, in the order they share the
+/// result slots: the first takes the odd one.
+pub const PEOPLE_LANES: [Mode; 2] = [Mode::Social, Mode::Community];
+
+/// How rule 12's reason ends. `main` cuts it when no added mode could run.
+pub const PEOPLE_TAIL: &str = " and added posts";
+
+/// Rule 12's cues: the query asks what people think, whether something is
+/// worth buying, how two things compare, or what is spreading. Chosen
+/// against 30 days of logged general searches (19 Nov 2026) and a review of
+/// biomedical and code queries: words that fired on lookups were left out
+/// ("creators", "recommendations", "versus", "comparison", "reaction to",
+/// "feedback on", a bare "complaints" or "meme", "experience with").
+const PEOPLE_PHRASES: &[&str] = &[
+    // Asking people.
+    "what do people say about",
+    "what do people think about",
+    "what do people think of",
+    "what are people saying about",
+    "what people think",
+    "what people say",
+    "people are saying",
+    "opinions about",
+    "opinions on",
+    "experiences with",
+    "thoughts on",
+    "reactions to",
+    "public opinion",
+    "sentiment",
+    "word of mouth",
+    "testimonials",
+    "complaints about",
+    "customer complaints",
+    "user complaints",
+    "user feedback",
+    "customer feedback",
+    "anyone tried",
+    "anyone used",
+    "anyone using",
+    "has anyone",
+    "does anyone",
+    "real users",
+    "pain points",
+    "what customers want",
+    "what users want",
+    "why people",
+    "people love",
+    "people hate",
+    "frustrated with",
+    "frustrations with",
+    "backlash",
+    "controversy",
+    "outrage",
+    "hype",
+    "overrated",
+    "underrated",
+    // Buying and comparing.
+    "worth it",
+    "worth buying",
+    "worth the money",
+    "worth the price",
+    "worth the hype",
+    "worth getting",
+    "worth paying",
+    "should i buy",
+    "should i get",
+    "should i use",
+    "should i switch",
+    "should i upgrade",
+    "is it good",
+    "any good",
+    "anyone recommend",
+    "would you recommend",
+    "which is better",
+    "better than",
+    "alternatives to",
+    "alternative to",
+    "pros and cons",
+    "reviews",
+    "honest review",
+    "user review",
+    "customer review",
+    "vs",
+    "compared to",
+    "best",
+    // Spreading.
+    "trending",
+    "viral",
+    "memes",
+    // Trust.
+    "scam",
+    "legit",
+    "trustworthy",
+];
+
+/// Phrases in which a rule 12 cue word means something else. They are cut
+/// from the query before the cues are looked for.
+const PEOPLE_NOT: &[&str] = &[
+    "best practices",
+    "best practice",
+    "best effort",
+    "best-effort",
+    "best fit",
+    "best case",
+    "best-case",
+    "best-first",
+    "best way",
+    "best guess",
+    "best friend",
+    "best buy",
+    "best supportive care",
+    "at best",
+    "code reviews",
+    "peer reviews",
+    "systematic reviews",
+    "literature reviews",
+    "annual reviews",
+    "nature reviews",
+    "cochrane reviews",
+    "research reviews",
+    "performance reviews",
+    "resource reviews",
+    "choice reviews",
+    "code review",
+    "peer review",
+    "systematic review",
+    "literature review",
+    "annual review",
+    "performance review",
+    "security review",
+    "design review",
+    "business review",
+    "technology review",
+    "law review",
+    "app store review",
+    "app review",
+    "in review",
+    "court opinions",
+    "judicial opinions",
+    "advisory opinions",
+    "dissenting opinions",
+    "legal opinions",
+    "vs code",
+    "vs. code",
+    "sentiment analysis",
+    "sentiment classifier",
+    "sentiment model",
+    "sentiment score",
+    "hype cycle",
+    "allergic reactions",
+    "adverse reactions",
+    "skin reactions",
+    "immune reactions",
+    "chemical reactions",
+    "non-viral",
+    "viral loads",
+    "viral load",
+    "viral vectors",
+    "viral vector",
+    "viral infections",
+    "viral infection",
+    "viral rna",
+    "viral dna",
+    "viral proteins",
+    "viral protein",
+    "viral replication",
+    "viral genome",
+    "viral disease",
+    "viral shedding",
+    "viral titers",
+    "viral titer",
+    "viral entry",
+    "viral particles",
+    "viral particle",
+];
+
+/// Words that make the query a lookup of documents or code, where posts
+/// would only take the pages' places.
+const LOOKUP_WORDS: &[&str] = &[
+    "api",
+    "sdk",
+    "docs",
+    "documentation",
+    "error",
+    "exception",
+    "changelog",
+    "release notes",
+    "source code",
+    "github",
+    "npm",
+    "syntax",
+    "regex",
+    "stack trace",
+    "stacktrace",
+    "traceback",
+];
+
+/// Words of a biomedical question, where "vs", "best", "viral" and
+/// "reviews" are terms of art ("metformin vs placebo", "best supportive
+/// care", "viral hepatitis", "Ageing Research Reviews"). Words with an
+/// everyday sense are left out ("mouse", "cell", "protein", "treatment").
+const SCIENCE_WORDS: &[&str] = &[
+    "disease",
+    "diseases",
+    "cancer",
+    "tumor",
+    "tumour",
+    "clinical",
+    "placebo",
+    "mortality",
+    "patients",
+    "dosage",
+    "syndrome",
+    "infection",
+    "infections",
+    "inhibitor",
+    "inhibitors",
+    "receptor",
+    "receptors",
+    "proteins",
+    "gene",
+    "genes",
+    "genome",
+    "cells",
+    "mice",
+    "in vivo",
+    "in vitro",
+    "rna",
+    "dna",
+    "virus",
+    "viruses",
+    "hepatitis",
+    "vaccine",
+    "vaccines",
+    "screening",
+    "efficacy",
+    "randomized",
+    "randomised",
+    "cohort",
+    "biomarker",
+    "biomarkers",
+    "secretion",
+    "dementia",
+    "motif",
+    "nanoparticle",
+    "nanoparticles",
+    "capsid",
+    "senolytic",
+    "senolytics",
+    "enzyme",
+    "antibody",
+    "antibodies",
+    "assay",
+];
+
+/// Rule 12's cue, or None.
+/// - Never on an exact-phrase or operator query (a quote, `site:`, a URL).
+/// - A question's frame ("what do people say about", [`PEOPLE_FRAMES`]) is
+///   an explicit request and always counts.
+/// - Any other cue yields to a lookup word, a biomedical word, and a places,
+///   scholar, academic or people signal (rules 6-9): those ask for a page, a
+///   paper, a place or a person. "X review" counts only as the last words.
+pub fn people_cue(query: &str) -> Option<String> {
+    let lower = query
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if lower.contains('"')
+        || lower.contains("site:")
+        || lower.contains("http://")
+        || lower.contains("https://")
+    {
+        return None;
+    }
+    if let Some(frame) = first_phrase(&lower, PEOPLE_FRAMES) {
+        return Some(frame);
+    }
+    if first_phrase(&lower, LOOKUP_WORDS).is_some()
+        || first_phrase(&lower, SCIENCE_WORDS).is_some()
+        || signals(&lower).iter().any(|h| (6..=9).contains(&h.rule))
+    {
+        return None;
+    }
+    let cut = cut_phrases(&lower, PEOPLE_NOT);
+    first_phrase(&cut, PEOPLE_PHRASES).or_else(|| {
+        let cut = cut.trim_end();
+        (cut.ends_with(" review") && cut.len() > " review".len()).then(|| "review".to_string())
+    })
+}
+
+/// Rule 12 as a hit. The pages stay what they would have been: `news` when
+/// the query has a news word (rule 10), else `general`.
+pub fn people_hit(query: &str) -> Option<Hit> {
+    let cue = people_cue(query)?;
+    let base = if signals(query).iter().any(|h| h.rule == 10) {
+        Mode::News
+    } else {
+        Mode::General
+    };
+    Some(hit(12, base, &cue))
+}
+
+/// The phrases of rule 12 that are a question's frame, not its subject.
+const PEOPLE_FRAMES: &[&str] = &[
+    "what do people say about",
+    "what do people think about",
+    "what do people think of",
+    "what are people saying about",
+    "opinions about",
+    "experiences with",
+    "thoughts on",
+];
+// Every frame is ASCII: `people_query` relies on it.
+
+/// The query the added modes search: `query` without a frame such as "what
+/// do people say about", because Reddit, Hacker News and the platforms match
+/// the words they are given. Unchanged when nothing else would be left.
+pub fn people_query(query: &str) -> String {
+    // ASCII lowercasing keeps every byte offset, whatever else the query
+    // holds (full lowercasing can move them: "İ" shrinks, "K" grows).
+    let mut low = query.to_ascii_lowercase();
+    let mut text = query.to_string();
+    for p in PEOPLE_FRAMES {
+        while let Some(i) = low
+            .match_indices(p)
+            .map(|(i, _)| i)
+            .find(|&i| boundary_before(&low, i) && boundary_after(&low, i + p.len()))
+        {
+            text.replace_range(i..i + p.len(), " ");
+            low.replace_range(i..i + p.len(), " ");
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim_end_matches('?').trim();
+    if text.is_empty() {
+        query.to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// `lower` with every bounded occurrence of `phrases` replaced by a space.
+fn cut_phrases(lower: &str, phrases: &[&str]) -> String {
+    let mut text = lower.to_string();
+    for p in phrases {
+        while let Some(i) = text
+            .match_indices(p)
+            .map(|(i, _)| i)
+            .find(|&i| boundary_before(&text, i) && boundary_after(&text, i + p.len()))
+        {
+            text.replace_range(i..i + p.len(), " ");
+        }
+    }
+    text
 }
 
 /// Rule 3: `^(similar to|sites like|alternatives to|competitors (of|to)|more like)\s+(https?://\S+)$`.
@@ -1167,7 +1543,7 @@ mod tests {
     use super::*;
 
     fn local(q: &str) -> (String, String) {
-        let (d, _) = resolve_local(q);
+        let (d, _) = resolve_local(q, true);
         (d.mode, d.source)
     }
 
@@ -1306,21 +1682,6 @@ mod tests {
             ("hackernews rust async", "hackernews"),
             ("Ask HN: freelancing in 2026", "ask hn"),
             ("show hn launch tips", "show hn"),
-            (
-                "what do people say about the framework laptop",
-                "what do people say about",
-            ),
-            (
-                "what do people think about bun",
-                "what do people think about",
-            ),
-            ("what do people think of zed", "what do people think of"),
-            (
-                "what are people saying about htmx",
-                "what are people saying about",
-            ),
-            ("opinions about remote work", "opinions about"),
-            ("experiences with hetzner", "experiences with"),
             ("what they said on HN about the outage", "on HN"),
             ("r/rust async runtimes", "r/rust"),
         ] {
@@ -1349,12 +1710,209 @@ mod tests {
         ] {
             assert_ne!(local(q).0, "community", "{q}");
         }
-        // X wins over a community phrase: rule 2 comes first.
+        // X wins over a community source: rule 2 comes first.
         assert_eq!(local("what are people saying on X about htmx").0, "social");
-        let (d, _) = resolve_local("opinions about tailwind v4");
+        let (d, _) = resolve_local("best mechanical keyboard reddit", true);
         assert_eq!(
             d.reason,
-            "Asks what people say ('opinions about') (rule 11); used community."
+            "Names a community source ('reddit') (rule 11); used community."
+        );
+        assert!(d.added.is_empty());
+    }
+
+    /// Rule 12 (the CLI's own, not mirrored by the server): a query that
+    /// asks what people think stays general and has social and community
+    /// added. The first six were rule 11 phrases until 19 Nov 2026, when
+    /// they searched community alone.
+    #[test]
+    fn rule_12_adds_posts_to_general_for_people_questions() {
+        for (q, cue) in [
+            (
+                "what do people say about the framework laptop",
+                "what do people say about",
+            ),
+            (
+                "what do people think about bun",
+                "what do people think about",
+            ),
+            ("what do people think of zed", "what do people think of"),
+            (
+                "what are people saying about htmx",
+                "what are people saying about",
+            ),
+            ("opinions about remote work", "opinions about"),
+            ("experiences with hetzner", "experiences with"),
+            ("opinions on tailwind v4", "opinions on"),
+            ("is the uplift v2 standing desk worth it", "worth it"),
+            ("Uplift V2 standing desk worth buying 2026", "worth buying"),
+            ("air fryer reviews", "reviews"),
+            ("iphone 17 pro review", "review"),
+            ("notion vs obsidian", "vs"),
+            ("git merge vs rebase", "vs"),
+            ("alternatives to notion", "alternatives to"),
+            ("best standing desk for tall people", "best"),
+            ("Lemon Squeezy payouts held founders backlash", "backlash"),
+            ("pet video formats going viral this month", "viral"),
+            ("is temu legit", "legit"),
+            ("customer feedback on linear", "customer feedback"),
+            // A frame is an explicit request: it counts beside a lookup
+            // word, a biomedical word or a person.
+            (
+                "what do people say about the stripe api",
+                "what do people say about",
+            ),
+            ("thoughts on the ceo of stripe", "thoughts on"),
+            ("experiences with rapamycin dosage", "experiences with"),
+        ] {
+            let h = people_hit(q).unwrap_or_else(|| panic!("{q}: no rule"));
+            assert_eq!(
+                (h.rule, h.mode, h.cue.as_str()),
+                (12, Mode::General, cue),
+                "{q}"
+            );
+            let (d, rewritten) = resolve_local(q, true);
+            assert_eq!(
+                (d.mode.as_str(), d.source.as_str()),
+                ("general", "rule"),
+                "{q}"
+            );
+            assert_eq!(d.added, ["social", "community"], "{q}");
+            assert_eq!(rewritten, None, "{q}");
+            // Not allowed (-p or a domain filter): the rule is skipped.
+            assert!(resolve_local(q, false).0.added.is_empty(), "{q}");
+        }
+        let (d, _) = resolve_local("opinions about tailwind v4", true);
+        assert_eq!(
+            d.reason,
+            "Asks what people think ('opinions about') (rule 12); used general and added posts."
+        );
+    }
+
+    /// A news word keeps the pages on news (rule 10, with its freshness);
+    /// the posts are added to that.
+    #[test]
+    fn rule_12_keeps_news_for_the_pages_when_the_query_has_a_news_word() {
+        for q in [
+            "latest iphone reviews",
+            "what's trending today",
+            "reactions to the fed rate decision today",
+        ] {
+            let (d, _) = resolve_local(q, true);
+            assert_eq!(
+                (d.mode.as_str(), d.source.as_str()),
+                ("news", "rule"),
+                "{q}"
+            );
+            assert_eq!(d.added, ["social", "community"], "{q}");
+            assert!(
+                d.reason.ends_with("used news and added posts."),
+                "{q}: {}",
+                d.reason
+            );
+            assert!(freshness_for(q, Mode::News).is_some(), "{q}");
+        }
+        // Without the rule the same query is plain news, as before.
+        let (d, _) = resolve_local("latest iphone reviews", false);
+        assert_eq!((d.mode.as_str(), d.source.as_str()), ("news", "heuristic"));
+        assert!(d.added.is_empty());
+    }
+
+    /// Lookups stay pages only. The first group misfired, or would have, in
+    /// the 30 days of logged searches the cues were chosen against; the
+    /// second is the reviewer's (19 Nov): terms of art in biomedicine, code
+    /// and law, a shop, and a person.
+    #[test]
+    fn rule_12_leaves_lookups_alone() {
+        for q in [
+            "rust async runtime",
+            "vs code extension api",
+            "vs code vim keybindings",
+            "best practices for rust error handling",
+            "best way to parse json in swift",
+            "code reviews checklist",
+            "libguides systematic reviews AI tools",
+            "Annual Reviews editor contact",
+            "Nature Reviews Drug Discovery senolytics",
+            "sentiment analysis python",
+            "gartner hype cycle 2026",
+            "viral load after antiretroviral therapy",
+            "aav viral vector capsid",
+            "allergic reaction to penicillin",
+            "comparison operators in sql",
+            "best rust http client github",
+            "stripe api reviews endpoint",
+            "tokio vs async-std docs",
+            "healthspan vs lifespan study",
+            "best restaurants in lisbon",
+            "best paper on crispr delivery",
+            "\"rack up views but man, people hate it\"",
+            "site:news.ycombinator.com rust vs go",
+            "reviews https://example.com/product",
+            "experience with python jobs",
+            "opinion on the supreme court ruling",
+            "supreme court opinions on affirmative action",
+            "Understanding TikTok's Recommendation System",
+            "YouTube health source information panel eligibility creators",
+            // Reviewer's vectors.
+            "allergic reactions to penicillin",
+            "adverse reactions to metformin",
+            "hiv viral loads undetectable",
+            "aav viral titers quantification",
+            "viral particle assembly",
+            "graft versus host disease treatment",
+            "metformin vs placebo all-cause mortality",
+            "non-viral gene delivery lipid nanoparticles",
+            "viral hepatitis treatment guidelines",
+            "polymerase chain reaction to detect sars-cov-2",
+            "USPSTF recommendations for colorectal cancer screening",
+            "best supportive care pancreatic cancer",
+            "ageing research reviews senolytics",
+            "negative feedback on gnrh secretion",
+            "subjective memory complaints dementia risk",
+            "comparison of rapamycin and everolimus",
+            "MEME suite motif discovery",
+            "string comparison in java",
+            "best-first search",
+            "best buy return policy",
+            "who is the best orthopedic surgeon in singapore",
+            "harvard business review",
+            "mit technology review",
+            "app store review",
+            "year in review",
+            "review",
+        ] {
+            assert_eq!(people_cue(q), None, "{q}");
+        }
+        // A named source or platform still decides first.
+        assert_eq!(local("best mechanical keyboard reddit").0, "community");
+        assert_eq!(local("standing desk reviews on tiktok").0, "social");
+        assert!(resolve_local("standing desk reviews on tiktok", true)
+            .0
+            .added
+            .is_empty());
+    }
+
+    /// The added modes search the subject, not the question's frame.
+    #[test]
+    fn people_query_drops_the_question_frame() {
+        assert_eq!(
+            people_query("What do people say about the Framework laptop?"),
+            "the Framework laptop"
+        );
+        assert_eq!(people_query("opinions about tailwind v4"), "tailwind v4");
+        assert_eq!(people_query("air fryer reviews"), "air fryer reviews");
+        assert_eq!(people_query("notion vs obsidian"), "notion vs obsidian");
+        // Nothing but the frame: the query is kept.
+        assert_eq!(people_query("thoughts on"), "thoughts on");
+        // Letters whose lowercase has another byte length keep their
+        // offsets: these used to cut inside a character.
+        assert_eq!(
+            people_query("\u{0130}\u{0130} thoughts on \u{212B}\u{212B}"),
+            "\u{0130}\u{0130} \u{212B}\u{212B}"
+        );
+        assert_eq!(
+            people_query("\u{0130}stanbul thoughts on \u{1E9E}"),
+            "\u{0130}stanbul \u{1E9E}"
         );
     }
 
@@ -1415,12 +1973,12 @@ mod tests {
             assert_ne!(local(q).0, "social", "{q}");
             assert!(social_pins(q).is_empty(), "{q}");
         }
-        let (d, _) = resolve_local("mechanical keyboard on tiktok");
+        let (d, _) = resolve_local("mechanical keyboard on tiktok", true);
         assert_eq!(
             d.reason,
             "Mentions TikTok ('on tiktok') (rule 2); used social."
         );
-        let (d, _) = resolve_local("trending on twitter");
+        let (d, _) = resolve_local("trending on twitter", true);
         assert!(
             d.reason.starts_with("Mentions X/Twitter ('twitter')"),
             "{}",
@@ -1502,7 +2060,7 @@ mod tests {
     #[test]
     fn freshness_vectors_match_the_server() {
         let f = |q: &str| {
-            let (d, _) = resolve_local(q);
+            let (d, _) = resolve_local(q, true);
             freshness_for(q, auto_mode(&d.mode).unwrap()).map(|f| f.0)
         };
         assert_eq!(f("stock market today"), Some("day"));
@@ -1540,7 +2098,7 @@ mod tests {
 
     #[test]
     fn similar_searches_the_captured_url() {
-        let (d, q) = resolve_local("sites like https://news.ycombinator.com");
+        let (d, q) = resolve_local("sites like https://news.ycombinator.com", true);
         assert_eq!(d.mode, "similar");
         assert_eq!(q.as_deref(), Some("https://news.ycombinator.com"));
     }
@@ -1564,7 +2122,7 @@ mod tests {
 
     #[test]
     fn reasons_are_plain_sentences() {
-        let (d, _) = resolve_local("coffee near me");
+        let (d, _) = resolve_local("coffee near me", true);
         assert_eq!(d.reason, "Matched 'near me' (rule 6); used places.");
     }
 

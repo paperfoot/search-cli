@@ -183,7 +183,8 @@ pub fn save_query(query: &str, mode: &str, count: usize, response: &SearchRespon
     evict_expired(&cache_dir(), SystemTime::now());
 }
 
-/// Load a cached query result if fresh and it held at least `count` results.
+/// Load a cached query result if fresh and it held at least `count` results
+/// (exactly `count` for a search that had posts added).
 /// Returns the response plus its age in seconds so the caller can mark the
 /// replay as cached in the envelope.
 pub fn load_query(query: &str, mode: &str, count: usize) -> Option<(SearchResponse, u64)> {
@@ -192,7 +193,16 @@ pub fn load_query(query: &str, mode: &str, count: usize) -> Option<(SearchRespon
     let entry: CachedEntry = serde_json::from_str(&content).ok()?;
     // saturating_sub: a backward clock step (NTP/VM resume) must not underflow.
     let age = now_secs().saturating_sub(entry.timestamp);
-    if age < CACHE_TTL_SECS && entry.count >= count {
+    // A search with posts added was dealt by share for its own count: its
+    // first rows are not what a smaller count would have got.
+    let dealt = entry
+        .response
+        .metadata
+        .routing
+        .as_ref()
+        .and_then(|r| r.auto.as_ref())
+        .is_some_and(|a| !a.added.is_empty());
+    if age < CACHE_TTL_SECS && entry.count >= count && (!dealt || entry.count == count) {
         let mut resp = entry.response;
         resp.results.truncate(count);
         resp.metadata.result_count = resp.results.len();

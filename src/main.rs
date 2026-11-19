@@ -1,4 +1,5 @@
 mod auth;
+mod blend;
 mod cache;
 mod cli;
 mod config;
@@ -424,15 +425,22 @@ fn transport_signature(app: &Arc<AppContext>, logged_in: bool) -> String {
         .collect()
 }
 
-/// `auto` → one real mode (ROUTING.md): rules 1-5 here; then, logged in,
-/// metasearch.sh's `/route` (1.2 s, fail-open); then signals 6-10; then
-/// general. Returns the decision and, for rule 3, the URL to search.
+/// `auto` → one real mode (ROUTING.md): rules 1-5 and 11 here; then rule 12
+/// (general with social and community added) when `people` allows it; then,
+/// logged in, metasearch.sh's `/route` (1.2 s, fail-open); then signals
+/// 6-10; then general. Returns the decision and, for rule 3, the URL to
+/// search. `people` is false with `-p` or a domain filter: those name the
+/// sources, and in social `-d` filters X handles.
 async fn resolve_auto(
     query: &str,
     client: Option<&hosted::MetasearchClient>,
+    people: bool,
 ) -> (types::AutoDecision, Option<String>) {
     if let Some(hit) = router::decisive(query) {
         return (router::decision_for(&hit, "rule"), hit.query);
+    }
+    if let Some(hit) = people.then(|| router::people_hit(query)).flatten() {
+        return (router::decision_for(&hit, "rule"), None);
     }
     if let Some(c) = client {
         let started = std::time::Instant::now();
@@ -444,7 +452,7 @@ async fn resolve_auto(
             }
         }
     }
-    router::resolve_local(query)
+    router::resolve_local(query, people)
 }
 
 /// The capability manifest for agents: one entry per provider and per mode,
@@ -576,7 +584,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "social": "A cue (twitter, on tiktok, instagram reels, youtube, on threads, facebook page) pins them; threads and facebook (page search) only on a cue or -p. Hits: extra.platform, author, followers, views, likes, num_comments, shares, duration_s. Extract a post, video or page URL: caption, stats, transcript, extra.comments[{author,likes,text}].",
         "community": "-m community: reddit + hackernews, no key, $0 here. Hits: extra.score|points, num_comments, subreddit, author. Extract a Reddit or HN thread URL for every comment: extra.comments[{id,parent,author,score,depth,created,body}], extra.route (live|archive|live+archive). Reddit is paced (~10/min machine-wide); archive search needs r/<name>; a refused search without one falls back to Reddit-wide search (route global). SEARCH_REDDIT_ROUTE=archive|live.",
         "exit_codes": {"0": "success", "1": "transient: retry", "2": "config, auth or credit: fix setup or top up", "3": "bad input", "4": "rate limited: wait"},
-        "routing": "-m defaults to auto: a URL -> extract; an X cue (twitter/tweets, 'on X', x.com/, a lone @handle; never @types/node, 'twitter bootstrap', 'x axis') or a platform cue (tiktok, instagram, youtube, on threads, facebook page; not '<platform> api/sdk/embed') -> social, pinned to those platforms; reddit, hacker news, 'on HN', r/<name> (not r/min), 'what do people say about', 'opinions about', 'experiences with' -> community; 'similar to <url>' -> similar; patent words or numbers (never 'patent leather') -> patents; 'images of' -> images (never docker/vm images); else, logged in, metasearch.sh's routing model; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/this week/latest/this month/this year also set -f unless you passed one. Never deep. metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit, social for -p tiktok).",
+        "routing": "-m defaults to auto: a URL -> extract; an X cue (twitter/tweets, 'on X', x.com/, a lone @handle; never @types/node, 'twitter bootstrap', 'x axis') or a platform cue (tiktok, instagram, youtube, on threads, facebook page; not '<platform> api/sdk/embed') -> social on those platforms; reddit, hacker news, 'on HN', r/<name> (not r/min) -> community; 'opinions about', reviews, 'worth it', 'vs', 'best' -> general or news with social + community posts added (auto.added; not with -p/-d); 'similar to <url>' -> similar; patent words or numbers (never 'patent leather') -> patents; 'images of' -> images (never docker/vm images); else, logged in, metasearch.sh's routing model; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/this week/latest/this month/this year also set -f unless you passed one. Never deep. metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit, social for -p tiktok).",
         "transport": "Per provider: own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted on your balance, all as ONE call: without -p the server picks (cheapest first, its cache; --no-cache skips it), -p is sent as given.",
         "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls run to the deadline (social: wait_s once one answered); stragglers go in providers_timed_out.",
         "envelope": {
@@ -828,7 +836,11 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let (mode, auto) = match args.mode {
                 cli::ModeArg::Fixed(m) => (m, None),
                 cli::ModeArg::Auto => {
-                    let (decision, rewritten) = resolve_auto(&args.query, client.as_deref()).await;
+                    let people = args.providers.is_none()
+                        && opts.include_domains.is_empty()
+                        && opts.exclude_domains.is_empty();
+                    let (decision, rewritten) =
+                        resolve_auto(&args.query, client.as_deref(), people).await;
                     if let Some(q) = rewritten {
                         query = q;
                     }
@@ -934,17 +946,54 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 None
             };
 
+            // Rule 12: the modes auto adds to a pages search. Whatever names
+            // them (the rule, or a server that learns to), they run only
+            // beside general or news, and never with -p or a domain filter.
+            let lanes: Vec<types::Mode> = match auto.as_mut() {
+                Some(d) => {
+                    let plain = args.providers.is_none()
+                        && opts.include_domains.is_empty()
+                        && opts.exclude_domains.is_empty();
+                    let lanes: Vec<types::Mode> = router::PEOPLE_LANES
+                        .into_iter()
+                        .filter(|m| {
+                            plain
+                                && matches!(mode, types::Mode::General | types::Mode::News)
+                                && d.added.contains(&m.to_string())
+                        })
+                        .collect();
+                    d.added.clear();
+                    lanes
+                }
+                None => Vec::new(),
+            };
+
             let started = std::time::Instant::now();
-            let response = engine::run(
-                app,
-                &query,
-                mode,
-                count,
-                &args.providers,
-                &opts,
-                hosting.as_ref(),
-            )
-            .await;
+            let response = if lanes.is_empty() {
+                engine::run(
+                    app,
+                    &query,
+                    mode,
+                    count,
+                    &args.providers,
+                    &opts,
+                    hosting.as_ref(),
+                )
+                .await
+            } else {
+                blend::run(app, &query, mode, count, &opts, hosting.as_ref(), &lanes)
+                    .await
+                    .map(|b| {
+                        // Report the added modes that were sent, no others.
+                        if let Some(d) = auto.as_mut() {
+                            d.added = b.ran.iter().map(|m| m.to_string()).collect();
+                        }
+                        b.response
+                    })
+            };
+            if let Some(d) = auto.as_mut().filter(|d| d.added.is_empty()) {
+                d.reason = d.reason.replace(router::PEOPLE_TAIL, "");
+            }
 
             if let Some(sp) = spinner {
                 sp.finish_and_clear();

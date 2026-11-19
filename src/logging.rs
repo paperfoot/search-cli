@@ -76,6 +76,15 @@ pub fn log_search(response: &SearchResponse) {
         "warnings": response.metadata.warnings.len(),
         "sources": response.results.iter().map(|r| &r.source).collect::<Vec<_>>(),
         "urls": response.results.iter().take(10).map(|r| &r.url).collect::<Vec<_>>(),
+        // Modes auto added beside `mode` (rule 12), so `search stats` can
+        // count the social and community searches a general one carried.
+        "added": response
+            .metadata
+            .routing
+            .as_ref()
+            .and_then(|r| r.auto.as_ref())
+            .map(|a| a.added.clone())
+            .unwrap_or_default(),
     });
 
     append_line(&path, &entry);

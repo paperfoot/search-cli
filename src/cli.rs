@@ -12,8 +12,10 @@ use clap::{Parser, Subcommand};
         then Jina Reader, Firecrawl or Browserless).\n\
         With no -m the mode is auto: a URL extracts (a TikTok, YouTube or\n\
         Reddit link reads the post whole: transcript, comments), \"on tiktok\"\n\
-        or \"twitter\" searches that platform, \"reddit\" or \"what do people\n\
-        say about\" searches community, and\n\
+        or \"twitter\" searches that platform, \"reddit\" searches community,\n\
+        a question about what people think or what to buy (\"opinions\n\
+        about\", \"reviews\", \"worth it\", \"vs\", \"best\") adds social and\n\
+        community posts to the pages, and\n\
         so on; the decision is reported in metadata.routing.auto. An\n\
         explicit -m or -p is always obeyed. Auto never picks deep.\n\
         Engines without your own key run through metasearch.sh after\n\
@@ -51,7 +53,8 @@ use clap::{Parser, Subcommand};
           search search -q \"trending on twitter\" -m social # X/Twitter search\n  \
           search \"mechanical keyboard on tiktok\"          # TikTok (social)\n  \
           search \"https://youtu.be/3rKPzh3Pr0o\"           # video, transcript, comments\n  \
-          search \"opinions about tailwind v4\"            # Reddit + HN (community)\n  \
+          search \"opinions about tailwind v4\"            # pages plus X, Reddit, HN posts\n  \
+          search \"best mechanical keyboard reddit\"       # Reddit + HN (community)\n  \
           search search -q \"query\" -p exa                 # force Exa only\n  \
           search search -q \"query\" -p exa,brave           # only Exa + Brave\n  \
           search --x \"AI agents\"                          # search X (Twitter) only\n  \
@@ -221,8 +224,10 @@ pub struct SearchArgs {
 
     /// Search mode (default: auto). auto picks one of general, news,
     /// academic, scholar, people, images, places, patents, social (an X,
-    /// TikTok, Instagram, YouTube, Threads or Facebook page cue), community (a Reddit/HN or "what do people say" cue), extract
-    /// (a URL) or similar, and reports why; never deep. Or choose: general,
+    /// TikTok, Instagram, YouTube, Threads or Facebook page cue), community (a Reddit or HN cue), extract
+    /// (a URL) or similar, and reports why; never deep. A general search
+    /// that asks what people think ("reviews", "worth it", "vs") also gets
+    /// social and community posts. Or choose: general,
     /// news, academic, deep, social, community, scholar, patents, people,
     /// places, images, similar, scrape, extract.
     #[arg(short, long, default_value = "auto", value_parser = parse_mode_arg)]

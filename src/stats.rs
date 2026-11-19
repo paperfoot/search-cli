@@ -56,6 +56,10 @@ pub struct StatsReport {
     pub cache_hits: u64,
     pub cache_hit_rate: f64,
     pub by_mode: BTreeMap<String, u64>,
+    /// Searches that auto added to another mode's (rule 12), by added mode.
+    /// They are not in `by_mode`, which counts each search once.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub added_by_auto: BTreeMap<String, u64>,
     pub by_provider: BTreeMap<String, ProviderStats>,
     pub estimated_total_spend_usd: f64,
     /// Charged by metasearch.sh across the window.
@@ -121,6 +125,7 @@ fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> S
     let mut searches = 0u64;
     let mut cache_hits = 0u64;
     let mut by_mode: BTreeMap<String, u64> = BTreeMap::new();
+    let mut added_by_auto: BTreeMap<String, u64> = BTreeMap::new();
     let mut by_provider: BTreeMap<String, ProviderStats> = BTreeMap::new();
     let mut query_counts: HashMap<String, u64> = HashMap::new();
     // url -> providers that returned it, for read-through attribution.
@@ -134,6 +139,9 @@ fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> S
         }
         let mode = e.get("mode").and_then(|m| m.as_str()).unwrap_or("?");
         *by_mode.entry(mode.to_string()).or_default() += 1;
+        for lane in str_array(e, "added") {
+            *added_by_auto.entry(lane).or_default() += 1;
+        }
 
         let query = e.get("query").and_then(|q| q.as_str()).unwrap_or("");
         *query_counts.entry(query.to_lowercase()).or_default() += 1;
@@ -226,6 +234,7 @@ fn summarize(entries: &[serde_json::Value], days: u64, log_files_read: u64) -> S
             0.0
         },
         by_mode,
+        added_by_auto,
         by_provider,
         estimated_total_spend_usd,
         charged_total_usd,
@@ -339,6 +348,12 @@ pub fn render_human(r: &StatsReport) {
     println!("modes:");
     for (mode, n) in &r.by_mode {
         println!("  {mode:<10} {n}");
+    }
+    if !r.added_by_auto.is_empty() {
+        println!("added by auto:");
+        for (mode, n) in &r.added_by_auto {
+            println!("  {mode:<10} {n}");
+        }
     }
     println!("\nproviders (fresh calls only):");
     println!(

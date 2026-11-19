@@ -72,9 +72,49 @@ pub async fn run(
         straggler_cap: registry::spec(mode).straggler_cap,
         reranker: hosting.filter(|h| h.rerank).map(|h| h.client.as_ref()),
         fresh: hosting.is_some_and(|h| h.fresh),
+        direct_cap: None,
     };
+    launch(ctx, hosting, request).await
+}
+
+/// [`run`] for a mode added beside the search's own (rule 12, see
+/// `blend`): no `-p`, and when every call goes straight to its provider the
+/// mode's deadline is cut to `cap`, so one slow platform cannot hold the
+/// whole search. A direct call still out at the cap is reported as timed
+/// out and counted as spent, like any other. A run with a hosted call keeps
+/// the mode's own deadline (see [`Request::direct_cap`]).
+pub async fn run_capped(
+    ctx: Arc<AppContext>,
+    query: &str,
+    mode: Mode,
+    count: usize,
+    opts: &SearchOpts,
+    hosting: Option<&Hosting>,
+    cap: Duration,
+) -> Result<SearchResponse, SearchError> {
+    let spec = registry::spec(mode);
+    let request = Request {
+        query,
+        mode,
+        count,
+        only: None,
+        opts,
+        deadline: spec.deadline,
+        straggler_cap: spec.straggler_cap.map(|c| c.min(cap)),
+        reranker: hosting.filter(|h| h.rerank).map(|h| h.client.as_ref()),
+        fresh: hosting.is_some_and(|h| h.fresh),
+        direct_cap: Some(cap),
+    };
+    launch(ctx, hosting, request).await
+}
+
+async fn launch(
+    ctx: Arc<AppContext>,
+    hosting: Option<&Hosting>,
+    request: Request<'_>,
+) -> Result<SearchResponse, SearchError> {
     // Specs list extract, never its alias.
-    let served = match mode {
+    let served = match request.mode {
         Mode::Scrape => Mode::Extract,
         m => m,
     };
@@ -159,6 +199,12 @@ pub(crate) struct Request<'a> {
     pub reranker: Option<&'a MetasearchClient>,
     /// `--no-cache`: the hosted call asks the engines, not the server's cache.
     pub fresh: bool,
+    /// A shorter deadline for a run whose calls all go straight to their
+    /// providers ([`run_capped`]). A run with a hosted call keeps the
+    /// mode's own deadline: that is the server's plus 5 s, and a hosted
+    /// call abandoned sooner may still be charged without its cost ever
+    /// being reported back.
+    pub direct_cap: Option<Duration>,
 }
 
 /// Where the hosted call sits in a plan, and the report it fills.
@@ -388,6 +434,14 @@ pub(crate) async fn execute_with(
     }
     // Every hosted provider becomes one metasearch.sh call.
     let (plan, report_slot) = fold_hosted(plan, req, mode, own_key);
+    // A capped run (a mode added to another search) stops sooner, unless a
+    // hosted call is out: the server is still working on that one.
+    let deadline = match req.direct_cap {
+        Some(cap) if plan.iter().all(|a| a.transport() != Transport::Hosted) => {
+            start + req.deadline.min(cap)
+        }
+        _ => deadline,
+    };
     // The hosted call is the whole search: the server fused and reranked it.
     let hosted_alone = report_slot.is_some() && plan.len() == 1;
 
@@ -903,6 +957,12 @@ fn rejected(provider: &str, reason: &str) -> ProviderFailure {
     }
 }
 
+/// `f` is a [`timeout_failure`]: the provider was still running when the
+/// search stopped waiting (a provider's own timeout has another code).
+pub(crate) fn still_running(f: &ProviderFailure) -> bool {
+    f.category == FailureCategory::Timeout && f.code == "timeout"
+}
+
 /// Failure record for a provider still running at the mode deadline.
 fn timeout_failure(provider: &str) -> ProviderFailure {
     ProviderFailure {
@@ -910,7 +970,10 @@ fn timeout_failure(provider: &str) -> ProviderFailure {
         category: FailureCategory::Timeout,
         http_status: None,
         code: "timeout".to_string(),
-        reason: format!("{provider} was still running when the search stopped waiting (the mode deadline, or in social the 20 s wait once another platform had answered)"),
+        reason: format!(
+            "{provider} was still running when the search stopped waiting (the mode deadline; in social, {0} s once another platform had answered, or {0} s in all when social was added to another search)",
+            registry::SOCIAL_WAIT.as_secs()
+        ),
         retryable: true,
     }
 }
@@ -1244,6 +1307,7 @@ mod tests {
             deadline: Duration::from_millis(deadline_ms),
             straggler_cap: None,
             fresh: false,
+            direct_cap: None,
             reranker: None,
         };
         execute_with(adapters, &req).await
@@ -1269,6 +1333,7 @@ mod tests {
                     deadline: Duration::from_millis(3_000),
                     straggler_cap: Some(Duration::from_millis(300)),
                     fresh: false,
+                    direct_cap: None,
                     reranker: None,
                 };
                 execute_with(adapters, &req).await
@@ -1816,6 +1881,7 @@ mod tests {
             deadline: Duration::from_millis(2_000),
             straggler_cap: None,
             fresh: false,
+            direct_cap: None,
             reranker: None,
         };
         let _ = execute_with(adapters, &req).await;
