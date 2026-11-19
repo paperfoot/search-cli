@@ -53,6 +53,10 @@ impl Mock {
             .env("METASEARCH_URL", &self.base)
             .env("METASEARCH_TOKEN", TOKEN)
             .env("METASEARCH_ALLOW_INSECURE_HOST", "1")
+            // Rule 12 would add a social and a community search to every
+            // auto search here (the second on the real network): these
+            // tests are about the pages' own hosted call.
+            .env("SEARCH_SETTINGS_POSTS", "off")
             .env("SEARCH_LOG", "off");
         c
     }

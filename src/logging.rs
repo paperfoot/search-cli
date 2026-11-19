@@ -76,6 +76,12 @@ pub fn log_search(response: &SearchResponse) {
         "warnings": response.metadata.warnings.len(),
         "sources": response.results.iter().map(|r| &r.source).collect::<Vec<_>>(),
         "urls": response.results.iter().take(10).map(|r| &r.url).collect::<Vec<_>>(),
+        // Whether auto chose the mode (an explicit -m bypasses rule 12).
+        "auto": response
+            .metadata
+            .routing
+            .as_ref()
+            .is_some_and(|r| r.auto.is_some()),
         // Modes auto added beside `mode` (rule 12), so `search stats` can
         // count the social and community searches a general one carried.
         "added": response

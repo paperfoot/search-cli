@@ -204,7 +204,10 @@ pub fn load_query(query: &str, mode: &str, count: usize) -> Option<(SearchRespon
         .is_some_and(|a| !a.added.is_empty());
     if age < CACHE_TTL_SECS && entry.count >= count && (!dealt || entry.count == count) {
         let mut resp = entry.response;
-        resp.results.truncate(count);
+        // Posts are rows beyond `count`: a dealt answer is replayed whole.
+        if !dealt {
+            resp.results.truncate(count);
+        }
         resp.metadata.result_count = resp.results.len();
         Some((resp, age))
     } else {

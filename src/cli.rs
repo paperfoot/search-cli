@@ -12,12 +12,12 @@ use clap::{Parser, Subcommand};
         then Jina Reader, Firecrawl or Browserless).\n\
         With no -m the mode is auto: a URL extracts (a TikTok, YouTube or\n\
         Reddit link reads the post whole: transcript, comments), \"on tiktok\"\n\
-        or \"twitter\" searches that platform, \"reddit\" searches community,\n\
-        a question about what people think or what to buy (\"opinions\n\
-        about\", \"reviews\", \"worth it\", \"vs\", \"best\") adds social and\n\
-        community posts to the pages, and\n\
-        so on; the decision is reported in metadata.routing.auto. An\n\
-        explicit -m or -p is always obeyed. Auto never picks deep.\n\
+        or \"tweets\" searches that platform, \"reddit\" searches community, and\n\
+        so on; the decision is reported in metadata.routing.auto. A search\n\
+        for pages (general, news) also returns posts from X, YouTube,\n\
+        Reddit and Hacker News beside them, unless it is a lookup (a quoted\n\
+        phrase, site:, an error or API question). An explicit -m or -p is\n\
+        always obeyed: -m general is pages only. Auto never picks deep.\n\
         Engines without your own key run through metasearch.sh after\n\
         `search login`, charged to your balance; each result's cost is in\n\
         metadata.cost. Run `search agent-info` for the machine-readable map.\n\
@@ -53,7 +53,7 @@ use clap::{Parser, Subcommand};
           search search -q \"trending on twitter\" -m social # X/Twitter search\n  \
           search \"mechanical keyboard on tiktok\"          # TikTok (social)\n  \
           search \"https://youtu.be/3rKPzh3Pr0o\"           # video, transcript, comments\n  \
-          search \"opinions about tailwind v4\"            # pages plus X, Reddit, HN posts\n  \
+          search \"tailwind v4 migration problems\"       # pages plus X, YouTube, Reddit, HN posts\n  \
           search \"best mechanical keyboard reddit\"       # Reddit + HN (community)\n  \
           search search -q \"query\" -p exa                 # force Exa only\n  \
           search search -q \"query\" -p exa,brave           # only Exa + Brave\n  \
@@ -224,10 +224,10 @@ pub struct SearchArgs {
 
     /// Search mode (default: auto). auto picks one of general, news,
     /// academic, scholar, people, images, places, patents, social (an X,
-    /// TikTok, Instagram, YouTube, Threads or Facebook page cue), community (a Reddit or HN cue), extract
-    /// (a URL) or similar, and reports why; never deep. A general search
-    /// that asks what people think ("reviews", "worth it", "vs") also gets
-    /// social and community posts. Or choose: general,
+    /// TikTok, Instagram, YouTube, Threads or Facebook page cue that asks for its posts), community (a Reddit or HN cue), extract
+    /// (a URL) or similar, and reports why; never deep. An auto search
+    /// for pages (general, news) also returns social and community posts
+    /// beside them; -m general is pages only. Or choose: general,
     /// news, academic, deep, social, community, scholar, patents, people,
     /// places, images, similar, scrape, extract.
     #[arg(short, long, default_value = "auto", value_parser = parse_mode_arg)]

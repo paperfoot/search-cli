@@ -451,34 +451,32 @@ fn transport_signature(app: &Arc<AppContext>, logged_in: bool) -> String {
         .collect()
 }
 
-/// `auto` → one real mode (ROUTING.md): rules 1-5 and 11 here; then rule 12
-/// (general with social and community added) when `people` allows it; then,
+/// `auto` → one real mode (ROUTING.md): rules 1-5 and 11 here; then,
 /// logged in, metasearch.sh's `/route` (1.2 s, fail-open); then signals
 /// 6-10; then general. Returns the decision and, for rule 3, the URL to
-/// search. `people` is false with `-p` or a domain filter: those name the
-/// sources, and in social `-d` filters X handles.
+/// search. The server may not choose `social` or `community`
+/// ([`router::server_may_pick`]): those fall through to the local rules.
+/// Rule 12 (posts beside the pages) is applied by the caller, once the
+/// mode is known.
 async fn resolve_auto(
     query: &str,
     client: Option<&hosted::MetasearchClient>,
-    people: bool,
 ) -> (types::AutoDecision, Option<String>) {
     if let Some(hit) = router::decisive(query) {
         return (router::decision_for(&hit, "rule"), hit.query);
     }
-    if let Some(hit) = people.then(|| router::people_hit(query)).flatten() {
-        return (router::decision_for(&hit, "rule"), None);
-    }
     if let Some(c) = client {
         let started = std::time::Instant::now();
         if let Some(mut d) = c.route(query).await {
-            if router::auto_mode(&d.mode).is_some() {
+            if router::server_may_pick(&d.mode) {
                 d.latency_ms
                     .get_or_insert(started.elapsed().as_millis() as u64);
+                d.added.clear();
                 return (d, None);
             }
         }
     }
-    router::resolve_local(query, people)
+    router::resolve_local(query)
 }
 
 /// The capability manifest for agents: one entry per provider and per mode,
@@ -607,10 +605,10 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "search_engines": providers::SEARCH_ENGINES,
         "community_sources": providers::COMMUNITY_SOURCES,
         "social_platforms": providers::SOCIAL_PLATFORMS,
-        "social": "A cue (twitter, on tiktok, instagram reels, youtube, on threads, facebook page) pins them; threads and facebook (page search) only on a cue or -p. Hits: extra.platform, author, followers, views, likes, num_comments, shares, duration_s. Extract a post, video or page URL: caption, stats, transcript, extra.comments[{author,likes,text}].",
+        "social": "Asking for a platform's posts (tweets, on tiktok, instagram reels, youtube videos, on threads, facebook page) pins it; threads and facebook (page search) only on a cue or -p. Hits: extra.platform, author, followers, views, likes, num_comments, shares, duration_s. Extract a post, video or page URL: caption, stats, transcript, extra.comments[{author,likes,text}].",
         "community": "-m community: reddit + hackernews, no key, $0 here. Hits: extra.score|points, num_comments, subreddit, author. Extract a Reddit or HN thread URL for every comment: extra.comments[{id,parent,author,score,depth,created,body}], extra.route (live|archive|live+archive). Reddit is paced (~10/min machine-wide); archive search needs r/<name>; a refused search without one falls back to Reddit-wide search (route global). SEARCH_REDDIT_ROUTE=archive|live.",
         "exit_codes": {"0": "success", "1": "transient: retry", "2": "config, auth or credit: fix setup or top up", "3": "bad input", "4": "rate limited: wait"},
-        "routing": "-m defaults to auto: a URL -> extract; an X cue (twitter/tweets, 'on X', x.com/, a lone @handle; never @types/node, 'twitter bootstrap', 'x axis') or a platform cue (tiktok, instagram, youtube, on threads, facebook page; not '<platform> api/sdk/embed') -> social on those platforms; reddit, hacker news, 'on HN', r/<name> (not r/min) -> community; 'opinions about', reviews, 'worth it', 'vs', 'best' -> general or news with social + community posts added (auto.added; not with -p/-d); 'similar to <url>' -> similar; patent words or numbers (never 'patent leather') -> patents; 'images of' -> images (never docker/vm images); else, logged in, metasearch.sh's routing model; else local cues (near me, h-index, paper, who is, latest) or general. In news and social, today/this week/latest/this month/this year also set -f unless you passed one. Never deep. metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit, social for -p tiktok).",
+        "routing": "-m defaults to auto: a URL -> extract; asking for a platform's posts (tweets, 'on X', x.com/, a lone @handle; 'on tiktok', 'youtube videos', 'instagram reels', 'on threads', 'facebook page') -> social on those platforms; reddit, hacker news, 'on HN', r/<name> -> community; 'similar to <url>' -> similar; patent words or numbers -> patents; 'images of' -> images; else, logged in, metasearch.sh's routing model; else local cues (near me, h-index, paper, who is, latest) or general. A general or news result also carries posts from social + community beyond -c (auto.added), unless the query is a lookup (one word, a quoted phrase, site:, api/docs/error words), has -p/-d, or settings.posts is off. In news and social, today/this week/latest/this month/this year also set -f unless you passed one. Never deep. metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit, social for -p tiktok).",
         "transport": "Per provider: own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted on your balance, all as ONE call: without -p the server picks (cheapest first, its cache; --no-cache skips it), -p is sent as given.",
         "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls run to the deadline (social: wait_s once one answered); stragglers go in providers_timed_out.",
         "envelope": {
@@ -864,11 +862,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let (mode, auto) = match args.mode {
                 cli::ModeArg::Fixed(m) => (m, None),
                 cli::ModeArg::Auto => {
-                    let people = args.providers.is_none()
-                        && opts.include_domains.is_empty()
-                        && opts.exclude_domains.is_empty();
-                    let (decision, rewritten) =
-                        resolve_auto(&args.query, client.as_deref(), people).await;
+                    let (decision, rewritten) = resolve_auto(&args.query, client.as_deref()).await;
                     if let Some(q) = rewritten {
                         query = q;
                     }
@@ -974,26 +968,25 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 None
             };
 
-            // Rule 12: the modes auto adds to a pages search. Whatever names
-            // them (the rule, or a server that learns to), they run only
-            // beside general or news, and never with -p or a domain filter.
-            let lanes: Vec<types::Mode> = match auto.as_mut() {
-                Some(d) => {
-                    let plain = args.providers.is_none()
-                        && opts.include_domains.is_empty()
-                        && opts.exclude_domains.is_empty();
-                    let lanes: Vec<types::Mode> = router::PEOPLE_LANES
-                        .into_iter()
-                        .filter(|m| {
-                            plain
-                                && matches!(mode, types::Mode::General | types::Mode::News)
-                                && d.added.contains(&m.to_string())
-                        })
-                        .collect();
-                    d.added.clear();
-                    lanes
-                }
-                None => Vec::new(),
+            // Rule 12: an auto search for pages also runs social and
+            // community and returns their posts beside the pages. Not with
+            // -p or a domain filter (they name the sources, and in social
+            // -d filters X handles), not for a lookup, not with
+            // settings.posts off, and not without a web engine: the search
+            // then fails as it always did instead of answering with posts
+            // alone.
+            let lanes: Vec<types::Mode> = if auto.is_some()
+                && matches!(mode, types::Mode::General | types::Mode::News)
+                && args.providers.is_none()
+                && opts.include_domains.is_empty()
+                && opts.exclude_domains.is_empty()
+                && app.config.settings.posts_on()
+                && router::posts_apply(&query)
+                && engine::can_run(&app, mode, hosting.as_ref())
+            {
+                router::PEOPLE_LANES.to_vec()
+            } else {
+                Vec::new()
             };
 
             let started = std::time::Instant::now();
@@ -1019,8 +1012,12 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                         b.response
                     })
             };
-            if let Some(d) = auto.as_mut().filter(|d| d.added.is_empty()) {
-                d.reason = d.reason.replace(router::PEOPLE_TAIL, "");
+            if let Some(d) = auto.as_mut().filter(|d| !d.added.is_empty()) {
+                d.reason = format!(
+                    "{} Posts from {} added (rule 12).",
+                    d.reason,
+                    d.added.join(" and ")
+                );
             }
 
             if let Some(sp) = spinner {
@@ -1105,6 +1102,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             "config_path": config::config_path().to_string_lossy(),
                             "settings": {
                                 "count": app.config.settings.count,
+                                "posts": if app.config.settings.posts_on() { "on" } else { "off" },
                             },
                             "providers_configured": configured,
                             "metasearch": {

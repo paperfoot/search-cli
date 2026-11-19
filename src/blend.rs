@@ -1,13 +1,14 @@
 //! Rule 12's search: the pages search (general, or news) with `social` and
-//! `community` run beside it, and their posts given a share of the result
-//! slots.
+//! `community` run beside it, and their posts returned with the pages.
 //!
 //! The added modes are whole searches of their own ([`engine::run_capped`]),
-//! not extra providers in the general fusion: a hosted call carries one
+//! not extra providers in the pages' fusion: a hosted call carries one
 //! mode, and rank fusion would put a post only one platform returned under
-//! every page two engines agree on. Each part keeps its own ranking; the
-//! parts are then dealt into one list by share ([`shares`]), so the top of
-//! the list holds pages and posts alike.
+//! every page two engines agree on. Each part keeps its own ranking. The
+//! pages keep every row `-c` asked for; the posts are extra rows
+//! ([`shares`]), dealt in among the pages so the top of the list holds
+//! both. (0.13 gave the posts half of `-c` instead, which cost five pages
+//! in ten.)
 
 use crate::context::AppContext;
 use crate::engine::{self, Hosting};
@@ -52,13 +53,13 @@ pub async fn run(
     lanes: &[Mode],
 ) -> Result<Blend, SearchError> {
     let start = Instant::now();
-    // A mode with no slot is not run: at -c 1 the one row is a page, and X
-    // would be paid for posts that cannot appear.
+    // A mode with no rows to give is not run: a search for one row is
+    // answered by one page, and X would be paid for posts nobody sees.
     let share = shares(count, lanes.len());
     let lanes: Vec<Mode> = lanes
         .iter()
         .zip(&share[1..])
-        .filter(|(_, slots)| **slots > 0)
+        .filter(|(_, rows)| **rows > 0)
         .map(|(m, _)| *m)
         .collect();
     let lanes = lanes.as_slice();
@@ -96,16 +97,149 @@ pub async fn run(
     )
 }
 
-/// Result slots per part for `count` rows: the pages keep half (the odd one
-/// too), the added modes split the rest, the first taking any odd one.
-/// A part that returns fewer rows than its share leaves them to the others.
+/// Rows per part for `-c count`: the pages keep all of `count`, and each
+/// added mode brings posts on top, two for every five pages (four for ten;
+/// none for a search of one row).
 pub fn shares(count: usize, lanes: usize) -> Vec<usize> {
-    let posts = if lanes == 0 { 0 } else { count / 2 };
-    let mut out = vec![count - posts];
-    for i in 0..lanes {
-        out.push(posts / lanes + usize::from(i < posts % lanes));
-    }
+    let posts = (count * 2 + 2) / 5;
+    let mut out = vec![count];
+    out.extend(std::iter::repeat_n(posts, lanes));
     out
+}
+
+/// A post with nothing to read: no text (X returns the odd empty post), a
+/// clip with no caption, whose title is only "@name on TikTok", or a
+/// Hacker News item marked dead. Such a row would take a place and say
+/// nothing.
+fn hollow(row: &SearchResult) -> bool {
+    row.snippet.trim().is_empty()
+        || [" on TikTok", " on Instagram", " on Threads"]
+            .iter()
+            .any(|tail| row.title.ends_with(tail))
+        // A Hacker News item its moderators removed.
+        || row.title.contains("[dead]")
+        || row.title.contains("[flagged]")
+}
+
+/// How X's summary reads when none of its posts are about the query ("No
+/// relevant posts were returned", "None of the posts mention ..."). In a
+/// graded sample of 25 searches (19 Nov 2026) eight summaries said so in
+/// these words, and all eight had been graded off topic or empty. Softer
+/// wording ("none mention the price") is left alone: it also appears over
+/// posts that are on the subject.
+const DISOWNED: &[&str] = &[
+    "no relevant posts",
+    "no relevant x posts",
+    "no posts matching",
+    "no posts relevant",
+    "returned no",
+    "none directly",
+    "none of the posts",
+    "no apparent connection",
+];
+
+/// Words too common to tell whether a row is about the query.
+const COMMON_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "how", "what", "why", "who", "are", "was", "can", "does", "not",
+    "from", "that", "this", "you", "your", "about", "into", "best", "new",
+];
+
+/// The words of `query` that say what it is about: three letters or more,
+/// not a number, not a common word.
+fn key_words(query: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for w in query.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if w.chars().count() >= 3
+            && !w.chars().all(|c| c.is_ascii_digit())
+            && !COMMON_WORDS.contains(&w)
+            && !words.iter().any(|k| k == w)
+        {
+            words.push(w.to_string());
+        }
+    }
+    words
+}
+
+/// A clip's view count, when the platform gave one.
+fn views(row: &SearchResult) -> Option<u64> {
+    row.extra.as_ref()?.get("views")?.as_u64()
+}
+
+/// Clean an added mode's rows before they are dealt in. Each step answers
+/// a defect found by grading 25 real searches source by source (19 Nov
+/// 2026):
+/// - **A post with nothing to read** is dropped ([`hollow`]): 28% of X's
+///   rows were posts it cited without listing their text.
+/// - **X said its posts miss** ([`DISOWNED`]): its rows and summary are
+///   dropped and a note says so. The call is paid either way; passing on
+///   posts X itself calls unrelated only costs the reader.
+/// - **Grok's own replies** and a **second post by one author** are
+///   dropped: one account held five of ten rows.
+/// - **A clip almost nobody watched** (under 100 views) goes after the
+///   others: such rows outranked a 137,000-view video on the same subject.
+/// - **Reddit cross-posts** (the same title twice) appear once.
+/// - **Hacker News** matches loosely once a long query is cut short, and
+///   five of its eight rows were off topic. A row is kept when it holds
+///   the query's first key word (the subject comes first) and either the
+///   second or half of them all; over the sixteen rows on file that keeps
+///   every thread about the subject and one stray. Reddit leads, one
+///   Hacker News row to every three.
+fn polish(mode: Mode, query: &str, r: &mut SearchResponse, notes: &mut Vec<String>) {
+    r.results.retain(|row| !hollow(row));
+    match mode {
+        Mode::Social => {
+            let disowned = r.answers.iter().any(|a| {
+                let text = a.text.to_lowercase();
+                a.provider == "xai" && DISOWNED.iter().any(|p| text.contains(p))
+            });
+            if disowned {
+                r.answers.retain(|a| a.provider != "xai");
+                r.results.retain(|row| row.source != "xai");
+                notes.push("X found no posts about this query".to_string());
+            }
+            let mut authors: HashSet<String> = HashSet::new();
+            r.results.retain(|row| {
+                row.source != "xai"
+                    || (!row.title.eq_ignore_ascii_case("@grok")
+                        && authors.insert(row.title.to_lowercase()))
+            });
+            let (watched, unwatched): (Vec<SearchResult>, Vec<SearchResult>) =
+                std::mem::take(&mut r.results)
+                    .into_iter()
+                    .partition(|row| views(row).is_none_or(|v| v >= 100));
+            r.results = watched;
+            r.results.extend(unwatched);
+        }
+        Mode::Community => {
+            let keys = key_words(&router::people_query(query));
+            let mut titles: HashSet<String> = HashSet::new();
+            let (reddit, hn): (Vec<SearchResult>, Vec<SearchResult>) =
+                std::mem::take(&mut r.results)
+                    .into_iter()
+                    .filter(|row| {
+                        row.source != "reddit" || titles.insert(row.title.trim().to_lowercase())
+                    })
+                    .partition(|row| row.source != "hackernews");
+            let mut hn = hn.into_iter().filter(|row| {
+                let text = format!("{} {}", row.title, row.snippet).to_lowercase();
+                let holds = |k: &String| text.contains(k.as_str());
+                let Some(subject) = keys.first() else {
+                    return true;
+                };
+                holds(subject)
+                    && (keys.get(1).is_none_or(holds)
+                        || keys.iter().filter(|k| holds(k)).count() * 2 >= keys.len())
+            });
+            for (i, row) in reddit.into_iter().enumerate() {
+                if i > 0 && i % 3 == 0 {
+                    r.results.extend(hn.next());
+                }
+                r.results.push(row);
+            }
+            r.results.extend(hn);
+        }
+        _ => {}
+    }
 }
 
 /// What the parts add up to, apart from their rows.
@@ -246,8 +380,9 @@ pub fn merge(
     let mut ran: Vec<Mode> = Vec::new();
     for (mode, run) in added {
         parts.push(match run {
-            Ok(r) => {
+            Ok(mut r) => {
                 ran.push(mode);
+                polish(mode, query, &mut r, &mut t.notes);
                 t.take(r)
             }
             Err(SearchError::AllProvidersFailed { failed, cost }) => {
@@ -332,12 +467,12 @@ pub fn merge(
     })
 }
 
-/// Deal the parts (pages first) into one list of `count` rows. Each row goes
-/// to the part furthest behind its share, pages first on a tie, so for ten
-/// rows and two added modes the order is page, post, post, page, post,
-/// page, post, page, post, page. A URL the pages and a post list both hold
-/// appears once, at its page rank, as the post's row (it has the votes and
-/// comment counts).
+/// Deal the parts (pages first) into one list: up to its share from each
+/// ([`shares`]). Each row goes to the part furthest behind its share, pages
+/// first on a tie, so for ten pages and two added modes the list opens
+/// page, post, post, page, page, post, post. A URL the pages and a post
+/// list both hold appears once, at its page rank, as the post's row (it has
+/// the votes and comment counts).
 fn deal(mut parts: Vec<Vec<SearchResult>>, count: usize) -> Vec<SearchResult> {
     let share = shares(count, parts.len().saturating_sub(1));
     let mut posts: HashMap<String, (usize, usize)> = HashMap::new();
@@ -370,14 +505,11 @@ fn deal(mut parts: Vec<Vec<SearchResult>>, count: usize) -> Vec<SearchResult> {
     let mut taken = vec![0usize; parts.len()];
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<SearchResult> = Vec::new();
-    while out.len() < count {
+    loop {
         // The part with rows left that has had the least of its share.
-        let behind = |p: usize| match share[p] {
-            0 => f64::INFINITY,
-            s => taken[p] as f64 / s as f64,
-        };
+        let behind = |p: usize| taken[p] as f64 / share[p] as f64;
         let Some(p) = (0..parts.len())
-            .filter(|&p| next[p] < parts[p].len())
+            .filter(|&p| next[p] < parts[p].len() && taken[p] < share[p])
             .min_by(|&a, &b| behind(a).total_cmp(&behind(b)))
         else {
             break;
@@ -403,7 +535,7 @@ mod tests {
         SearchResult {
             title: url.to_string(),
             url: url.to_string(),
-            snippet: String::new(),
+            snippet: "text".to_string(),
             source: source.to_string(),
             published: None,
             image_url: None,
@@ -479,17 +611,19 @@ mod tests {
     }
 
     #[test]
-    fn shares_keep_half_for_pages() {
-        assert_eq!(shares(10, 2), [5, 3, 2]);
-        assert_eq!(shares(5, 2), [3, 1, 1]);
-        assert_eq!(shares(3, 2), [2, 1, 0]);
-        assert_eq!(shares(1, 2), [1, 0, 0]);
-        assert_eq!(shares(10, 1), [5, 5]);
+    fn pages_keep_their_rows_and_posts_come_on_top() {
+        assert_eq!(shares(10, 2), [10, 4, 4]);
+        assert_eq!(shares(5, 2), [5, 2, 2]);
+        assert_eq!(shares(3, 2), [3, 1, 1]);
+        assert_eq!(shares(20, 2), [20, 8, 8]);
+        assert_eq!(shares(10, 1), [10, 4]);
         assert_eq!(shares(10, 0), [10]);
+        // A search for one row is one page: no post, so no added mode runs.
+        assert_eq!(shares(1, 2), [1, 0, 0]);
     }
 
-    /// Ten rows: five pages, three social posts, two community threads,
-    /// dealt so the top of the list holds each kind.
+    /// -c 10: all ten pages, with four social posts and four community
+    /// threads dealt in so the top of the list holds each kind.
     #[test]
     fn rows_are_dealt_by_share_with_pages_first() {
         let b = merge(
@@ -530,26 +664,29 @@ mod tests {
         )
         .unwrap();
         let r = &b.response;
-        assert_eq!(
-            hosts(r),
-            [
-                "serper", "xai", "reddit", "serper", "xai", "serper", "reddit", "serper", "xai",
-                "serper"
-            ]
-        );
+        let order: String = hosts(r)
+            .iter()
+            .map(|s| match *s {
+                "serper" => 'P',
+                "xai" => 'S',
+                _ => 'C',
+            })
+            .collect();
+        assert_eq!(order, "PSCPPSCPPPSCPPSCPP");
         assert_eq!(b.ran, [Mode::Social, Mode::Community]);
         assert_eq!((r.mode.as_str(), r.status.as_str()), ("general", "success"));
         assert_eq!(r.metadata.providers_queried, ["serper", "xai", "reddit"]);
-        assert_eq!(r.metadata.result_count, 10);
+        assert_eq!(r.metadata.result_count, 18);
         assert_eq!(r.metadata.elapsed_ms, 1200);
         let cost = r.metadata.cost.as_ref().unwrap();
         assert_eq!((cost.micros, cost.basis.as_str()), (46_000, "estimate"));
         assert_eq!(cost.by_provider["xai"], 45_000);
     }
 
-    /// A part with fewer rows than its share leaves them to the others.
+    /// A part with fewer rows than its share gives what it has; nothing
+    /// else grows to fill the gap.
     #[test]
-    fn a_short_part_leaves_its_slots_to_the_others() {
+    fn a_short_part_gives_what_it_has() {
         let b = merge(
             "q",
             Mode::General,
@@ -582,8 +719,8 @@ mod tests {
         )
         .unwrap();
         let got = hosts(&b.response);
-        assert_eq!(got.len(), 10);
-        assert_eq!(got.iter().filter(|s| **s == "serper").count(), 9);
+        assert_eq!(got.len(), 11);
+        assert_eq!(got.iter().filter(|s| **s == "serper").count(), 10);
         assert_eq!(got[1], "xai");
     }
 
@@ -621,7 +758,8 @@ mod tests {
         assert_eq!(r.results[0].extra.as_ref().unwrap()["score"], 120);
         let abc = r.results.iter().filter(|x| x.url.contains("/abc/")).count();
         assert_eq!(abc, 1);
-        assert_eq!(r.results.len(), 6);
+        // Five pages (one of them the thread) and Reddit's other two.
+        assert_eq!(r.results.len(), 7);
     }
 
     /// An added mode that fails or cannot run never fails the search: its
@@ -687,7 +825,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(hosts(&b.response), ["reddit"; 4]);
+        assert_eq!(hosts(&b.response), ["reddit"; 2]);
         assert_eq!(b.response.metadata.notes.len(), 1);
     }
 
@@ -874,9 +1012,231 @@ mod tests {
     #[test]
     fn a_mode_with_no_slot_has_no_share() {
         assert_eq!(shares(1, 2)[1..], [0, 0]);
-        assert_eq!(shares(2, 2)[1..], [1, 0]);
-        assert_eq!(shares(3, 2)[1..], [1, 0]);
-        assert_eq!(shares(4, 2)[1..], [1, 1]);
+        assert_eq!(shares(2, 2)[1..], [1, 1]);
+    }
+
+    fn social_answer(rows: Vec<SearchResult>, summary: &str) -> Run {
+        let mut r = answered(Mode::Social, "xai", 45_000, "estimate", rows).unwrap();
+        r.answers.push(Answer {
+            provider: "xai".to_string(),
+            text: summary.to_string(),
+        });
+        Ok(r)
+    }
+
+    fn post(source: &str, title: &str, url: &str) -> SearchResult {
+        let mut r = row(source, url);
+        r.title = title.to_string();
+        r
+    }
+
+    fn blend_one(mode: Mode, query: &str, lane: Run) -> Blend {
+        merge(
+            query,
+            Mode::General,
+            10,
+            answered(
+                Mode::General,
+                "serper",
+                1_000,
+                "estimate",
+                rows("serper", "web.example", 2),
+            ),
+            vec![(mode, lane)],
+            Duration::ZERO,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// When X says none of its posts are about the query, its rows and
+    /// its summary are left out and a note says so; the other platform's
+    /// rows stay.
+    #[test]
+    fn posts_x_calls_unrelated_are_left_out() {
+        let lane = social_answer(
+            vec![
+                post("xai", "@a", "https://x.com/a/status/1"),
+                post("youtube", "Talk", "https://www.youtube.com/watch?v=1"),
+                post("xai", "@b", "https://x.com/b/status/2"),
+            ],
+            "The returned posts discuss gaming mice. None directly reference Game-TARS.",
+        );
+        let b = blend_one(Mode::Social, "game-tars input model", lane);
+        let r = &b.response;
+        assert!(
+            r.results.iter().all(|x| x.source != "xai"),
+            "{:?}",
+            hosts(r)
+        );
+        assert!(r.results.iter().any(|x| x.source == "youtube"));
+        assert!(r.answers.is_empty());
+        assert!(r
+            .metadata
+            .notes
+            .iter()
+            .any(|n| n.contains("X found no posts")));
+        // The call was made and is still paid for and reported.
+        assert_eq!(r.metadata.cost.as_ref().unwrap().by_provider["xai"], 45_000);
+        assert_eq!(b.ran, [Mode::Social]);
+
+        // A summary that stands by its posts keeps them, whatever else it
+        // says is missing.
+        let lane = social_answer(
+            vec![post("xai", "@a", "https://x.com/a/status/1")],
+            "Users report the desk is steady. None mention the price.",
+        );
+        let b = blend_one(Mode::Social, "uplift desk wobble", lane);
+        assert!(b.response.results.iter().any(|x| x.source == "xai"));
+        assert_eq!(b.response.answers.len(), 1);
+    }
+
+    /// One row per X author, none from Grok itself, and a clip almost
+    /// nobody watched goes after the others.
+    #[test]
+    fn social_rows_are_one_per_author_with_watched_clips_first() {
+        let mut quiet = post("youtube", "Quiet", "https://www.youtube.com/watch?v=q");
+        quiet.extra = Some(serde_json::json!({"views": 12}));
+        let mut loud = post("youtube", "Loud", "https://www.youtube.com/watch?v=l");
+        loud.extra = Some(serde_json::json!({"views": 137_000}));
+        let lane = social_answer(
+            vec![
+                quiet,
+                post("xai", "@a", "https://x.com/a/status/1"),
+                post("xai", "@grok", "https://x.com/grok/status/9"),
+                post("xai", "@A", "https://x.com/a/status/2"),
+                loud,
+            ],
+            "Users discuss the desk.",
+        );
+        let b = blend_one(Mode::Social, "uplift desk", lane);
+        let got: Vec<&str> = b
+            .response
+            .results
+            .iter()
+            .filter(|x| x.source != "serper")
+            .map(|x| x.title.as_str())
+            .collect();
+        assert_eq!(got, ["@a", "Loud", "Quiet"]);
+    }
+
+    /// Reddit leads the community rows; a Hacker News row is kept only when
+    /// it holds half of the query's key words, and a cross-post appears
+    /// once.
+    #[test]
+    fn community_rows_lead_with_reddit_and_drop_loose_hacker_news() {
+        let mut on = post(
+            "hackernews",
+            "Rapamycin dosing in mice",
+            "https://news.ycombinator.com/item?id=1",
+        );
+        on.snippet = "weekly dosing and side effects".to_string();
+        // Half of the key words, but not the subject.
+        let mut off = post(
+            "hackernews",
+            "Show HN: a dosing pump",
+            "https://news.ycombinator.com/item?id=2",
+        );
+        off.snippet = "dosing with no side effects".to_string();
+        // The subject and the next word are enough.
+        let mut two = post(
+            "hackernews",
+            "Rapamycin dosing",
+            "https://news.ycombinator.com/item?id=3",
+        );
+        two.snippet = "a thread".to_string();
+        let lane = answered(
+            Mode::Community,
+            "reddit",
+            0,
+            "estimate",
+            vec![
+                on,
+                off,
+                two,
+                post(
+                    "reddit",
+                    "Rapamycin: my protocol",
+                    "https://www.reddit.com/r/a/comments/1/x/",
+                ),
+                post(
+                    "reddit",
+                    "rapamycin: my protocol",
+                    "https://www.reddit.com/r/b/comments/2/x/",
+                ),
+                post(
+                    "reddit",
+                    "Side effects?",
+                    "https://www.reddit.com/r/a/comments/3/x/",
+                ),
+            ],
+        );
+        let b = blend_one(
+            Mode::Community,
+            "rapamycin dosing protocol side effects",
+            lane,
+        );
+        let got: Vec<&str> = b
+            .response
+            .results
+            .iter()
+            .filter(|x| x.source != "serper")
+            .map(|x| x.title.as_str())
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "Rapamycin: my protocol",
+                "Side effects?",
+                "Rapamycin dosing in mice",
+                "Rapamycin dosing"
+            ]
+        );
+        assert_eq!(
+            key_words("What is the best 27 inch monitor for you"),
+            ["inch", "monitor"]
+        );
+    }
+
+    /// A post with nothing to read is left out: X's empty post, a clip
+    /// with no caption (its title is only "@name on TikTok").
+    #[test]
+    fn posts_with_nothing_to_read_are_left_out() {
+        let mut empty = row("xai", "https://x.com/a/status/1");
+        empty.title = "Post on X".to_string();
+        empty.snippet = String::new();
+        let mut clip = row("tiktok", "https://www.tiktok.com/@a/video/2");
+        clip.title = "@a on TikTok".to_string();
+        clip.snippet = "160 views · 1 likes".to_string();
+        let good = row("xai", "https://x.com/b/status/3");
+        let b = merge(
+            "q",
+            Mode::General,
+            10,
+            answered(
+                Mode::General,
+                "serper",
+                1_000,
+                "estimate",
+                rows("serper", "web.example", 2),
+            ),
+            vec![(
+                Mode::Social,
+                answered(
+                    Mode::Social,
+                    "xai",
+                    45_000,
+                    "estimate",
+                    vec![empty, clip, good],
+                ),
+            )],
+            Duration::ZERO,
+            false,
+        )
+        .unwrap();
+        let urls: Vec<&str> = b.response.results.iter().map(|r| r.url.as_str()).collect();
+        assert!(urls.contains(&"https://x.com/b/status/3"), "{urls:?}");
+        assert_eq!(urls.len(), 3, "{urls:?}");
     }
 
     /// Pages that did not answer plus posts that came back empty is the

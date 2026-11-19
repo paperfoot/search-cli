@@ -132,6 +132,26 @@ pub struct Settings {
     // deadline); an old file's `timeout = ...` is ignored, whatever its type.
     #[serde(default = "default_count", deserialize_with = "de_count")]
     pub count: usize,
+    /// `on` (the default): an auto search for pages also returns posts from
+    /// social and community (rule 12). `off`: pages only, as before 0.13,
+    /// for a caller that wants the old speed and price.
+    #[serde(default = "default_posts")]
+    pub posts: String,
+}
+
+fn default_posts() -> String {
+    "on".to_string()
+}
+
+impl Settings {
+    /// Rule 12 is on unless `settings.posts` (or `SEARCH_SETTINGS_POSTS`)
+    /// says off.
+    pub fn posts_on(&self) -> bool {
+        !matches!(
+            self.posts.trim().to_ascii_lowercase().as_str(),
+            "off" | "false" | "no" | "0"
+        )
+    }
 }
 
 fn default_count() -> usize {
@@ -158,6 +178,7 @@ impl Default for AppConfig {
             },
             settings: Settings {
                 count: default_count(),
+                posts: default_posts(),
             },
             metasearch: Metasearch::default(),
         }
@@ -225,7 +246,7 @@ fn effective_keys(config: &AppConfig) -> Vec<(&'static crate::providers::Provide
 }
 
 /// Valid setting names for `config set settings.<name>`.
-pub const SETTING_KEYS: &[&str] = &["count"];
+pub const SETTING_KEYS: &[&str] = &["count", "posts"];
 
 /// Valid field names for `config set metasearch.<name>`.
 pub const METASEARCH_KEYS: &[&str] = &["token", "email", "url"];
@@ -293,8 +314,26 @@ pub fn config_show(config: &AppConfig) {
             "count".white(),
             config.settings.count.to_string().cyan()
         );
+        println!(
+            "    {:<10} {}",
+            "posts".white(),
+            if config.settings.posts_on() {
+                "on"
+            } else {
+                "off"
+            }
+            .cyan()
+        );
     } else {
         println!("  count    = {}", config.settings.count);
+        println!(
+            "  posts    = {}",
+            if config.settings.posts_on() {
+                "on"
+            } else {
+                "off"
+            }
+        );
     }
 
     println!();
@@ -471,6 +510,12 @@ fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
             })?;
             Ok(toml::Value::Integer(n as i64))
         }
+        "posts" => match value.trim().to_ascii_lowercase().as_str() {
+            v @ ("on" | "off") => Ok(toml::Value::String(v.to_string())),
+            _ => Err(SearchError::Config(format!(
+                "settings.posts must be on or off, got '{value}'"
+            ))),
+        },
         other => Err(SearchError::Config(format!(
             "Unknown setting 'settings.{other}'. Valid: {}",
             SETTING_KEYS.join(", ")
@@ -568,6 +613,12 @@ mod tests {
             Ok(toml::Value::Integer(5))
         ));
         assert!(parse_setting("count", "abc").is_err());
+        assert!(matches!(parse_setting("posts", "OFF"), Ok(toml::Value::String(v)) if v == "off"));
+        assert!(parse_setting("posts", "maybe").is_err());
+        let mut s = super::AppConfig::default().settings;
+        assert!(s.posts_on());
+        s.posts = "off".into();
+        assert!(!s.posts_on());
         // Nothing reads settings.timeout any more.
         assert!(parse_setting("timeout", "30").is_err());
         assert!(parse_setting("unknown_setting", "1").is_err());

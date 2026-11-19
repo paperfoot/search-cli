@@ -108,6 +108,17 @@ pub async fn run_capped(
     launch(ctx, hosting, request).await
 }
 
+/// Whether `mode` has a provider that can run here: one with a key, a
+/// keyless one, or one metasearch.sh offers. Rule 12 adds posts only beside
+/// pages that can be fetched; without a web engine the search fails as it
+/// always did ("no providers"), instead of answering with posts alone.
+pub fn can_run(ctx: &Arc<AppContext>, mode: Mode, hosting: Option<&Hosting>) -> bool {
+    let order = registry::spec(mode).providers;
+    route(providers::build_providers(ctx), mode, hosting)
+        .iter()
+        .any(|a| order.contains(&a.name()) && a.spec().modes.contains(&mode) && a.is_configured())
+}
+
 async fn launch(
     ctx: Arc<AppContext>,
     hosting: Option<&Hosting>,
@@ -1414,11 +1425,13 @@ mod tests {
             (&instagram::SPEC, ok(5, 2, "instagram")),
         ]);
         let r = run(adapters, "mechanical keyboard").await.unwrap();
-        assert_eq!(called(&log), ["instagram", "tiktok"]);
+        // The pick is X and YouTube; X cannot run here, so the next of the
+        // fan-out (TikTok) stands in.
+        assert_eq!(called(&log), ["tiktok", "youtube"]);
         // Fused: the top hit of each platform comes before any second hit.
         let firsts: Vec<&str> = r.results[..2].iter().map(|x| x.source.as_str()).collect();
         assert!(
-            firsts.contains(&"tiktok") && firsts.contains(&"instagram"),
+            firsts.contains(&"tiktok") && firsts.contains(&"youtube"),
             "{firsts:?}"
         );
 
@@ -1600,7 +1613,7 @@ mod tests {
         plan.truncate(registry::fan_out_cap(Mode::Social, "mechanical keyboard").unwrap());
         let (_, g) =
             hosted_group(&plan, Mode::Social, None, &opts, true, false, own(&plan)).unwrap();
-        assert_eq!(g.providers, Some(vec!["tiktok"]));
+        assert_eq!(g.providers, Some(vec!["youtube"]));
         // All hosted: the server picks.
         let plan = vec![hosted(&xai::SPEC, &[]), hosted(&tiktok::SPEC, &[])];
         let (_, g) =
