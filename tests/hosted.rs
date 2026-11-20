@@ -660,6 +660,78 @@ fn social_without_a_cue_is_left_to_the_server() {
     assert!(sent[0].body.get("providers").is_none(), "{}", sent[0].body);
 }
 
+/// Rule 12 through metasearch.sh: the pages call is routed as before, and
+/// the added social search is one more call, which names X and the CLI's
+/// pick. Left to the server, a query that mentions TikTok is searched on
+/// TikTok alone and its model may leave X out. (`posts=social` keeps the
+/// test off the network: Reddit and Hacker News are always asked directly.)
+#[test]
+fn auto_adds_a_social_call_that_names_its_platforms() {
+    let mock = start("posts", handler(|r, _| search_ok(r)));
+    let (code, v) = run_json(mock.cmd().env("SEARCH_SETTINGS_POSTS", "social").args([
+        "search",
+        "-q",
+        "TikTok trending sound reach test",
+        "-c",
+        "5",
+        "--json",
+    ]));
+    assert_eq!(code, 0, "{v}");
+    let sent = mock.requests("/api/v1/search");
+    assert_eq!(sent.len(), 2, "pages and social: {v}");
+    let of = |mode: &str| sent.iter().find(|r| r.body["mode"] == mode).unwrap();
+    assert!(of("general").body.get("providers").is_none());
+    assert_eq!(of("social").body["providers"], json!(["xai", "tiktok"]));
+    assert_eq!(
+        of("social").body["query"],
+        "TikTok trending sound reach test"
+    );
+
+    assert_eq!(v["mode"], "general");
+    let m = &v["metadata"];
+    assert_eq!(m["routing"]["auto"]["added"], json!(["social"]));
+    // One routed pages call and two platforms, each charged by the server.
+    assert_eq!(m["cost"]["basis"], "charged");
+    assert_eq!(m["cost"]["micros"], 4500);
+    assert_eq!(m["transport"]["xai"], "hosted");
+    // The three pages -c could fill, and two posts on top of them.
+    let sources: Vec<&str> = v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources.iter().filter(|s| **s == "serper").count(), 3);
+    assert_eq!(sources.len(), 5, "{sources:?}");
+
+    // An explicit -m general is pages only, and so is posts=off.
+    let before = mock.requests("/api/v1/search").len();
+    let (_, v) = run_json(mock.cmd().env("SEARCH_SETTINGS_POSTS", "social").args([
+        "search",
+        "-q",
+        "TikTok trending sound reach test",
+        "-m",
+        "general",
+        "--json",
+    ]));
+    assert!(v["metadata"]["routing"]["auto"].is_null(), "{v}");
+    assert_eq!(mock.requests("/api/v1/search").len(), before + 1);
+    // The cache keeps the two settings apart: with posts off the same auto
+    // query is searched again, pages only, not replayed with its posts.
+    let before = mock.requests("/api/v1/search").len();
+    let (_, v) = run_json(mock.cmd().args([
+        "search",
+        "-q",
+        "TikTok trending sound reach test",
+        "-c",
+        "5",
+        "--json",
+    ]));
+    assert!(v["metadata"]["routing"]["auto"]["added"].is_null(), "{v}");
+    assert_eq!(mock.requests("/api/v1/search").len(), before + 1, "{v}");
+    assert_eq!(v["results"].as_array().unwrap().len(), 3);
+}
+
 #[test]
 fn rerank_failure_keeps_the_fused_order() {
     let mock = start(

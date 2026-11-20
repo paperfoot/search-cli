@@ -829,8 +829,15 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // read but still refreshes the entry. The key carries the
             // requested mode and how each provider would be reached, so a
             // new key or a login never replays a run that went another way.
+            // Auto's answer depends on settings.posts, and its shape changed
+            // in 0.14 (posts are rows beyond -c): neither an older entry nor
+            // one made with the other setting is replayed.
+            let posts_key = match args.mode {
+                cli::ModeArg::Auto => format!("|posts={}", app.config.settings.posts()),
+                cli::ModeArg::Fixed(_) => String::new(),
+            };
             let cache_mode = format!(
-                "{}|{}",
+                "{}|{}{posts_key}",
                 args.mode,
                 transport_signature(&app, client.is_some())
             );
@@ -980,11 +987,10 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                 && args.providers.is_none()
                 && opts.include_domains.is_empty()
                 && opts.exclude_domains.is_empty()
-                && app.config.settings.posts_on()
                 && router::posts_apply(&query)
                 && engine::can_run(&app, mode, hosting.as_ref())
             {
-                router::PEOPLE_LANES.to_vec()
+                app.config.settings.posts_lanes()
             } else {
                 Vec::new()
             };
@@ -1102,7 +1108,7 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
                             "config_path": config::config_path().to_string_lossy(),
                             "settings": {
                                 "count": app.config.settings.count,
-                                "posts": if app.config.settings.posts_on() { "on" } else { "off" },
+                                "posts": app.config.settings.posts(),
                             },
                             "providers_configured": configured,
                             "metasearch": {

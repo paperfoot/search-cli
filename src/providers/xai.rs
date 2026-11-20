@@ -1,5 +1,6 @@
 //! xAI: live X search through the Responses API and the `x_search` tool.
-//! Grok searches X, then answers in a fixed JSON shape (posts + summary). A
+//! Grok searches X, then answers in a fixed JSON shape (posts + summary +
+//! `on_topic`, its verdict on whether any post is about the query). A
 //! post becomes a result only when its status id is among the response's
 //! `url_citation` annotations, so every result is a post the search actually
 //! fetched; the summary goes to `answers`. xAI bills tokens plus posts
@@ -135,11 +136,26 @@ fn body(call: &Call<'_>) -> Value {
     } else if !deny.is_empty() {
         tool["excluded_x_handles"] = json!(deny);
     }
+    // The search is semantic and returns posts that share words with the
+    // query and nothing else (a game boss "killed" brought posts about
+    // killings). The model can tell, so it is asked to: `on_topic` is its
+    // verdict, typed, where the summary's wording changes from run to run.
+    //
+    // The wording was chosen on ten queries (20 Nov 2026). This one gave
+    // the right verdict on all ten at the old cost (one search, about
+    // $0.06). Asking it to list only posts about the subject made it
+    // search two to four times ($0.10 to $0.18) and call loosely related
+    // posts off topic ("uplift v2 standing desk wobble": no rows); telling
+    // it to search again when the first search missed found real posts
+    // for three queries and lost them for one at three times the price.
     let prompt = format!(
         "Search X for posts about: {}\n\
          Return up to {} of the most relevant posts, each with the author's handle (without @), \
          the post text, its date (ISO 8601) and its URL, then a two-sentence summary of what the \
-         posts say. Only list posts the search returned.",
+         posts say. Only list posts the search returned. Set on_topic to true when at least one \
+         listed post is about the subject of the query, even loosely or in part. Set it to false \
+         only when the posts merely share words with the query and are about something else \
+         entirely; do not search again to fix that.",
         call.query, call.count
     );
     json!({
@@ -155,7 +171,7 @@ fn body(call: &Call<'_>) -> Value {
             "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["posts", "summary"],
+                "required": ["posts", "summary", "on_topic"],
                 "properties": {
                     "posts": {
                         "type": "array",
@@ -171,7 +187,8 @@ fn body(call: &Call<'_>) -> Value {
                             }
                         }
                     },
-                    "summary": { "type": "string" }
+                    "summary": { "type": "string" },
+                    "on_topic": { "type": "boolean" }
                 }
             }
         } },
@@ -275,6 +292,14 @@ struct Reply {
     posts: Vec<Post>,
     #[serde(default)]
     summary: String,
+    /// False when the model found no post about the query. Absent in a
+    /// reply from before the field was asked for: on topic.
+    #[serde(default = "yes")]
+    on_topic: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -358,11 +383,21 @@ fn parse(data: XaiResponse, call: &Call<'_>) -> Result<Output, SearchError> {
         }
     }
 
-    let (posts, summary) = match serde_json::from_str::<Reply>(&text) {
-        Ok(reply) => (reply.posts, reply.summary.trim().to_string()),
+    let (posts, summary, on_topic) = match serde_json::from_str::<Reply>(&text) {
+        Ok(reply) => (
+            reply.posts,
+            reply.summary.trim().to_string(),
+            reply.on_topic,
+        ),
         // Not the JSON we asked for: the text is the answer, citations the results.
-        Err(_) => (Vec::new(), text.trim().to_string()),
+        Err(_) => (Vec::new(), text.trim().to_string(), true),
     };
+    // Nothing about the query: no rows, not even the posts it cited on the
+    // way. The summary stays as the answer (it says what X held instead).
+    if !on_topic {
+        cited.clear();
+    }
+    let posts = if on_topic { posts } else { Vec::new() };
 
     // The whole deny list is applied here too: upstream gets at most 20, and
     // none when the allow list took the request slot.
@@ -603,6 +638,52 @@ mod tests {
         );
         // 447,231,500 ticks -> 44,723.15 µ$, rounded up.
         assert_eq!(out.cost_micros, Some(44_724));
+    }
+
+    /// The model's verdict that no post is about the query: no rows, not
+    /// even the cited ones, the summary as the answer, and the cost.
+    #[test]
+    fn a_reply_marked_off_topic_gives_no_rows() {
+        let reply = |on_topic: Option<bool>| {
+            let mut text = json!({
+                "posts": [
+                    { "url": "https://x.com/a/status/1", "author": "a", "text": "killings in the region", "date": "" }
+                ],
+                "summary": "The posts are about unrelated incidents."
+            });
+            if let Some(v) = on_topic {
+                text["on_topic"] = json!(v);
+            }
+            let raw = json!({
+                "status": "completed",
+                "output": [{ "type": "message", "content": [{
+                    "type": "output_text",
+                    "text": text.to_string(),
+                    "annotations": [
+                        { "type": "url_citation", "url": "https://x.com/i/status/1" },
+                        { "type": "url_citation", "url": "https://x.com/i/status/2" }
+                    ]
+                }]}],
+                "usage": { "cost_in_usd_ticks": 447_231_500u64 }
+            });
+            let data: XaiResponse = serde_json::from_value(raw).unwrap();
+            parse(data, &call(Mode::Social, 10, &SearchOpts::default())).unwrap()
+        };
+        let out = reply(Some(false));
+        assert!(out.results.is_empty(), "{:?}", out.results.len());
+        assert_eq!(out.answers.len(), 1);
+        assert_eq!(out.cost_micros, Some(44_724));
+        // On topic, or a reply without the field: the rows as before.
+        assert_eq!(reply(Some(true)).results.len(), 2);
+        assert_eq!(reply(None).results.len(), 2);
+        // The request asks for the verdict.
+        let b = body(&call(Mode::Social, 10, &SearchOpts::default()));
+        let schema = &b["text"]["format"]["schema"];
+        assert_eq!(schema["properties"]["on_topic"]["type"], "boolean");
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("on_topic")));
     }
 
     #[test]

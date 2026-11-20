@@ -78,9 +78,9 @@ pub async fn run(
 }
 
 /// [`run`] for a mode added beside the search's own (rule 12, see
-/// `blend`): no `-p`, and when every call goes straight to its provider the
-/// mode's deadline is cut to `cap`, so one slow platform cannot hold the
-/// whole search. A direct call still out at the cap is reported as timed
+/// `blend`): `only` names its providers when the caller must (X resting),
+/// and when every call goes straight to its provider the mode's deadline
+/// is cut to `cap`, so one slow platform cannot hold the whole search. A direct call still out at the cap is reported as timed
 /// out and counted as spent, like any other. A run with a hosted call keeps
 /// the mode's own deadline (see [`Request::direct_cap`]).
 pub async fn run_capped(
@@ -88,16 +88,16 @@ pub async fn run_capped(
     query: &str,
     mode: Mode,
     count: usize,
+    (only, cap): (Option<&[String]>, Duration),
     opts: &SearchOpts,
     hosting: Option<&Hosting>,
-    cap: Duration,
 ) -> Result<SearchResponse, SearchError> {
     let spec = registry::spec(mode);
     let request = Request {
         query,
         mode,
         count,
-        only: None,
+        only,
         opts,
         deadline: spec.deadline,
         straggler_cap: spec.straggler_cap.map(|c| c.min(cap)),
@@ -443,8 +443,14 @@ pub(crate) async fn execute_with(
             plan.truncate(cap);
         }
     }
+    // A social search added to another (rule 12) names its platforms in
+    // the hosted call, like one beside an own key: left to the server, a
+    // query that merely mentions TikTok is searched on TikTok alone, and
+    // its model may leave X out. An explicit -m social is still the
+    // server's to pick.
+    let names_pick = mode == Mode::Social && req.direct_cap.is_some() && req.only.is_none();
     // Every hosted provider becomes one metasearch.sh call.
-    let (plan, report_slot) = fold_hosted(plan, req, mode, own_key);
+    let (plan, report_slot) = fold_hosted(plan, req, mode, own_key || names_pick);
     // A capped run (a mode added to another search) stops sooner, unless a
     // hosted call is out: the server is still working on that one.
     let deadline = match req.direct_cap {

@@ -53,6 +53,39 @@ fn stable_hash(query: &str, mode: &str) -> u64 {
     h
 }
 
+/// X's record in added searches (rule 12): how many times running it did
+/// not answer in time, and when the last time was. Kept in the cache
+/// directory, which parallel agents share, so one session's timeouts spare
+/// the others the wait. See `blend::run`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Strikes {
+    pub count: u32,
+    pub at: u64,
+}
+
+fn strikes_path() -> PathBuf {
+    cache_dir().join("x_strikes.json")
+}
+
+/// The record, or a clean one when the file is missing or unreadable.
+pub fn x_strikes() -> Strikes {
+    std::fs::read(strikes_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn set_x_strikes(strikes: Strikes) {
+    if let Ok(bytes) = serde_json::to_vec(&strikes) {
+        let _ = write_atomic(&strikes_path(), &bytes);
+    }
+}
+
+/// Seconds since the epoch.
+pub fn now() -> u64 {
+    now_secs()
+}
+
 fn query_cache_path(query: &str, mode: &str) -> PathBuf {
     // `q2_` prefix: bump from the old DefaultHasher `q_` scheme so the switch
     // doesn't read stale files written under the unstable hash.

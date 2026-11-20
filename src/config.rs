@@ -133,8 +133,9 @@ pub struct Settings {
     #[serde(default = "default_count", deserialize_with = "de_count")]
     pub count: usize,
     /// `on` (the default): an auto search for pages also returns posts from
-    /// social and community (rule 12). `off`: pages only, as before 0.13,
-    /// for a caller that wants the old speed and price.
+    /// community and social (rule 12). `community`: threads only (Reddit
+    /// and Hacker News: close to free, a few seconds). `social`: X and one
+    /// platform only. `off`: pages only, as before 0.13.
     #[serde(default = "default_posts")]
     pub posts: String,
 }
@@ -144,13 +145,29 @@ fn default_posts() -> String {
 }
 
 impl Settings {
-    /// Rule 12 is on unless `settings.posts` (or `SEARCH_SETTINGS_POSTS`)
-    /// says off.
-    pub fn posts_on(&self) -> bool {
-        !matches!(
-            self.posts.trim().to_ascii_lowercase().as_str(),
-            "off" | "false" | "no" | "0"
-        )
+    /// `settings.posts` (or `SEARCH_SETTINGS_POSTS`) as one of on,
+    /// community, social, off. Anything unreadable is on, the default.
+    pub fn posts(&self) -> &'static str {
+        match self.posts.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "no" | "0" => "off",
+            "community" => "community",
+            "social" => "social",
+            _ => "on",
+        }
+    }
+
+    /// The modes rule 12 adds under this setting, in dealing order.
+    pub fn posts_lanes(&self) -> Vec<crate::types::Mode> {
+        use crate::types::Mode;
+        crate::router::PEOPLE_LANES
+            .into_iter()
+            .filter(|lane| match self.posts() {
+                "off" => false,
+                "community" => *lane == Mode::Community,
+                "social" => *lane == Mode::Social,
+                _ => true,
+            })
+            .collect()
     }
 }
 
@@ -317,23 +334,11 @@ pub fn config_show(config: &AppConfig) {
         println!(
             "    {:<10} {}",
             "posts".white(),
-            if config.settings.posts_on() {
-                "on"
-            } else {
-                "off"
-            }
-            .cyan()
+            config.settings.posts().cyan()
         );
     } else {
         println!("  count    = {}", config.settings.count);
-        println!(
-            "  posts    = {}",
-            if config.settings.posts_on() {
-                "on"
-            } else {
-                "off"
-            }
-        );
+        println!("  posts    = {}", config.settings.posts());
     }
 
     println!();
@@ -511,9 +516,9 @@ fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
             Ok(toml::Value::Integer(n as i64))
         }
         "posts" => match value.trim().to_ascii_lowercase().as_str() {
-            v @ ("on" | "off") => Ok(toml::Value::String(v.to_string())),
+            v @ ("on" | "off" | "community" | "social") => Ok(toml::Value::String(v.to_string())),
             _ => Err(SearchError::Config(format!(
-                "settings.posts must be on or off, got '{value}'"
+                "settings.posts must be on, community, social or off, got '{value}'"
             ))),
         },
         other => Err(SearchError::Config(format!(
@@ -616,9 +621,18 @@ mod tests {
         assert!(matches!(parse_setting("posts", "OFF"), Ok(toml::Value::String(v)) if v == "off"));
         assert!(parse_setting("posts", "maybe").is_err());
         let mut s = super::AppConfig::default().settings;
-        assert!(s.posts_on());
+        use crate::types::Mode;
+        assert_eq!(s.posts_lanes(), [Mode::Community, Mode::Social]);
         s.posts = "off".into();
-        assert!(!s.posts_on());
+        assert!(s.posts_lanes().is_empty());
+        s.posts = "Community".into();
+        assert_eq!(s.posts_lanes(), [Mode::Community]);
+        s.posts = "social".into();
+        assert_eq!(s.posts_lanes(), [Mode::Social]);
+        // Unreadable: the default.
+        s.posts = "sometimes".into();
+        assert_eq!((s.posts(), s.posts_lanes().len()), ("on", 2));
+        assert!(parse_setting("posts", "community").is_ok());
         // Nothing reads settings.timeout any more.
         assert!(parse_setting("timeout", "30").is_err());
         assert!(parse_setting("unknown_setting", "1").is_err());

@@ -1076,8 +1076,10 @@ fn community_cue(q: &str) -> Option<String> {
 }
 
 /// The modes rule 12 adds beside the pages, in the order their posts are
-/// dealt into the list.
-pub const PEOPLE_LANES: [Mode; 2] = [Mode::Social, Mode::Community];
+/// dealt into the list. Community first: over the plain queries of a
+/// graded sample (19 Nov 2026) Reddit was useful on 8 of 11 and X on 4, so
+/// the first post in the list is a thread.
+pub const PEOPLE_LANES: [Mode; 2] = [Mode::Community, Mode::Social];
 
 /// Words that make the query a lookup of an error or a reference, where a
 /// post would only be noise ("stripe api rate limit error"). Kept short on
