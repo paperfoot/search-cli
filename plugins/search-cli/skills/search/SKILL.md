@@ -49,8 +49,9 @@ says so and no X row is added). Cite the posts beside the pages.
   News, about free) and `search search -q "…" -m social --json`.
 - Quotes make a lookup: `"Lemon Squeezy" payouts held` gets pages only.
   Write the name without quotes when what people say matters.
-- A search with posts takes 15 to 25 s and costs about $0.06 more with
-  your own keys, $0.072 more through metasearch.sh (where a plain search
+- A search with posts usually takes 15 to 25 s (40 s at most with your
+  own keys, 65 s through metasearch.sh) and costs about $0.06 more with
+  your own keys, $0.07 more through metasearch.sh (where a plain search
   is $0.0015); nearly all of both is X. `search config set settings.posts
   community` keeps only Reddit and Hacker News (under a cent, a few
   seconds), `social` only X and the platform, `off` neither.
