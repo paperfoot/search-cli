@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.14.0 — 2026-11-20
+
+- Posts come with the pages, by default. Much of what people know is only
+  in posts, and auto used to add them on a short list of cue words (about
+  one web search in forty in a month of logs). Now every auto search whose
+  mode is `general` or `news` also runs `social` and `community` and
+  returns their posts beside the pages.
+- The pages keep every row `-c` asked for. The posts are extra rows, up to
+  two for every five pages from each added mode (`-c 10`: ten pages and up
+  to eight posts), dealt in so the top of the list holds both. In 0.13 the
+  posts took half of `-c`, which cost five pages in ten.
+- Posts are left out of a lookup: a query of one word, an exact phrase in
+  quotes, `site:` or another operator, a URL, or an error or reference
+  question ("api", "docs", "error", "syntax", "changelog"). "what do people
+  say about", "opinions about" and "experiences with" get them even
+  beside a lookup word, and come before a signal word or the routing
+  model ("opinions about the sleep study" is a web search, not a paper
+  search), unless posts cannot be added (`-p`, a domain filter, posts
+  off).
+  They are also left out with `-p`, `-d` or `--exclude-domain`, with any
+  explicit `-m`, at `-c 1`, and when no web engine can run (the search
+  then fails as before instead of answering with posts alone).
+- A search with posts costs about $0.06 more with your own keys and
+  about $0.07 more through metasearch.sh, where a plain search is
+  $0.0015, and usually takes 15 to 25 s (40 s at most with your own
+  keys, 65 s through metasearch.sh); nearly all of both is X. `search config
+  set settings.posts community` (or `SEARCH_SETTINGS_POSTS=community`)
+  keeps only the Reddit and Hacker News threads (under a cent, a few
+  seconds), `social` keeps only X and the platform, and `off` is pages
+  only.
+- Through metasearch.sh the added social search names X and the
+  platform the CLI picked, so it does not depend on the server's older
+  pick.
+- A platform named as the subject no longer takes over the search. "TikTok
+  trending sound reach test" used to run on TikTok alone, with no pages
+  and no X; it now keeps its pages, and the social search asks X and
+  TikTok. Asking for a platform's posts still searches it alone: "on
+  tiktok", "tiktok videos", "youtube videos", "instagram reels", "tweets",
+  "on X", "on twitter".
+- The second social platform is YouTube unless the query points elsewhere
+  (TikTok for trends and sounds, Instagram for visual topics). It was
+  TikTok, which returned off-topic clips for half of a set of technical
+  and biomedical queries where YouTube had talks, tutorials and reviews.
+- The pages decide the search. When no web engine answers, it fails as
+  it would without posts: the same error, the same exit code, nothing
+  cached, and what the posts cost counted in. In 0.13 posts that
+  answered alone were returned with exit 0, so an empty balance read as
+  a result as long as Reddit answered, and a rate-limited X turned "top
+  up" (exit 2) into "retry" (exit 1).
+- A call made through metasearch.sh is no longer left behind when a
+  faster platform has answered and the wait runs out: the server goes
+  on and may charge for it, so the search waits for the server's own
+  cut. This applies to `-m social` as well.
+- `-m social` with a platform named only as the subject ("funny cats
+  tiktok") asks X and that platform, where it asked the platform alone.
+- `settings.posts` also reads `false`, `true`, `0` and `1`.
+- When X does not answer an added search in time twice running, it is
+  left out of added searches for ten minutes and `metadata.notes` says
+  so, instead of every search waiting 40 s for it; the first search after
+  that asks it again. An explicit `-m social` always asks X.
+- Hacker News drops words from the end of a query that matches nothing. It
+  matches every word, so a long keyword query used to find no thread at
+  all.
+- Added posts are cleaned before they are dealt in, after 25 real searches
+  were graded source by source. A post with nothing to read is dropped
+  (28% of X's rows were posts it cited without their text; also a clip
+  with no caption and a Hacker News item marked dead). X is now asked
+  whether any post is about the query (`-m social` too): when none is,
+  it returns no rows, and in an auto search its summary is dropped as
+  well and `metadata.notes` says so. X gives one row per author and none
+  from Grok. A clip under 100 views goes after the
+  others. A Reddit cross-post appears once. A Hacker News row must hold
+  the query's subject. Reddit's threads are dealt first: they were
+  useful on 8 of 11 plain queries, X on 4.
+- The routing model no longer chooses `social` or `community` for a
+  logged-in CLI: those are for a query that asks for them, and everything
+  else keeps its pages.
+- The cue lists of 0.13 are gone, with their misreads.
+- The search log records whether auto chose the mode.
+
 ## 0.13.1 — 2026-11-19
 
 - A search with posts added no longer runs a mode that has no result slot:
