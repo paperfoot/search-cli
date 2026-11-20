@@ -1,0 +1,22 @@
+{
+  "query": "world cup 2026 final",
+  "mode": "pro",
+  "results": [
+    {
+      "title": "2026 FIFA World Cup final",
+      "url": "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_final",
+      "description": "",
+      "snippet": "The 2026 FIFA World Cup final was played at MetLife Stadium.",
+      "published_at": "2026-07-19T22:10:00Z"
+    },
+    {
+      "title": "No snippet",
+      "url": "https://example.com/a",
+      "description": "Fallback description"
+    },
+    {
+      "title": "Not http",
+      "url": "ftp://example.com/b"
+    }
+  ]
+}

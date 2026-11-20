@@ -94,6 +94,8 @@ pub struct ApiKeys {
     #[serde(default)]
     pub tavily: String,
     #[serde(default)]
+    pub keenable: String,
+    #[serde(default)]
     pub serpapi: String,
     #[serde(default)]
     pub perplexity: String,
@@ -133,6 +135,7 @@ impl ApiKeys {
             "linkup" => &self.linkup,
             "firecrawl" => &self.firecrawl,
             "tavily" => &self.tavily,
+            "keenable" => &self.keenable,
             "serpapi" => &self.serpapi,
             "perplexity" => &self.perplexity,
             "browserless" => &self.browserless,
@@ -205,6 +208,7 @@ impl Default for AppConfig {
                 linkup: String::new(),
                 firecrawl: String::new(),
                 tavily: String::new(),
+                keenable: String::new(),
                 serpapi: String::new(),
                 perplexity: String::new(),
                 browserless: String::new(),
