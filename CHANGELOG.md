@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.14.1 — 2026-11-20
+
+- A question frame ("opinions about ...") no longer takes the routing at
+  `-c 1`, where no post has a row: the search is routed as it would be
+  without the frame.
+- A word that mixes Latin letters with Chinese or Japanese ("iPhone16の評判")
+  is a query, not a one-word lookup, and gets posts again.
+- `before:`, `after:` and `related:` count as search operators only with
+  a value attached ("before:2024"), so "Before: 120kg After: 90kg" gets
+  posts.
+- An X post returned without an author takes its handle from its URL.
+- `settings.posts` reads `none` and `disabled` as off.
+- The manifest's size test measures a bare environment: it failed on a
+  machine with every key set. The routing text is 29 bytes shorter.
+- Test examples and doc examples are invented ones.
+
+Through metasearch.sh, two of 0.14.0's notes apply to X with your own key
+only: the typed "no post is about the query" verdict, and X beside a
+platform named as the subject in `-m social` (the server still picks
+there).
+
 ## 0.14.0 — 2026-11-20
 
 - Posts come with the pages, by default. Much of what people know is only
@@ -34,7 +55,7 @@
   platform the CLI picked, so it does not depend on the server's older
   pick.
 - A platform named as the subject no longer takes over the search. "TikTok
-  trending sound reach test" used to run on TikTok alone, with no pages
+  Shop seller fees" used to run on TikTok alone, with no pages
   and no X; it now keeps its pages, and the social search asks X and
   TikTok. Asking for a platform's posts still searches it alone: "on
   tiktok", "tiktok videos", "youtube videos", "instagram reels", "tweets",

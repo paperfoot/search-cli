@@ -47,7 +47,7 @@ says so and no X row is added). Cite the posts beside the pages.
   When `added` is absent and the question has a human side, ask for the
   posts: `search search -q "…" -m community --json` (Reddit and Hacker
   News, about free) and `search search -q "…" -m social --json`.
-- Quotes make a lookup: `"Lemon Squeezy" payouts held` gets pages only.
+- Quotes make a lookup: `"Framework Laptop 16" battery life` gets pages only.
   Write the name without quotes when what people say matters.
 - A search with posts usually takes 15 to 25 s (40 s at most with your
   own keys, 65 s through metasearch.sh) and costs about $0.06 more with
@@ -55,7 +55,7 @@ says so and no X row is added). Cite the posts beside the pages.
   is $0.0015); nearly all of both is X. `search config set settings.posts
   community` keeps only Reddit and Hacker News (under a cent, a few
   seconds), `social` only X and the platform, `off` neither.
-- A platform named as the subject ("TikTok trending sound reach") keeps
+- A platform named as the subject ("TikTok Shop seller fees") keeps
   its pages, and the social search asks X and that platform. Asking for a
   platform's own posts ("… on tiktok", "youtube videos of …", "tweets
   about …", `--x`) searches that platform alone.
