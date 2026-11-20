@@ -53,6 +53,23 @@ fn de_num<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     }
 }
 
+/// `settings.posts` from the file or `SEARCH_SETTINGS_POSTS`: a word, or
+/// the boolean or number an env value such as `false` or `0` is read as.
+fn de_posts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Flag(bool),
+        Int(i64),
+        Text(String),
+    }
+    Ok(match Value::deserialize(d)? {
+        Value::Flag(false) | Value::Int(0) => "off".to_string(),
+        Value::Flag(true) | Value::Int(_) => "on".to_string(),
+        Value::Text(t) => t,
+    })
+}
+
 fn de_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
     de_num(d).map(|n| n as usize)
 }
@@ -136,7 +153,7 @@ pub struct Settings {
     /// community and social (rule 12). `community`: threads only (Reddit
     /// and Hacker News: close to free, a few seconds). `social`: X and one
     /// platform only. `off`: pages only, as before 0.13.
-    #[serde(default = "default_posts")]
+    #[serde(default = "default_posts", deserialize_with = "de_posts")]
     pub posts: String,
 }
 
@@ -633,6 +650,17 @@ mod tests {
         s.posts = "sometimes".into();
         assert_eq!((s.posts(), s.posts_lanes().len()), ("on", 2));
         assert!(parse_setting("posts", "community").is_ok());
+        // A file or env value read as a boolean or a number still loads.
+        for (raw, want) in [
+            ("false", "off"),
+            ("true", "on"),
+            ("0", "off"),
+            ("1", "on"),
+            ("\"community\"", "community"),
+        ] {
+            let s: super::Settings = toml::from_str(&format!("posts = {raw}")).unwrap();
+            assert_eq!(s.posts(), want, "{raw}");
+        }
         // Nothing reads settings.timeout any more.
         assert!(parse_setting("timeout", "30").is_err());
         assert!(parse_setting("unknown_setting", "1").is_err());

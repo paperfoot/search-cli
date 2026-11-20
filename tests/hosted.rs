@@ -732,6 +732,56 @@ fn auto_adds_a_social_call_that_names_its_platforms() {
     assert_eq!(v["results"].as_array().unwrap().len(), 3);
 }
 
+/// The pages decide the search: with an empty balance for the pages the
+/// search fails with "top up" (exit 2) even though the added social
+/// search answered, and nothing is cached, so the next search asks again
+/// instead of replaying two posts as a result.
+#[test]
+fn failed_pages_fail_the_search_though_the_posts_answered() {
+    let mock = start(
+        "pagesfail",
+        handler(|r, _| {
+            if r.body["mode"] == "social" {
+                search_ok(r)
+            } else {
+                Reply::Json(
+                    402,
+                    json!({ "error": "insufficient_credits", "message": "top up", "retryable": false,
+                            "required_usd": 0.003, "balance_usd": 0.001,
+                            "top_up_url": "https://metasearch.sh/dashboard/billing" }),
+                )
+            }
+        }),
+    );
+    let run = || {
+        run_json(mock.cmd().env("SEARCH_SETTINGS_POSTS", "social").args([
+            "search",
+            "-q",
+            "standing desk wobble fix",
+            "-c",
+            "5",
+            "--json",
+        ]))
+    };
+    let (code, v) = run();
+    assert_eq!(code, 2, "top up, as without posts: {v}");
+    assert_eq!(v["status"], "error");
+    let failures = v["error"]["provider_failures"].as_array().unwrap();
+    assert!(
+        failures.iter().all(|f| f["category"] == "billing_quota"),
+        "the pages' failures only: {v}"
+    );
+    // The social call was made and charged: the error still says so.
+    assert_eq!(v["error"]["cost"]["micros"], 3000, "{v}");
+    let sent = mock.requests("/api/v1/search").len();
+    let (code, v) = run();
+    assert_eq!(code, 2, "{v}");
+    assert!(
+        mock.requests("/api/v1/search").len() > sent,
+        "searched again, not replayed"
+    );
+}
+
 #[test]
 fn rerank_failure_keeps_the_fused_order() {
     let mock = start(

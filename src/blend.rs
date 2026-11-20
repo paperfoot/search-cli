@@ -15,7 +15,7 @@ use crate::context::AppContext;
 use crate::engine::{self, Hosting};
 use crate::errors::{redact_secrets, SearchError};
 use crate::hosted::HOSTED_SPEC;
-use crate::providers;
+use crate::providers::{self, xai};
 use crate::registry;
 use crate::router;
 use crate::types::{
@@ -54,33 +54,56 @@ const X_REST: Duration = Duration::from_secs(600);
 /// (20 Nov 2026: 8 of 12 searches) every search waits the whole
 /// [`LANE_CAP`] for it and may be billed for an answer nobody read.
 fn x_resting(strikes: cache::Strikes, now: u64) -> bool {
-    strikes.count >= X_STRIKES && now.saturating_sub(strikes.at) < X_REST.as_secs()
+    // A record dated after now (the clock was set back) rests nothing.
+    strikes.count >= X_STRIKES && strikes.at <= now && now - strikes.at < X_REST.as_secs()
 }
 
 /// Whether X answered in the added social search: `Some(false)` when it
-/// ran out of time, `Some(true)` when it answered (with posts or without),
-/// `None` when it was not asked or failed some other way (a refused key
-/// or a 429 comes back at once and costs nothing to try again).
+/// ran out of time, `Some(true)` when it answered (with posts or with
+/// none: an answer with no rows is not in `provider_results`), `None` when
+/// it was not asked or failed some other way (a refused key or a 429
+/// comes back at once and costs nothing to try again).
 fn x_answered(run: &Run) -> Option<bool> {
-    let timed_out = |failures: &[ProviderFailure]| {
+    let failure = |failures: &[ProviderFailure]| {
         failures
             .iter()
-            .any(|f| f.provider == "xai" && f.category == FailureCategory::Timeout)
+            .find(|f| f.provider == "xai")
+            .map(|f| f.category)
     };
     match run {
-        Ok(r) if timed_out(&r.metadata.provider_failures) => Some(false),
-        Ok(r) if r.metadata.providers_timed_out.iter().any(|p| p == "xai") => Some(false),
-        Ok(r) if r.metadata.provider_results.contains_key("xai") => Some(true),
-        Err(SearchError::AllProvidersFailed { failed, .. }) if timed_out(failed) => Some(false),
-        _ => None,
+        Ok(r) => {
+            let m = &r.metadata;
+            match failure(&m.provider_failures) {
+                Some(FailureCategory::Timeout) => Some(false),
+                Some(_) => None,
+                None if m.providers_timed_out.iter().any(|p| p == "xai") => Some(false),
+                None => m
+                    .providers_queried
+                    .iter()
+                    .any(|p| p == "xai")
+                    .then_some(true),
+            }
+        }
+        Err(SearchError::AllProvidersFailed { failed, .. }) => {
+            (failure(failed) == Some(FailureCategory::Timeout)).then_some(false)
+        }
+        Err(_) => None,
     }
 }
 
-/// The record after this search, when it changes.
+/// The record after this search, when it changes. Timeouts count as
+/// running only within twice the rest of each other: the search that asks
+/// X again after a rest extends it on a timeout, and two timeouts a month
+/// apart are two separate ones.
 fn next_strikes(prev: cache::Strikes, answered: Option<bool>, now: u64) -> Option<cache::Strikes> {
+    let running = prev.at <= now && now - prev.at < 2 * X_REST.as_secs();
     match answered {
         Some(false) => Some(cache::Strikes {
-            count: prev.count.saturating_add(1),
+            count: if running {
+                prev.count.saturating_add(1)
+            } else {
+                1
+            },
             at: now,
         }),
         Some(true) if prev.count > 0 => Some(cache::Strikes::default()),
@@ -101,6 +124,15 @@ pub async fn run(
 ) -> Result<Blend, SearchError> {
     let start = Instant::now();
     let posts_query = router::people_query(query);
+    // A mode with no rows to give is not run: a search for one row is
+    // answered by one page, and X would be paid for posts nobody sees.
+    let share = shares(count, lanes.len());
+    let mut lanes: Vec<Mode> = lanes
+        .iter()
+        .zip(&share[1..])
+        .filter(|(_, rows)| **rows > 0)
+        .map(|(m, _)| *m)
+        .collect();
     // X resting: the social search asks the other platform of its pick
     // alone, or is not run when X was all of it (breaking news).
     let strikes = cache::x_strikes();
@@ -110,16 +142,9 @@ pub async fn run(
         .filter(|p| *p != "xai")
         .map(str::to_string)
         .collect();
-    // A mode with no rows to give is not run: a search for one row is
-    // answered by one page, and X would be paid for posts nobody sees.
-    let share = shares(count, lanes.len());
-    let lanes: Vec<Mode> = lanes
-        .iter()
-        .zip(&share[1..])
-        .filter(|(_, rows)| **rows > 0)
-        .map(|(m, _)| *m)
-        .filter(|m| !(resting && *m == Mode::Social && without_x.is_empty()))
-        .collect();
+    if resting && without_x.is_empty() {
+        lanes.retain(|m| *m != Mode::Social);
+    }
     let lanes = lanes.as_slice();
     let lane = |mode: Option<Mode>| {
         let ctx = ctx.clone();
@@ -139,12 +164,18 @@ pub async fn run(
         lane(lanes.first().copied()),
         lane(lanes.get(1).copied()),
     );
-    let added: Vec<(Mode, Run)> = lanes
+    let mut added: Vec<(Mode, Run)> = lanes
         .iter()
         .copied()
         .zip([a, b].into_iter().flatten())
         .collect();
-    if !resting {
+    if resting {
+        // Without X the platform alone may have no key here: nothing to
+        // report beyond the note that X was left out.
+        added.retain(|(m, run)| {
+            *m != Mode::Social || matches!(run, Ok(_) | Err(SearchError::AllProvidersFailed { .. }))
+        });
+    } else {
         let answered = added
             .iter()
             .find(|(m, _)| *m == Mode::Social)
@@ -183,41 +214,51 @@ pub fn shares(count: usize, lanes: usize) -> Vec<usize> {
 }
 
 /// A post with nothing to read: no text (X returns the odd empty post), a
-/// clip with no caption, whose title is only "@name on TikTok", or a
-/// Hacker News item marked dead. Such a row would take a place and say
-/// nothing.
+/// clip with no caption (its title is then the platform's own stand-in,
+/// "@name on TikTok"), or a Hacker News item marked dead. Such a row would
+/// take a place and say nothing. A real title that happens to end "on
+/// TikTok" is kept, whatever its source.
 fn hollow(row: &SearchResult) -> bool {
-    row.snippet.trim().is_empty()
-        || [" on TikTok", " on Instagram", " on Threads"]
-            .iter()
-            .any(|tail| row.title.ends_with(tail))
-        // A Hacker News item its moderators removed.
-        || row.title.contains("[dead]")
-        || row.title.contains("[flagged]")
+    if row.snippet.trim().is_empty() {
+        return true;
+    }
+    let author = row
+        .extra
+        .as_ref()
+        .and_then(|e| e.get("author"))
+        .and_then(|a| a.as_str())
+        .unwrap_or_default();
+    let stand_in = |platform: &str| row.title == format!("{author} on {platform}");
+    match row.source.as_str() {
+        "tiktok" => stand_in("TikTok"),
+        "instagram" => stand_in("Instagram"),
+        "threads" => stand_in("Threads"),
+        "hackernews" => row.title.contains("[dead]") || row.title.contains("[flagged]"),
+        _ => false,
+    }
 }
 
 /// How X's summary reads when none of its posts are about the query ("No
-/// relevant posts were returned", "None of the posts mention ..."). In a
-/// graded sample of 25 searches (19 Nov 2026) eight summaries said so in
-/// these words, and all eight had been graded off topic or empty. Softer
-/// wording ("none mention the price") is left alone: it also appears over
-/// posts that are on the subject. The wording changes from run to run, so
-/// this is the fallback for a summary that comes without a typed verdict.
+/// relevant posts were returned"). Read only for X through metasearch.sh,
+/// whose reply carries no typed verdict yet; with your own key the
+/// provider asks X outright (`xai::OFF_TOPIC`). Only wording that says
+/// nothing was found: "none of the posts mention the price" also stands
+/// over posts that are on the subject.
 const DISOWNED: &[&str] = &[
     "no relevant posts",
     "no relevant x posts",
     "no posts matching",
     "no posts relevant",
-    "returned no",
-    "none directly",
-    "none of the posts",
     "no apparent connection",
 ];
 
 /// Words too common to tell whether a row is about the query.
 const COMMON_WORDS: &[&str] = &[
     "the", "and", "for", "with", "how", "what", "why", "who", "are", "was", "can", "does", "not",
-    "from", "that", "this", "you", "your", "about", "into", "best", "new",
+    "from", "that", "this", "you", "your", "about", "into", "best", "new", "should", "would",
+    "could", "will", "when", "where", "which", "have", "has", "had", "than", "then", "there",
+    "their", "they", "them", "these", "those", "any", "all", "but", "get", "use", "using", "need",
+    "want", "just", "still", "much", "many", "more", "most", "some",
 ];
 
 /// The words of `query` that say what it is about: three letters or more,
@@ -249,8 +290,8 @@ fn views(row: &SearchResult) -> Option<u64> {
 /// - **X said its posts miss**: its rows and summary are dropped and a
 ///   note says so. The call is paid either way; passing on posts X itself
 ///   calls unrelated only costs the reader. With your own key the verdict
-///   is typed (`on_topic` in the provider's request: no rows come back);
-///   through metasearch.sh it is read from the summary ([`DISOWNED`]).
+///   is typed (`on_topic` in the provider's request); through
+///   metasearch.sh it is read from the summary ([`DISOWNED`]).
 /// - **Grok's own replies** and a **second post by one author** are
 ///   dropped: one account held five of ten rows.
 /// - **A clip almost nobody watched** (under 100 views) goes after the
@@ -265,17 +306,20 @@ fn views(row: &SearchResult) -> Option<u64> {
 fn polish(mode: Mode, query: &str, r: &mut SearchResponse, notes: &mut Vec<String>) {
     match mode {
         Mode::Social => {
-            // X's verdict: with your own key it is typed (the provider
-            // returns the summary and no rows at all); through
-            // metasearch.sh it is read from the summary's wording.
-            let answered = r.answers.iter().any(|a| a.provider == "xai");
-            let rows = r.results.iter().filter(|row| row.source == "xai").count();
-            let disowned = answered
-                && (rows == 0
-                    || r.answers.iter().any(|a| {
-                        let text = a.text.to_lowercase();
-                        a.provider == "xai" && DISOWNED.iter().any(|p| text.contains(p))
-                    }));
+            // X's verdict. With your own key it is typed: the provider
+            // marks the answer (`xai::OFF_TOPIC`) and returns no rows.
+            // Through metasearch.sh it is read from the summary's wording.
+            let hosted = r
+                .metadata
+                .transport
+                .get("xai")
+                .is_some_and(|t| t == "hosted");
+            let disowned = r.answers.iter().filter(|a| a.provider == "xai").any(|a| {
+                a.text.starts_with(xai::OFF_TOPIC) || {
+                    let text = a.text.to_lowercase();
+                    hosted && DISOWNED.iter().any(|p| text.contains(p))
+                }
+            });
             r.results.retain(|row| !hollow(row));
             if disowned {
                 r.answers.retain(|a| a.provider != "xai");
@@ -340,8 +384,6 @@ struct Totals {
     failures: Vec<ProviderFailure>,
     costs: Vec<CostSummary>,
     notes: Vec<String>,
-    /// A part answered, with or without rows.
-    answered: bool,
     /// Logged in: a provider with a key variable may have been reached
     /// through metasearch.sh, so a failed one's transport is not known.
     logged_in: bool,
@@ -358,7 +400,6 @@ fn add_name(list: &mut Vec<String>, name: &str) {
 impl Totals {
     fn take(&mut self, r: SearchResponse) -> Vec<SearchResult> {
         let m = r.metadata;
-        self.answered = true;
         self.answers.extend(r.answers);
         for name in &m.providers_queried {
             add_name(&mut self.queried, name);
@@ -442,27 +483,33 @@ pub fn merge(
         logged_in,
         ..Totals::default()
     };
-    let mut routing = Routing::default();
-    let mut no_pages: Option<SearchError> = None;
-    let mut pages_failed = false;
-    let mut parts: Vec<Vec<SearchResult>> = Vec::new();
-    parts.push(match pages {
-        Ok(r) => {
-            routing = r.metadata.routing.clone().unwrap_or_default();
-            t.take(r)
-        }
+    // The pages decide the search. When no web engine answers, it fails
+    // exactly as it would without posts: the pages' own failures, so the
+    // same exit code and advice, and nothing to cache. Posts are an
+    // addition, never a stand-in: an empty balance must not read as a
+    // working search because Reddit is free, and a rate-limited X must
+    // not turn "top up" into "retry". What the added modes spent is
+    // still counted.
+    let pages = match pages {
+        Ok(r) => r,
         Err(SearchError::AllProvidersFailed { failed, cost }) => {
-            pages_failed = true;
-            t.take_failed(failed, cost);
-            Vec::new()
+            t.costs.extend(cost);
+            for (_, run) in added {
+                match run {
+                    Ok(r) => t.costs.extend(r.metadata.cost),
+                    Err(SearchError::AllProvidersFailed { cost, .. }) => t.costs.extend(cost),
+                    Err(_) => {}
+                }
+            }
+            return Err(SearchError::AllProvidersFailed {
+                failed,
+                cost: t.cost(),
+            });
         }
-        Err(e @ SearchError::NoProviders(_)) => {
-            no_pages = Some(e);
-            Vec::new()
-        }
-        // Bad input and the like: the search itself is wrong.
         Err(e) => return Err(e),
-    });
+    };
+    let routing = pages.metadata.routing.clone().unwrap_or_default();
+    let mut parts: Vec<Vec<SearchResult>> = vec![t.take(pages)];
     let mut ran: Vec<Mode> = Vec::new();
     for (mode, run) in added {
         parts.push(match run {
@@ -490,27 +537,6 @@ pub fn merge(
                 Vec::new()
             }
         });
-    }
-
-    // No answer at all, or the pages did not answer and the posts that did
-    // are empty: the pages' failure is the result (a setup or provider
-    // error with its exit code), not "no results".
-    let rows = parts.iter().any(|p| !p.is_empty()) || !t.answers.is_empty();
-    if !t.answered || ((no_pages.is_some() || pages_failed) && !rows) {
-        return Err(match no_pages {
-            Some(e) if t.cost().is_none_or(|c| c.micros == 0) => e,
-            _ => SearchError::AllProvidersFailed {
-                cost: t.cost(),
-                failed: t.failures,
-            },
-        });
-    }
-    if no_pages.is_some() {
-        t.notes
-            .push("posts only: no web engine has a key here (log in or set one)".to_string());
-    } else if pages_failed {
-        t.notes
-            .push("posts only: every web engine failed (see provider_failures)".to_string());
     }
 
     let results = deal(parts, count);
@@ -889,77 +915,63 @@ mod tests {
         );
     }
 
-    /// No web engine, but the posts answered: a result, with a note.
+    /// The pages decide: when no web engine answers, the search fails with
+    /// the pages' own failures (their exit code, their advice), whatever
+    /// the added modes did, and what those spent is still counted.
     #[test]
-    fn posts_alone_still_answer_when_no_web_engine_is_configured() {
-        let b = merge(
-            "q",
-            Mode::General,
-            4,
-            Err(SearchError::NoProviders("general".to_string())),
-            vec![(
-                Mode::Community,
-                answered(
-                    Mode::Community,
-                    "reddit",
-                    0,
-                    "estimate",
-                    rows("reddit", "reddit.com", 6),
-                ),
-            )],
-            Duration::ZERO,
-            false,
-        )
-        .unwrap();
-        assert_eq!(hosts(&b.response), ["reddit"; 2]);
-        assert_eq!(b.response.metadata.notes.len(), 1);
-    }
-
-    /// Nothing answered anywhere: an error that carries every failure and
-    /// every billed call, or the general run's own error when nothing ran.
-    #[test]
-    fn no_answer_anywhere_is_an_error_with_every_failure_and_cost() {
+    fn failed_pages_fail_the_search_whatever_the_posts_did() {
+        let billing = failure("metasearch", FailureCategory::BillingQuota);
+        // The balance is empty: Reddit answering for free is not a result.
         let err = merge(
             "q",
             Mode::General,
             4,
-            all_failed("serper", None),
-            vec![(Mode::Social, all_failed("xai", Some(45_000)))],
+            Err(SearchError::AllProvidersFailed {
+                failed: vec![billing.clone()],
+                cost: None,
+            }),
+            vec![
+                (
+                    Mode::Community,
+                    answered(
+                        Mode::Community,
+                        "reddit",
+                        0,
+                        "estimate",
+                        rows("reddit", "reddit.com", 3),
+                    ),
+                ),
+                (
+                    Mode::Social,
+                    Err(SearchError::AllProvidersFailed {
+                        failed: vec![failure("xai", FailureCategory::RateLimit)],
+                        cost: Some(CostSummary::with_basis(
+                            BTreeMap::from([("xai".to_string(), 45_000)]),
+                            "estimate",
+                        )),
+                    }),
+                ),
+            ],
             Duration::ZERO,
-            false,
+            true,
         )
         .err()
         .unwrap();
+        assert_eq!(err.exit_code(), 2, "top up, not retry: {err}");
         match err {
             SearchError::AllProvidersFailed { failed, cost } => {
-                assert_eq!(failed.len(), 2);
-                assert_eq!(cost.unwrap().micros, 45_000);
+                assert_eq!(failed.len(), 1, "the pages' failures only");
+                assert_eq!(failed[0].category, FailureCategory::BillingQuota);
+                assert_eq!(cost.unwrap().micros, 45_000, "X was still paid for");
             }
-            e => panic!("{e}"),
+            other => panic!("{other}"),
         }
+        // No web engine at all, or a bad request: the pages' error as it is.
         let err = merge(
             "q",
             Mode::General,
             4,
             Err(SearchError::NoProviders("general".to_string())),
-            vec![(
-                Mode::Social,
-                Err(SearchError::NoProviders("social".to_string())),
-            )],
-            Duration::ZERO,
-            false,
-        )
-        .err()
-        .unwrap();
-        assert!(matches!(err, SearchError::NoProviders(_)), "{err}");
-        // Bad input is the search's own error, whatever the posts did.
-        let err = merge(
-            "q",
-            Mode::General,
-            4,
-            Err(SearchError::InvalidInput {
-                message: "bad".to_string(),
-            }),
             vec![(
                 Mode::Community,
                 answered(
@@ -967,7 +979,7 @@ mod tests {
                     "reddit",
                     0,
                     "estimate",
-                    rows("reddit", "reddit.com", 2),
+                    rows("reddit", "reddit.com", 3),
                 ),
             )],
             Duration::ZERO,
@@ -975,44 +987,7 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(matches!(err, SearchError::InvalidInput { .. }), "{err}");
-    }
-
-    /// The config problem wins when nothing was spent: no web engine and
-    /// Reddit unreachable is "no providers" (exit 2), as it was before
-    /// posts were added, not a transient failure. A billed call that failed
-    /// is still reported.
-    #[test]
-    fn no_web_engine_stays_a_config_error_unless_a_failed_call_was_billed() {
-        let err = merge(
-            "q",
-            Mode::General,
-            4,
-            Err(SearchError::NoProviders("general".to_string())),
-            vec![(Mode::Community, all_failed("reddit", None))],
-            Duration::ZERO,
-            false,
-        )
-        .err()
-        .unwrap();
         assert!(matches!(err, SearchError::NoProviders(_)), "{err}");
-        let err = merge(
-            "q",
-            Mode::General,
-            4,
-            Err(SearchError::NoProviders("general".to_string())),
-            vec![(Mode::Social, all_failed("xai", Some(45_000)))],
-            Duration::ZERO,
-            false,
-        )
-        .err()
-        .unwrap();
-        match err {
-            SearchError::AllProvidersFailed { cost, .. } => {
-                assert_eq!(cost.unwrap().micros, 45_000)
-            }
-            e => panic!("{e}"),
-        }
     }
 
     /// A part that failed whole keeps what its error does not carry: which
@@ -1053,44 +1028,6 @@ mod tests {
         assert_eq!(m.transport["xai"], "direct");
         assert_eq!(m.transport["reddit"], "local");
         assert_eq!(m.transport["serper"], "direct");
-    }
-
-    /// Two hosted calls that both fail are both `metasearch`: it is named
-    /// once, each failure is kept, and posts that came back alone say so.
-    #[test]
-    fn two_failed_hosted_calls_name_metasearch_once() {
-        let b = merge(
-            "q",
-            Mode::General,
-            4,
-            all_failed("metasearch", None),
-            vec![
-                (Mode::Social, all_failed("metasearch", None)),
-                (
-                    Mode::Community,
-                    answered(
-                        Mode::Community,
-                        "reddit",
-                        0,
-                        "estimate",
-                        rows("reddit", "reddit.com", 3),
-                    ),
-                ),
-            ],
-            Duration::ZERO,
-            false,
-        )
-        .unwrap();
-        let m = &b.response.metadata;
-        assert_eq!(m.providers_failed, ["metasearch"]);
-        assert_eq!(m.providers_queried, ["metasearch", "reddit"]);
-        assert_eq!(m.provider_failures.len(), 2);
-        assert_eq!(m.transport["metasearch"], "hosted");
-        assert_eq!(b.response.status, "partial_success");
-        assert_eq!(
-            m.notes,
-            ["posts only: every web engine failed (see provider_failures)"]
-        );
     }
 
     /// At -c 1 the one row is a page: no added mode has a slot, so none is
@@ -1137,59 +1074,78 @@ mod tests {
 
     /// When X says none of its posts are about the query, its rows and
     /// its summary are left out and a note says so; the other platform's
-    /// rows stay.
+    /// rows stay. With your own key the verdict is typed; the summary's
+    /// wording is read only for X through metasearch.sh.
     #[test]
     fn posts_x_calls_unrelated_are_left_out() {
-        let lane = social_answer(
+        let x_rows = || {
             vec![
                 post("xai", "@a", "https://x.com/a/status/1"),
                 post("youtube", "Talk", "https://www.youtube.com/watch?v=1"),
                 post("xai", "@b", "https://x.com/b/status/2"),
-            ],
-            "The returned posts discuss gaming mice. None directly reference Game-TARS.",
-        );
-        let b = blend_one(Mode::Social, "game-tars input model", lane);
-        let r = &b.response;
-        assert!(
-            r.results.iter().all(|x| x.source != "xai"),
-            "{:?}",
-            hosts(r)
-        );
-        assert!(r.results.iter().any(|x| x.source == "youtube"));
-        assert!(r.answers.is_empty());
-        assert!(r
-            .metadata
-            .notes
-            .iter()
-            .any(|n| n.contains("X found no posts")));
-        // The call was made and is still paid for and reported.
-        assert_eq!(r.metadata.cost.as_ref().unwrap().by_provider["xai"], 45_000);
-        assert_eq!(b.ran, [Mode::Social]);
+            ]
+        };
+        let has_x = |b: &Blend| b.response.results.iter().any(|x| x.source == "xai");
+        let noted = |b: &Blend| {
+            b.response
+                .metadata
+                .notes
+                .iter()
+                .any(|n| n.contains("X found no posts"))
+        };
 
-        // The typed verdict (own key): X's summary arrives with no row.
+        // Own key, typed: the provider marks the answer and sends no rows.
         let lane = social_answer(
             vec![post("youtube", "Talk", "https://www.youtube.com/watch?v=1")],
-            "The posts are about unrelated incidents.",
+            &format!(
+                "{} The posts are about unrelated incidents.",
+                xai::OFF_TOPIC
+            ),
         );
         let b = blend_one(Mode::Social, "shade of eranikus", lane);
-        assert!(b.response.answers.is_empty());
-        assert!(b
-            .response
-            .metadata
-            .notes
-            .iter()
-            .any(|n| n.contains("X found no posts")));
+        assert!(b.response.answers.is_empty() && noted(&b) && !has_x(&b));
         assert!(b.response.results.iter().any(|x| x.source == "youtube"));
+        // The call was made and is still paid for and reported.
+        let cost = b.response.metadata.cost.as_ref().unwrap();
+        assert_eq!(cost.by_provider["xai"], 45_000);
+        assert_eq!(b.ran, [Mode::Social]);
 
-        // A summary that stands by its posts keeps them, whatever else it
-        // says is missing.
-        let lane = social_answer(
-            vec![post("xai", "@a", "https://x.com/a/status/1")],
-            "Users report the desk is steady. None mention the price.",
+        // Own key, on topic: wording never overrides the typed verdict.
+        for summary in [
+            "Users report wobble at full height. None of the posts mention the price.",
+            "No relevant posts were returned on pricing, but several cover the wobble.",
+        ] {
+            let b = blend_one(
+                Mode::Social,
+                "uplift desk wobble",
+                social_answer(x_rows(), summary),
+            );
+            assert!(has_x(&b) && !noted(&b), "{summary}");
+            assert_eq!(b.response.answers.len(), 1);
+        }
+        // A summary whose posts were not listed is kept as the answer.
+        let b = blend_one(
+            Mode::Social,
+            "uplift desk wobble",
+            social_answer(Vec::new(), "Users report wobble at full height."),
         );
-        let b = blend_one(Mode::Social, "uplift desk wobble", lane);
-        assert!(b.response.results.iter().any(|x| x.source == "xai"));
         assert_eq!(b.response.answers.len(), 1);
+        assert!(!noted(&b));
+
+        // Through metasearch.sh there is no typed verdict: wording that
+        // says nothing was found drops X; softer wording does not.
+        let hosted = |summary: &str| {
+            let mut r = social_answer(x_rows(), summary).unwrap();
+            r.metadata
+                .transport
+                .insert("xai".to_string(), "hosted".to_string());
+            blend_one(Mode::Social, "game-tars input model", Ok(r))
+        };
+        let b = hosted("No relevant posts were returned by the search for Game-TARS.");
+        assert!(!has_x(&b) && noted(&b) && b.response.answers.is_empty());
+        assert!(b.response.results.iter().any(|x| x.source == "youtube"));
+        let b = hosted("Users like the desk. None of the posts mention the price.");
+        assert!(has_x(&b) && !noted(&b));
     }
 
     /// One row per X author, none from Grok itself, and a clip almost
@@ -1297,6 +1253,11 @@ mod tests {
             key_words("What is the best 27 inch monitor for you"),
             ["inch", "monitor"]
         );
+        // A question word is not the subject.
+        assert_eq!(
+            key_words("should I learn rust or go in 2026"),
+            ["learn", "rust"]
+        );
     }
 
     /// Two timeouts running rest X for ten minutes; an answer clears the
@@ -1318,41 +1279,46 @@ mod tests {
         assert_eq!(next_strikes(three, Some(true), 2_500), Some(clean));
         assert_eq!(next_strikes(clean, Some(true), 2_500), None);
         assert_eq!(next_strikes(two, None, 2_500), None);
+        // Two timeouts a month apart are not two running.
+        let later = next_strikes(one, Some(false), 1_000 + 30 * 86_400).unwrap();
+        assert_eq!(later.count, 1);
+        // A record from the future (the clock was set back) rests nothing
+        // and does not count as the first of two.
+        let ahead = cache::Strikes {
+            count: 5,
+            at: 9_000,
+        };
+        assert!(!x_resting(ahead, 1_000));
+        assert_eq!(next_strikes(ahead, Some(false), 1_000).unwrap().count, 1);
 
-        let timeout = |category| ProviderFailure {
-            provider: "xai".to_string(),
-            category,
-            http_status: None,
-            code: "http_error".to_string(),
-            reason: "error sending request".to_string(),
-            retryable: true,
+        let x_failed = |category| failure("xai", category);
+        let social = |queried: &[&str]| {
+            let mut r = answered(Mode::Social, "youtube", 1_880, "estimate", Vec::new()).unwrap();
+            r.metadata.providers_queried = queried.iter().map(|p| p.to_string()).collect();
+            r
         };
         // X timed out beside a platform that answered.
-        let mut r = answered(Mode::Social, "youtube", 1_880, "estimate", Vec::new()).unwrap();
+        let mut r = social(&["xai", "youtube"]);
         r.metadata
             .provider_failures
-            .push(timeout(FailureCategory::Timeout));
+            .push(x_failed(FailureCategory::Timeout));
         assert_eq!(x_answered(&Ok(r)), Some(false));
-        // X answered.
-        assert_eq!(
-            x_answered(&answered(
-                Mode::Social,
-                "xai",
-                45_000,
-                "estimate",
-                Vec::new()
-            )),
-            Some(true)
-        );
+        // X answered with no rows (off topic): it is asked for, has no
+        // failure and no entry in provider_results. Still an answer.
+        let r = social(&["xai", "youtube"]);
+        assert!(!r.metadata.provider_results.contains_key("xai"));
+        assert_eq!(x_answered(&Ok(r)), Some(true));
+        // X was not asked.
+        assert_eq!(x_answered(&Ok(social(&["youtube"]))), None);
         // At capacity (429): refused at once, nothing was waited for.
-        let mut r = answered(Mode::Social, "youtube", 1_880, "estimate", Vec::new()).unwrap();
+        let mut r = social(&["xai", "youtube"]);
         r.metadata
             .provider_failures
-            .push(timeout(FailureCategory::RateLimit));
+            .push(x_failed(FailureCategory::RateLimit));
         assert_eq!(x_answered(&Ok(r)), None);
         // The whole social search failed on X's timeout.
         let failed: Run = Err(SearchError::AllProvidersFailed {
-            failed: vec![timeout(FailureCategory::Timeout)],
+            failed: vec![x_failed(FailureCategory::Timeout)],
             cost: None,
         });
         assert_eq!(x_answered(&failed), Some(false));
@@ -1368,6 +1334,13 @@ mod tests {
         let mut clip = row("tiktok", "https://www.tiktok.com/@a/video/2");
         clip.title = "@a on TikTok".to_string();
         clip.snippet = "160 views · 1 likes".to_string();
+        clip.extra = Some(serde_json::json!({"author": "@a"}));
+        // Real titles that end the same way are kept.
+        let mut video = row("youtube", "https://www.youtube.com/watch?v=4");
+        video.title = "How I got 1M views on TikTok".to_string();
+        let mut own = row("tiktok", "https://www.tiktok.com/@c/video/5");
+        own.title = "my first week on TikTok".to_string();
+        own.extra = Some(serde_json::json!({"author": "@c"}));
         let good = row("xai", "https://x.com/b/status/3");
         let b = merge(
             "q",
@@ -1387,7 +1360,7 @@ mod tests {
                     "xai",
                     45_000,
                     "estimate",
-                    vec![empty, clip, good],
+                    vec![empty, clip, good, video, own],
                 ),
             )],
             Duration::ZERO,
@@ -1396,41 +1369,15 @@ mod tests {
         .unwrap();
         let urls: Vec<&str> = b.response.results.iter().map(|r| r.url.as_str()).collect();
         assert!(urls.contains(&"https://x.com/b/status/3"), "{urls:?}");
-        assert_eq!(urls.len(), 3, "{urls:?}");
-    }
-
-    /// Pages that did not answer plus posts that came back empty is the
-    /// pages' error, not "no results": no web engine stays a setup error.
-    #[test]
-    fn empty_posts_do_not_hide_that_the_pages_did_not_answer() {
-        let empty = || answered(Mode::Community, "reddit", 0, "estimate", Vec::new());
-        let err = merge(
-            "q",
-            Mode::General,
-            4,
-            Err(SearchError::NoProviders("general".to_string())),
-            vec![(Mode::Community, empty())],
-            Duration::ZERO,
-            false,
-        )
-        .err()
-        .unwrap();
-        assert!(matches!(err, SearchError::NoProviders(_)), "{err}");
-        let err = merge(
-            "q",
-            Mode::General,
-            4,
-            all_failed("serper", None),
-            vec![(Mode::Community, empty())],
-            Duration::ZERO,
-            false,
-        )
-        .err()
-        .unwrap();
         assert!(
-            matches!(err, SearchError::AllProvidersFailed { .. }),
-            "{err}"
+            urls.contains(&"https://www.youtube.com/watch?v=4"),
+            "{urls:?}"
         );
+        assert!(
+            urls.contains(&"https://www.tiktok.com/@c/video/5"),
+            "{urls:?}"
+        );
+        assert_eq!(urls.len(), 5, "{urls:?}");
     }
 
     /// Logged in, a failed provider that has a key variable may have been

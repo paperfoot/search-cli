@@ -302,6 +302,11 @@ fn yes() -> bool {
     true
 }
 
+/// How the answer starts when X judged that none of its posts is about
+/// the query (`on_topic: false`). `blend` reads it to leave X out of a
+/// search it was added to.
+pub const OFF_TOPIC: &str = "X returned no posts about this query.";
+
 #[derive(Deserialize)]
 struct Post {
     #[serde(default)]
@@ -393,11 +398,17 @@ fn parse(data: XaiResponse, call: &Call<'_>) -> Result<Output, SearchError> {
         Err(_) => (Vec::new(), text.trim().to_string(), true),
     };
     // Nothing about the query: no rows, not even the posts it cited on the
-    // way. The summary stays as the answer (it says what X held instead).
+    // way. The summary stays as the answer, behind [`OFF_TOPIC`] (it says
+    // what X held instead).
     if !on_topic {
         cited.clear();
     }
     let posts = if on_topic { posts } else { Vec::new() };
+    let summary = if on_topic || summary.is_empty() {
+        summary
+    } else {
+        format!("{OFF_TOPIC} {summary}")
+    };
 
     // The whole deny list is applied here too: upstream gets at most 20, and
     // none when the allow list took the request slot.
@@ -672,6 +683,8 @@ mod tests {
         let out = reply(Some(false));
         assert!(out.results.is_empty(), "{:?}", out.results.len());
         assert_eq!(out.answers.len(), 1);
+        assert!(out.answers[0].text.starts_with(OFF_TOPIC));
+        assert!(!reply(Some(true)).answers[0].text.starts_with(OFF_TOPIC));
         assert_eq!(out.cost_micros, Some(44_724));
         // On topic, or a reply without the field: the rows as before.
         assert_eq!(reply(Some(true)).results.len(), 2);

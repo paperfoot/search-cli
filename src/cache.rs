@@ -172,6 +172,8 @@ pub fn clear() -> usize {
     let Ok(entries) = std::fs::read_dir(cache_dir()) else {
         return 0;
     };
+    // X's record goes too (not counted: it is not a cached answer).
+    let _ = std::fs::remove_file(strikes_path());
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();

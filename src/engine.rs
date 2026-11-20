@@ -856,9 +856,16 @@ async fn run_fused(
     let mut set: JoinSet<(&'static str, Outcome)> = JoinSet::new();
     let mut pending: Vec<&'static str> = Vec::new();
     let mut task_names: HashMap<tokio::task::Id, &'static str> = HashMap::new();
+    // A hosted call is never left behind at the straggler cap: the server
+    // goes on with it and charges for what it finishes, and its own cuts
+    // (free to the caller) come before the deadline.
+    let mut hosted: Vec<&'static str> = Vec::new();
     for adapter in plan {
         let name = adapter.name();
         pending.push(name);
+        if adapter.transport() == Transport::Hosted {
+            hosted.push(name);
+        }
         let query = req.query.to_string();
         let opts = req.opts.clone();
         let count = req.count;
@@ -873,7 +880,9 @@ async fn run_fused(
     let mut answered = false;
     loop {
         let until = match straggler_cap {
-            Some(cap) if answered => cap.min(deadline),
+            Some(cap) if answered && !pending.iter().any(|n| hosted.contains(n)) => {
+                cap.min(deadline)
+            }
             _ => deadline,
         };
         match tokio::time::timeout_at(until.into(), set.join_next()).await {

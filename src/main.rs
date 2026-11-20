@@ -451,9 +451,9 @@ fn transport_signature(app: &Arc<AppContext>, logged_in: bool) -> String {
         .collect()
 }
 
-/// `auto` → one real mode (ROUTING.md): rules 1-5 and 11 here; then,
-/// logged in, metasearch.sh's `/route` (1.2 s, fail-open); then signals
-/// 6-10; then general. Returns the decision and, for rule 3, the URL to
+/// `auto` → one real mode (ROUTING.md): rules 1-5 and 11 here; then rule
+/// 12's frame; then, logged in, metasearch.sh's `/route` (1.2 s,
+/// fail-open); then signals 6-10; then general. Returns the decision and, for rule 3, the URL to
 /// search. The server may not choose `social` or `community`
 /// ([`router::server_may_pick`]): those fall through to the local rules.
 /// Rule 12 (posts beside the pages) is applied by the caller, once the
@@ -464,6 +464,11 @@ async fn resolve_auto(
 ) -> (types::AutoDecision, Option<String>) {
     if let Some(hit) = router::decisive(query) {
         return (router::decision_for(&hit, "rule"), hit.query);
+    }
+    // Rule 12's frame: asked outright what people say, the search is for
+    // pages with posts, whatever the model or a signal word would pick.
+    if let Some(hit) = router::frame_hit(query) {
+        return (router::decision_for(&hit, "rule"), None);
     }
     if let Some(c) = client {
         let started = std::time::Instant::now();
@@ -609,7 +614,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "community": "-m community: reddit + hackernews, no key, $0 here. Hits: extra.score|points, num_comments, subreddit, author. Extract a Reddit or HN thread URL for every comment: extra.comments[{id,parent,author,score,depth,created,body}], extra.route (live|archive|live+archive). Reddit is paced (~10/min machine-wide); archive search needs r/<name>; a refused search without one falls back to Reddit-wide search (route global). SEARCH_REDDIT_ROUTE=archive|live.",
         "exit_codes": {"0": "success", "1": "transient: retry", "2": "config, auth or credit: fix setup or top up", "3": "bad input", "4": "rate limited: wait"},
         "routing": "-m defaults to auto: a URL -> extract; asking for a platform's posts (tweets, 'on X', x.com/, a lone @handle; 'on tiktok', 'youtube videos', 'instagram reels', 'on threads', 'facebook page') -> social on those platforms; reddit, hacker news, 'on HN', r/<name> -> community; 'similar to <url>' -> similar; patent words or numbers -> patents; 'images of' -> images; else, logged in, metasearch.sh's routing model; else local cues (near me, h-index, paper, who is, latest) or general. A general or news result also carries posts from social + community beyond -c (auto.added), unless the query is a lookup (one word, a quoted phrase, site:, api/docs/error words), has -p/-d, or settings.posts is off. In news and social, today/this week/latest/this month/this year also set -f unless you passed one. Never deep. metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit, social for -p tiktok).",
-        "transport": "Per provider: own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted on your balance, all as ONE call: without -p the server picks (cheapest first, its cache; --no-cache skips it), -p is sent as given.",
+        "transport": "Per provider: own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted on your balance, ONE call per mode: without -p the server picks (cheapest first, its cache; --no-cache skips it), -p is sent as given.",
         "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls run to the deadline (social: wait_s once one answered); stragglers go in providers_timed_out.",
         "envelope": {
             "success": "{ version, status: success|partial_success|no_results, query, mode, results[{title,url,snippet,source,published?,image_url?,extra?}], answers?[{provider,text}], metadata{ elapsed_ms, result_count, providers_queried, providers_failed, providers_timed_out?, provider_results?, provider_failures?[{provider,category,http_status?,code,reason,retryable}], transport{name:direct|local|hosted}, cost?{micros,usd,basis:estimate|charged|mixed,by_provider}, routing?{auto?,reranked?,cached?,escalated?}, warnings?, notes?, cached?, cache_age_secs? } }",
@@ -832,8 +837,14 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             // Auto's answer depends on settings.posts, and its shape changed
             // in 0.14 (posts are rows beyond -c): neither an older entry nor
             // one made with the other setting is replayed.
+            // The key folds case and the lookup rule does not ("a OR b" is
+            // a lookup, "a or b" is not), so the rule's verdict is in it.
             let posts_key = match args.mode {
-                cli::ModeArg::Auto => format!("|posts={}", app.config.settings.posts()),
+                cli::ModeArg::Auto => format!(
+                    "|posts={}:{}",
+                    app.config.settings.posts(),
+                    u8::from(router::posts_apply(&args.query))
+                ),
                 cli::ModeArg::Fixed(_) => String::new(),
             };
             let cache_mode = format!(

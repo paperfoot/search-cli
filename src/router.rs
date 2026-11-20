@@ -223,10 +223,14 @@ pub fn freshness(query: &str) -> Option<(&'static str, String)> {
         .find_map(|(value, words)| first_phrase(&lower, words).map(|w| (*value, w)))
 }
 
-/// The decision without the routing model: decisive rules, then the first signal, then general.
+/// The decision without the routing model: decisive rules, then rule
+/// 12's frame, then the first signal, then general.
 pub fn resolve_local(query: &str) -> (AutoDecision, Option<String>) {
     if let Some(h) = decisive(query) {
         return (decision_for(&h, "rule"), h.query);
+    }
+    if let Some(h) = frame_hit(query) {
+        return (decision_for(&h, "rule"), None);
     }
     if let Some(h) = signals(query).into_iter().next() {
         return (decision_for(&h, "heuristic"), None);
@@ -255,6 +259,7 @@ pub fn decision_for(h: &Hit, source: &str) -> AutoDecision {
         ),
         3 => "Asked for sites similar to a URL".to_string(),
         11 => format!("Names a community source ('{}')", h.cue),
+        12 => format!("Asks what people think ('{}')", h.cue),
         _ => format!("Matched '{}'", h.cue),
     };
     AutoDecision {
@@ -1111,14 +1116,10 @@ const LOOKUP_WORDS: &[&str] = &[
 ];
 
 /// Search operators: the caller is steering the web search itself.
-const OPERATORS: &[&str] = &[
-    "site:",
-    "filetype:",
-    "inurl:",
-    "intitle:",
-    "http://",
-    "https://",
-];
+const OPERATORS: &[&str] = &["site:", "filetype:", "inurl:", "intitle:"];
+
+/// Names in which a lookup word is not one.
+const NOT_LOOKUP: &[&str] = &["google docs"];
 
 /// A question's frame: an explicit request for what people say. It makes
 /// rule 12 apply beside a lookup word, and it is left out of the query the
@@ -1154,21 +1155,65 @@ const FRAME_NOT: &[&str] = &[
 /// and X on 9; on the quoted and `site:` queries 5 of 33 source results
 /// were useful, and none for `site:`.
 pub fn posts_apply(query: &str) -> bool {
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let lower = words.join(" ").to_lowercase();
+    // One word is a name or an id. Script written without spaces is one
+    // "word" however long: only a few characters of it are a name.
+    let one_word = words.len() < 2 && (lower.is_ascii() || lower.chars().count() < 5);
+    // An exact phrase: two quote marks, unless each follows a digit (inch
+    // marks: `27" vs 32" monitor`).
+    let inch: Vec<bool> = lower
+        .char_indices()
+        .filter(|(_, c)| *c == '"')
+        .map(|(i, _)| {
+            lower[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_digit())
+        })
+        .collect();
+    let phrase = inch.len() >= 2 && !inch.iter().all(|mark| *mark);
+    // A search operator at the start of a word ("site:", not "website:"), a
+    // URL, or a capital OR between two words ("Ray 3.2 OR Ray 4", not
+    // "Portland OR").
+    let operator = words.iter().enumerate().any(|(i, w)| {
+        let bare = w.trim_start_matches(['-', '(']).to_lowercase();
+        OPERATORS.iter().any(|op| bare.starts_with(op))
+            || (*w == "OR" && i > 0 && i + 1 < words.len())
+    }) || lower.contains("http://")
+        || lower.contains("https://");
+    if one_word || phrase || operator {
+        return false;
+    }
+    first_phrase(&cut_phrases(&lower, FRAME_NOT), PEOPLE_FRAMES).is_some()
+        || first_phrase(&cut_phrases(&lower, NOT_LOOKUP), LOOKUP_WORDS).is_none()
+}
+
+/// Rule 10's time words: with one of them a framed question searches news.
+const NEWS_TIME_WORDS: &[&str] = &["today", "yesterday", "this week", "latest"];
+
+/// Rule 12's frame, decisive: a query that asks outright what people say
+/// is a web search with posts, whatever signal word it also holds
+/// ("opinions about the sleep study" is not a paper search, "experiences
+/// with hotels in lisbon" not a places search). Checked after the decisive
+/// rules and before the routing model and the signals. The pages are news
+/// when the query has one of rule 10's time words.
+pub fn frame_hit(query: &str) -> Option<Hit> {
+    if !posts_apply(query) {
+        return None;
+    }
     let lower = query
         .to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if !lower.contains(' ')
-        || lower.matches('"').count() >= 2
-        || OPERATORS.iter().any(|op| lower.contains(op))
-        // A capital OR is the boolean operator ("Ray 3.2 OR Ray 4").
-        || query.split_whitespace().any(|w| w == "OR")
-    {
-        return false;
-    }
-    first_phrase(&cut_phrases(&lower, FRAME_NOT), PEOPLE_FRAMES).is_some()
-        || first_phrase(&lower, LOOKUP_WORDS).is_none()
+    let cue = first_phrase(&cut_phrases(&lower, FRAME_NOT), PEOPLE_FRAMES)?;
+    let base = if first_phrase(&lower, NEWS_TIME_WORDS).is_some() {
+        Mode::News
+    } else {
+        Mode::General
+    };
+    Some(hit(12, base, &cue))
 }
 
 /// The query the added modes search: `query` without a frame such as "what
@@ -1605,9 +1650,53 @@ mod tests {
             // The boolean operator, and a way to reach someone.
             "Luma Ray 3.2 OR Ray 4 pricing",
             "Brave Search enterprise license contact email",
+            // A quoted phrase that ends in a digit is still a phrase.
+            "\"SAGE KE 2006\" ceased publication",
+            "-site:pinterest.com standing desk setups",
         ] {
             assert!(!posts_apply(q), "{q}");
         }
+        // Misreads a reviewer found: inch marks, a word that only holds an
+        // operator's letters, Oregon, script without spaces, a product
+        // whose name holds a lookup word.
+        for q in [
+            "27\" vs 32\" monitor",
+            "website: is it down for everyone",
+            "best coffee Portland OR",
+            "\u{6771}\u{4eac}\u{306e}\u{304a}\u{3059}\u{3059}\u{3081}\u{30e9}\u{30fc}\u{30e1}\u{30f3}",
+            "google docs vs notion",
+        ] {
+            assert!(posts_apply(q), "{q}");
+        }
+        assert!(
+            !posts_apply("\u{6771}\u{4eac}"),
+            "two characters are a name"
+        );
+    }
+
+    /// A question that asks outright what people say is a web search with
+    /// posts even when it holds a signal word: the frame comes before the
+    /// signals (and before the routing model).
+    #[test]
+    fn a_frame_decides_before_the_signals() {
+        for (q, mode) in [
+            ("opinions about the sleep study", "general"),
+            ("experiences with hotels in lisbon", "general"),
+            ("what do people say about the framework laptop", "general"),
+            ("what are people saying about the election today", "news"),
+        ] {
+            let (d, _) = resolve_local(q);
+            assert_eq!((d.mode.as_str(), d.source.as_str()), (mode, "rule"), "{q}");
+            assert!(d.reason.contains("rule 12"), "{}", d.reason);
+            assert!(posts_apply(q), "{q}");
+        }
+        // Without the frame the signal decides, as before.
+        assert_eq!(local("the sleep study").0, "academic");
+        // A decisive rule still comes first, and a court's opinions are
+        // not a frame.
+        assert_eq!(local("opinions about rust on reddit").0, "community");
+        assert!(frame_hit("court opinions about qualified immunity").is_none());
+        assert!(frame_hit("\"opinions about\" exact phrase hunt").is_none());
     }
 
     /// A platform's own posts are searched alone only when the query asks
