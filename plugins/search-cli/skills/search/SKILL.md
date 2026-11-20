@@ -31,10 +31,11 @@ A web search returns what sites publish. What customers, users and critics
 say is on X, YouTube, TikTok, Reddit and Hacker News, and much of it is
 nowhere else. So an auto search for pages (`general` or `news`) searches
 those too and returns their posts beside the pages: `-c 10` gives the ten
-pages plus up to eight posts (X and one platform, Reddit and Hacker News),
-dealt in near the top. `metadata.routing.auto.added` lists `social` and
-`community`, each row's `source` names its engine, and `answers[]` holds a
-summary of what X says. Cite the posts beside the pages.
+pages plus up to eight posts (Reddit and Hacker News, X and one platform),
+dealt in near the top. `metadata.routing.auto.added` lists `community` and
+`social`, each row's `source` names its engine, and `answers[]` holds a
+summary of what X says (when X has nothing on the query, `metadata.notes`
+says so and no X row is added). Cite the posts beside the pages.
 
 - After a plain search you do not need `-m social` or `-m community`: the
   posts are already there, and `-m social` for the same query pays for X
@@ -46,9 +47,13 @@ summary of what X says. Cite the posts beside the pages.
   When `added` is absent and the question has a human side, ask for the
   posts: `search search -q "…" -m community --json` (Reddit and Hacker
   News, about free) and `search search -q "…" -m social --json`.
-- A search with posts takes about 25 s and costs several times a plain
-  one, nearly all of it X. `search config set settings.posts off` turns
-  the posts off on this machine.
+- Quotes make a lookup: `"Lemon Squeezy" payouts held` gets pages only.
+  Write the name without quotes when what people say matters.
+- A search with posts takes 15 to 25 s and costs about $0.06 more with
+  your own keys, $0.072 more through metasearch.sh (where a plain search
+  is $0.0015); nearly all of both is X. `search config set settings.posts
+  community` keeps only Reddit and Hacker News (under a cent, a few
+  seconds), `social` only X and the platform, `off` neither.
 - A platform named as the subject ("TikTok trending sound reach") keeps
   its pages, and the social search asks X and that platform. Asking for a
   platform's own posts ("… on tiktok", "youtube videos of …", "tweets
