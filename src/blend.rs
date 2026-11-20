@@ -328,7 +328,9 @@ fn polish(mode: Mode, query: &str, r: &mut SearchResponse, notes: &mut Vec<Strin
             }
             let mut authors: HashSet<String> = HashSet::new();
             r.results.retain(|row| {
+                // A row with no author is titled "Post on X": not one author.
                 row.source != "xai"
+                    || !row.title.starts_with('@')
                     || (!row.title.eq_ignore_ascii_case("@grok")
                         && authors.insert(row.title.to_lowercase()))
             });
@@ -463,13 +465,11 @@ impl Totals {
     }
 }
 
-/// One envelope from the pages run and the added modes' runs. A part that
-/// could not run or failed never fails the search while another part
-/// answered: it leaves a note or its `provider_failures`. With no answer
-/// from any part, or with pages that did not answer and posts that came
-/// back empty, the error is the pages run's: "no providers" when no web
-/// engine is configured (a setup problem, unless a failed added call was
-/// billed and has to be reported), else every failure with every cost.
+/// One envelope from the pages run and the added modes' runs. The pages
+/// decide: when their run fails, its error is the search's, with what the
+/// added modes spent counted in. An added mode that could not run or
+/// failed never fails the search: it leaves a note or its
+/// `provider_failures`.
 pub fn merge(
     query: &str,
     base: Mode,
@@ -1162,6 +1162,9 @@ mod tests {
                 post("xai", "@a", "https://x.com/a/status/1"),
                 post("xai", "@grok", "https://x.com/grok/status/9"),
                 post("xai", "@A", "https://x.com/a/status/2"),
+                // Two posts with no author are two posts.
+                post("xai", "Post on X", "https://x.com/i/status/7"),
+                post("xai", "Post on X", "https://x.com/i/status/8"),
                 loud,
             ],
             "Users discuss the desk.",
@@ -1174,7 +1177,7 @@ mod tests {
             .filter(|x| x.source != "serper")
             .map(|x| x.title.as_str())
             .collect();
-        assert_eq!(got, ["@a", "Loud", "Quiet"]);
+        assert_eq!(got, ["@a", "Post on X", "Post on X", "Loud"]);
     }
 
     /// Reddit leads the community rows; a Hacker News row is kept only when

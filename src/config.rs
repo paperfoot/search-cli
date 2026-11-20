@@ -61,11 +61,12 @@ fn de_posts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
     enum Value {
         Flag(bool),
         Int(i64),
+        Float(f64),
         Text(String),
     }
     Ok(match Value::deserialize(d)? {
-        Value::Flag(false) | Value::Int(0) => "off".to_string(),
-        Value::Flag(true) | Value::Int(_) => "on".to_string(),
+        Value::Flag(false) | Value::Int(0) | Value::Float(0.0) => "off".to_string(),
+        Value::Flag(true) | Value::Int(_) | Value::Float(_) => "on".to_string(),
         Value::Text(t) => t,
     })
 }
@@ -534,6 +535,8 @@ fn parse_setting(name: &str, value: &str) -> Result<toml::Value, SearchError> {
         }
         "posts" => match value.trim().to_ascii_lowercase().as_str() {
             v @ ("on" | "off" | "community" | "social") => Ok(toml::Value::String(v.to_string())),
+            "true" | "1" | "yes" => Ok(toml::Value::String("on".to_string())),
+            "false" | "0" | "no" => Ok(toml::Value::String("off".to_string())),
             _ => Err(SearchError::Config(format!(
                 "settings.posts must be on, community, social or off, got '{value}'"
             ))),
@@ -650,6 +653,10 @@ mod tests {
         s.posts = "sometimes".into();
         assert_eq!((s.posts(), s.posts_lanes().len()), ("on", 2));
         assert!(parse_setting("posts", "community").is_ok());
+        assert!(
+            matches!(parse_setting("posts", "false"), Ok(toml::Value::String(v)) if v == "off")
+        );
+        assert!(matches!(parse_setting("posts", "1"), Ok(toml::Value::String(v)) if v == "on"));
         // A file or env value read as a boolean or a number still loads.
         for (raw, want) in [
             ("false", "off"),
@@ -657,6 +664,8 @@ mod tests {
             ("0", "off"),
             ("1", "on"),
             ("\"community\"", "community"),
+            ("1.5", "on"),
+            ("0.0", "off"),
         ] {
             let s: super::Settings = toml::from_str(&format!("posts = {raw}")).unwrap();
             assert_eq!(s.posts(), want, "{raw}");

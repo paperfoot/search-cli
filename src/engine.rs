@@ -1344,6 +1344,65 @@ mod tests {
         execute_with(adapters, &req).await
     }
 
+    /// A fake that counts as reached through metasearch.sh.
+    struct ViaServer(Box<dyn Adapter>);
+
+    #[async_trait::async_trait]
+    impl Adapter for ViaServer {
+        fn spec(&self) -> &'static ProviderSpec {
+            self.0.spec()
+        }
+        fn is_configured(&self) -> bool {
+            true
+        }
+        fn sent_cost(&self, mode: Mode) -> u64 {
+            self.0.sent_cost(mode)
+        }
+        fn transport(&self) -> Transport {
+            Transport::Hosted
+        }
+        async fn call(&self, call: &Call<'_>) -> Result<Output, SearchError> {
+            self.0.call(call).await
+        }
+    }
+
+    /// A call made through metasearch.sh is not left behind at the
+    /// straggler wait: the server goes on with it and may charge for what
+    /// it finishes, so the search waits for the server's own answer or cut.
+    #[tokio::test]
+    async fn a_hosted_straggler_is_waited_for() {
+        use crate::providers::youtube;
+        let opts = SearchOpts::default();
+        let (mut adapters, _) = fakes(&[
+            (&youtube::SPEC, ok(50, 3, "youtube")),
+            (&xai::SPEC, ok(900, 3, "x")),
+        ]);
+        let x = adapters.pop().unwrap();
+        adapters.push(Box::new(ViaServer(x)));
+        let req = Request {
+            query: "mechanical keyboard review",
+            mode: Mode::Social,
+            count: 10,
+            only: None,
+            opts: &opts,
+            deadline: Duration::from_millis(3_000),
+            straggler_cap: Some(Duration::from_millis(300)),
+            fresh: false,
+            direct_cap: None,
+            reranker: None,
+        };
+        let started = Instant::now();
+        let r = execute_with(adapters, &req).await.unwrap();
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(880),
+            "left at the cap: {took:?}"
+        );
+        assert!(took < Duration::from_millis(2_500), "{took:?}");
+        assert!(r.metadata.provider_results.contains_key("xai"));
+        assert!(r.metadata.providers_timed_out.is_empty());
+    }
+
     /// A capped run (a mode added to another search) whose calls all go
     /// straight to their providers stops at the cap, not the mode deadline,
     /// and the call still out is reported as timed out and counted as spent.

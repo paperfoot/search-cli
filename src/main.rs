@@ -461,13 +461,16 @@ fn transport_signature(app: &Arc<AppContext>, logged_in: bool) -> String {
 async fn resolve_auto(
     query: &str,
     client: Option<&hosted::MetasearchClient>,
+    frames: bool,
 ) -> (types::AutoDecision, Option<String>) {
     if let Some(hit) = router::decisive(query) {
         return (router::decision_for(&hit, "rule"), hit.query);
     }
     // Rule 12's frame: asked outright what people say, the search is for
     // pages with posts, whatever the model or a signal word would pick.
-    if let Some(hit) = router::frame_hit(query) {
+    // Only when posts can be added (`frames`): with -p, a domain filter or
+    // posts off, the frame would take the routing and give nothing for it.
+    if let Some(hit) = frames.then(|| router::frame_hit(query)).flatten() {
         return (router::decision_for(&hit, "rule"), None);
     }
     if let Some(c) = client {
@@ -481,7 +484,7 @@ async fn resolve_auto(
             }
         }
     }
-    router::resolve_local(query)
+    router::resolve_local(query, frames)
 }
 
 /// The capability manifest for agents: one entry per provider and per mode,
@@ -615,7 +618,7 @@ fn agent_info(app: &Arc<AppContext>) -> serde_json::Value {
         "exit_codes": {"0": "success", "1": "transient: retry", "2": "config, auth or credit: fix setup or top up", "3": "bad input", "4": "rate limited: wait"},
         "routing": "-m defaults to auto: a URL -> extract; asking for a platform's posts (tweets, 'on X', x.com/, a lone @handle; 'on tiktok', 'youtube videos', 'instagram reels', 'on threads', 'facebook page') -> social on those platforms; reddit, hacker news, 'on HN', r/<name> -> community; 'similar to <url>' -> similar; patent words or numbers -> patents; 'images of' -> images; else, logged in, metasearch.sh's routing model; else local cues (near me, h-index, paper, who is, latest) or general. A general or news result also carries posts from social + community beyond -c (auto.added), unless the query is a lookup (one word, a quoted phrase, site:, api/docs/error words), has -p/-d, or settings.posts is off. In news and social, today/this week/latest/this month/this year also set -f unless you passed one. Never deep. metadata.routing.auto gives mode, source (rule|model|heuristic|fallback), reason and filters_applied. Explicit -m/-p always wins; a -p that cannot serve auto's pick runs general (community for -p reddit, social for -p tiktok).",
         "transport": "Per provider: own key (env > SEARCH_KEYS_* > config) -> direct; keyless -> local; else, after `search login`, hosted on your balance, ONE call per mode: without -p the server picks (cheapest first, its cache; --no-cache skips it), -p is sent as given.",
-        "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls run to the deadline (social: wait_s once one answered); stragglers go in providers_timed_out.",
+        "merge": "fused: all providers at once until the deadline, rank fusion (consensus first), then a relevance rerank when logged in (--no-rerank skips). fallback_chain: in order until a page is accepted. Sent calls run to the deadline (social: wait_s once one answered, hosted calls excepted); stragglers: providers_timed_out.",
         "envelope": {
             "success": "{ version, status: success|partial_success|no_results, query, mode, results[{title,url,snippet,source,published?,image_url?,extra?}], answers?[{provider,text}], metadata{ elapsed_ms, result_count, providers_queried, providers_failed, providers_timed_out?, provider_results?, provider_failures?[{provider,category,http_status?,code,reason,retryable}], transport{name:direct|local|hosted}, cost?{micros,usd,basis:estimate|charged|mixed,by_provider}, routing?{auto?,reranked?,cached?,escalated?}, warnings?, notes?, cached?, cache_age_secs? } }",
             "error": "{ version, status: error, error{ code, message, suggestion?, provider_failures?, cost? } }",
@@ -880,7 +883,12 @@ async fn run(cli: Cli, ctx: &Ctx, app: Arc<AppContext>) -> Result<i32, errors::S
             let (mode, auto) = match args.mode {
                 cli::ModeArg::Fixed(m) => (m, None),
                 cli::ModeArg::Auto => {
-                    let (decision, rewritten) = resolve_auto(&args.query, client.as_deref()).await;
+                    let frames = args.providers.is_none()
+                        && opts.include_domains.is_empty()
+                        && opts.exclude_domains.is_empty()
+                        && !app.config.settings.posts_lanes().is_empty();
+                    let (decision, rewritten) =
+                        resolve_auto(&args.query, client.as_deref(), frames).await;
                     if let Some(q) = rewritten {
                         query = q;
                     }

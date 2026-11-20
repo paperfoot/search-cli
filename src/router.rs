@@ -224,12 +224,13 @@ pub fn freshness(query: &str) -> Option<(&'static str, String)> {
 }
 
 /// The decision without the routing model: decisive rules, then rule
-/// 12's frame, then the first signal, then general.
-pub fn resolve_local(query: &str) -> (AutoDecision, Option<String>) {
+/// 12's frame when `frames` (posts can be added to this search), then the
+/// first signal, then general.
+pub fn resolve_local(query: &str, frames: bool) -> (AutoDecision, Option<String>) {
     if let Some(h) = decisive(query) {
         return (decision_for(&h, "rule"), h.query);
     }
-    if let Some(h) = frame_hit(query) {
+    if let Some(h) = frames.then(|| frame_hit(query)).flatten() {
         return (decision_for(&h, "rule"), None);
     }
     if let Some(h) = signals(query).into_iter().next() {
@@ -1116,7 +1117,19 @@ const LOOKUP_WORDS: &[&str] = &[
 ];
 
 /// Search operators: the caller is steering the web search itself.
-const OPERATORS: &[&str] = &["site:", "filetype:", "inurl:", "intitle:"];
+const OPERATORS: &[&str] = &[
+    "site:",
+    "filetype:",
+    "inurl:",
+    "intitle:",
+    "intext:",
+    "allintitle:",
+    "allinurl:",
+    "allintext:",
+    "related:",
+    "before:",
+    "after:",
+];
 
 /// Names in which a lookup word is not one.
 const NOT_LOOKUP: &[&str] = &["google docs"];
@@ -1157,9 +1170,11 @@ const FRAME_NOT: &[&str] = &[
 pub fn posts_apply(query: &str) -> bool {
     let words: Vec<&str> = query.split_whitespace().collect();
     let lower = words.join(" ").to_lowercase();
-    // One word is a name or an id. Script written without spaces is one
-    // "word" however long: only a few characters of it are a name.
-    let one_word = words.len() < 2 && (lower.is_ascii() || lower.chars().count() < 5);
+    // One word is a name or an id ("stripe", "Beyoncé", "Москва"). Script
+    // written without spaces (Chinese, Japanese, Thai, ...) is one "word"
+    // however long: only a few characters of it are a name.
+    let unspaced = lower.chars().filter(|c| unspaced_script(*c)).count();
+    let one_word = words.len() < 2 && unspaced < 5;
     // An exact phrase: two quote marks, unless each follows a digit (inch
     // marks: `27" vs 32" monitor`).
     let inch: Vec<bool> = lower
@@ -1187,6 +1202,16 @@ pub fn posts_apply(query: &str) -> bool {
     }
     first_phrase(&cut_phrases(&lower, FRAME_NOT), PEOPLE_FRAMES).is_some()
         || first_phrase(&cut_phrases(&lower, NOT_LOOKUP), LOOKUP_WORDS).is_none()
+}
+
+/// A character of a script written without spaces between words: kana,
+/// Han, Thai, Lao, Khmer, Myanmar. (Korean is written with spaces.)
+fn unspaced_script(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF | 0x3040..=0x30FF | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+    )
 }
 
 /// Rule 10's time words: with one of them a framed question searches news.
@@ -1422,7 +1447,7 @@ mod tests {
     use super::*;
 
     fn local(q: &str) -> (String, String) {
-        let (d, _) = resolve_local(q);
+        let (d, _) = resolve_local(q, true);
         (d.mode, d.source)
     }
 
@@ -1591,7 +1616,7 @@ mod tests {
         }
         // X wins over a community source: rule 2 comes first.
         assert_eq!(local("what are people saying on X about htmx").0, "social");
-        let (d, _) = resolve_local("best mechanical keyboard reddit");
+        let (d, _) = resolve_local("best mechanical keyboard reddit", true);
         assert_eq!(
             d.reason,
             "Names a community source ('reddit') (rule 11); used community."
@@ -1672,6 +1697,16 @@ mod tests {
             !posts_apply("\u{6771}\u{4eac}"),
             "two characters are a name"
         );
+        // One word is a name in any script written with spaces.
+        for q in [
+            "kubernetes",
+            "Beyonc\u{e9}",
+            "\u{41c}\u{43e}\u{441}\u{43a}\u{432}\u{430}",
+            "\u{c0bc}\u{c131}\u{c804}\u{c790}\u{c8fc}\u{c2dd}\u{d68c}\u{c0ac}",
+            "allintitle:rust async",
+        ] {
+            assert!(!posts_apply(q), "{q}");
+        }
     }
 
     /// A question that asks outright what people say is a web search with
@@ -1685,13 +1720,20 @@ mod tests {
             ("what do people say about the framework laptop", "general"),
             ("what are people saying about the election today", "news"),
         ] {
-            let (d, _) = resolve_local(q);
+            let (d, _) = resolve_local(q, true);
             assert_eq!((d.mode.as_str(), d.source.as_str()), (mode, "rule"), "{q}");
             assert!(d.reason.contains("rule 12"), "{}", d.reason);
             assert!(posts_apply(q), "{q}");
         }
-        // Without the frame the signal decides, as before.
+        // Without the frame the signal decides, as before; and so it does
+        // when posts cannot be added (-p, a domain filter, posts off): the
+        // frame would take the routing and give nothing for it.
         assert_eq!(local("the sleep study").0, "academic");
+        let (d, _) = resolve_local("opinions about the sleep study", false);
+        assert_eq!(
+            (d.mode.as_str(), d.source.as_str()),
+            ("academic", "heuristic")
+        );
         // A decisive rule still comes first, and a court's opinions are
         // not a frame.
         assert_eq!(local("opinions about rust on reddit").0, "community");
@@ -1780,7 +1822,7 @@ mod tests {
 
     #[test]
     fn similar_searches_the_captured_url() {
-        let (d, q) = resolve_local("sites like https://news.ycombinator.com");
+        let (d, q) = resolve_local("sites like https://news.ycombinator.com", true);
         assert_eq!(d.mode, "similar");
         assert_eq!(q.as_deref(), Some("https://news.ycombinator.com"));
     }
@@ -1804,7 +1846,7 @@ mod tests {
 
     #[test]
     fn reasons_are_plain_sentences() {
-        let (d, _) = resolve_local("coffee near me");
+        let (d, _) = resolve_local("coffee near me", true);
         assert_eq!(d.reason, "Matched 'near me' (rule 6); used places.");
     }
 
