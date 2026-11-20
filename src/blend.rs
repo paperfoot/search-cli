@@ -1102,7 +1102,7 @@ mod tests {
                 xai::OFF_TOPIC
             ),
         );
-        let b = blend_one(Mode::Social, "shade of eranikus", lane);
+        let b = blend_one(Mode::Social, "obscure boss mechanic", lane);
         assert!(b.response.answers.is_empty() && noted(&b) && !has_x(&b));
         assert!(b.response.results.iter().any(|x| x.source == "youtube"));
         // The call was made and is still paid for and reported.
@@ -1139,9 +1139,9 @@ mod tests {
             r.metadata
                 .transport
                 .insert("xai".to_string(), "hosted".to_string());
-            blend_one(Mode::Social, "game-tars input model", Ok(r))
+            blend_one(Mode::Social, "acme x200 firmware", Ok(r))
         };
-        let b = hosted("No relevant posts were returned by the search for Game-TARS.");
+        let b = hosted("No relevant posts were returned by the search for the Acme X200.");
         assert!(!has_x(&b) && noted(&b) && b.response.answers.is_empty());
         assert!(b.response.results.iter().any(|x| x.source == "youtube"));
         let b = hosted("Users like the desk. None of the posts mention the price.");
@@ -1187,21 +1187,21 @@ mod tests {
     fn community_rows_lead_with_reddit_and_drop_loose_hacker_news() {
         let mut on = post(
             "hackernews",
-            "Rapamycin dosing in mice",
+            "Creatine loading in athletes",
             "https://news.ycombinator.com/item?id=1",
         );
-        on.snippet = "weekly dosing and side effects".to_string();
+        on.snippet = "weekly loading and side effects".to_string();
         // Half of the key words, but not the subject.
         let mut off = post(
             "hackernews",
-            "Show HN: a dosing pump",
+            "Show HN: a loading spinner",
             "https://news.ycombinator.com/item?id=2",
         );
-        off.snippet = "dosing with no side effects".to_string();
+        off.snippet = "loading with no side effects".to_string();
         // The subject and the next word are enough.
         let mut two = post(
             "hackernews",
-            "Rapamycin dosing",
+            "Creatine loading",
             "https://news.ycombinator.com/item?id=3",
         );
         two.snippet = "a thread".to_string();
@@ -1216,12 +1216,12 @@ mod tests {
                 two,
                 post(
                     "reddit",
-                    "Rapamycin: my protocol",
+                    "Creatine: my protocol",
                     "https://www.reddit.com/r/a/comments/1/x/",
                 ),
                 post(
                     "reddit",
-                    "rapamycin: my protocol",
+                    "creatine: my protocol",
                     "https://www.reddit.com/r/b/comments/2/x/",
                 ),
                 post(
@@ -1233,7 +1233,7 @@ mod tests {
         );
         let b = blend_one(
             Mode::Community,
-            "rapamycin dosing protocol side effects",
+            "creatine loading protocol side effects",
             lane,
         );
         let got: Vec<&str> = b
@@ -1246,10 +1246,10 @@ mod tests {
         assert_eq!(
             got,
             [
-                "Rapamycin: my protocol",
+                "Creatine: my protocol",
                 "Side effects?",
-                "Rapamycin dosing in mice",
-                "Rapamycin dosing"
+                "Creatine loading in athletes",
+                "Creatine loading"
             ]
         );
         assert_eq!(

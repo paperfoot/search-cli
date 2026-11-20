@@ -167,7 +167,7 @@ impl Settings {
     /// community, social, off. Anything unreadable is on, the default.
     pub fn posts(&self) -> &'static str {
         match self.posts.trim().to_ascii_lowercase().as_str() {
-            "off" | "false" | "no" | "0" => "off",
+            "off" | "false" | "no" | "0" | "none" | "disabled" => "off",
             "community" => "community",
             "social" => "social",
             _ => "on",

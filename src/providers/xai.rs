@@ -432,10 +432,12 @@ fn parse(data: XaiResponse, call: &Call<'_>) -> Result<Output, SearchError> {
         }
         let date = p.date.trim();
         results.push(SearchResult {
-            title: if author.is_empty() {
-                "Post on X".to_string()
-            } else {
-                format!("@{author}")
+            // No author given: the handle in the URL, unless it is X's
+            // own `/i/status/` form.
+            title: match (author, url_user) {
+                ("", "" | "i") => "Post on X".to_string(),
+                ("", user) => format!("@{user}"),
+                (author, _) => format!("@{author}"),
             },
             url: p.url.trim().to_string(),
             snippet: clip(&p.text),

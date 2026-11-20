@@ -186,11 +186,24 @@ fn test_agent_info_json() {
         );
     }
     // About half of the 0.9 manifest (21 KB): agents pay for every byte.
-    assert!(
-        output.stdout.len() < 13_000,
-        "{} bytes",
-        output.stdout.len()
-    );
+    // Measured with no keys, and with the home folder written as `~`:
+    // each provider's transport and the config file's path are in the
+    // manifest, so its size follows the machine, and 0.14.0's test failed
+    // on one that had every key.
+    let home = tempfile_home("agent-info");
+    let bare = search_cmd()
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .arg("agent-info")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(bare.status.success());
+    let text = String::from_utf8(bare.stdout)
+        .unwrap()
+        .replace(home.to_str().unwrap(), "~");
+    assert!(text.len() < 12_980, "{} bytes", text.len());
 }
 
 #[test]

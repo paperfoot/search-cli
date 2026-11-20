@@ -671,7 +671,7 @@ fn auto_adds_a_social_call_that_names_its_platforms() {
     let (code, v) = run_json(mock.cmd().env("SEARCH_SETTINGS_POSTS", "social").args([
         "search",
         "-q",
-        "TikTok trending sound reach test",
+        "TikTok Shop seller fees",
         "-c",
         "5",
         "--json",
@@ -682,10 +682,7 @@ fn auto_adds_a_social_call_that_names_its_platforms() {
     let of = |mode: &str| sent.iter().find(|r| r.body["mode"] == mode).unwrap();
     assert!(of("general").body.get("providers").is_none());
     assert_eq!(of("social").body["providers"], json!(["xai", "tiktok"]));
-    assert_eq!(
-        of("social").body["query"],
-        "TikTok trending sound reach test"
-    );
+    assert_eq!(of("social").body["query"], "TikTok Shop seller fees");
 
     assert_eq!(v["mode"], "general");
     let m = &v["metadata"];
@@ -709,7 +706,7 @@ fn auto_adds_a_social_call_that_names_its_platforms() {
     let (_, v) = run_json(mock.cmd().env("SEARCH_SETTINGS_POSTS", "social").args([
         "search",
         "-q",
-        "TikTok trending sound reach test",
+        "TikTok Shop seller fees",
         "-m",
         "general",
         "--json",
@@ -722,7 +719,7 @@ fn auto_adds_a_social_call_that_names_its_platforms() {
     let (_, v) = run_json(mock.cmd().args([
         "search",
         "-q",
-        "TikTok trending sound reach test",
+        "TikTok Shop seller fees",
         "-c",
         "5",
         "--json",

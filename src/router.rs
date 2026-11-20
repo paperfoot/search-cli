@@ -733,7 +733,7 @@ pub const PLATFORM_CUES: &[(&str, &str, &[&str])] = &[
 ];
 
 /// A platform named as the subject, not as the place to look ("TikTok
-/// trending sound reach test", "YouTube Studio schedule limit"). Such a
+/// Shop seller fees", "YouTube Studio analytics delay"). Such a
 /// query keeps its pages; the social search beside them asks X and the
 /// platform named ([`pick_social_platforms`]). Until 0.14 a bare name was a
 /// rule 2 cue and the search ran on that platform alone, with no pages.
@@ -826,7 +826,7 @@ pub fn social_pins(query: &str) -> Vec<&'static str> {
 /// - Breaking news is X alone; trends, memes and sounds add TikTok; visual
 ///   topics add Instagram.
 /// - Anything else adds YouTube. It was TikTok until 0.14: over six of the
-///   owner's agents' queries (19 Nov 2026) TikTok returned off-topic clips
+///   technical and biomedical test queries (19 Nov 2026) it returned off-topic clips
 ///   for three, and YouTube was on topic for all four it was tried on
 ///   (talks, tutorials and reviews, with transcripts to extract).
 ///
@@ -1162,8 +1162,8 @@ const FRAME_NOT: &[&str] = &[
 /// contact word. A frame ("what do people say about the stripe api")
 /// always gets them.
 ///
-/// Checked against 25 searches drawn at random from a month of one
-/// machine's log and graded source by source (19 Nov 2026): on the plain
+/// Checked against a sample of 25 real searches, graded source by
+/// source (19 Nov 2026): on the plain
 /// queries Reddit was useful or partly useful on 11 of 11, YouTube on 10
 /// and X on 9; on the quoted and `site:` queries 5 of 33 source results
 /// were useful, and none for `site:`.
@@ -1173,8 +1173,10 @@ pub fn posts_apply(query: &str) -> bool {
     // One word is a name or an id ("stripe", "Beyoncé", "Москва"). Script
     // written without spaces (Chinese, Japanese, Thai, ...) is one "word"
     // however long: only a few characters of it are a name.
-    let unspaced = lower.chars().filter(|c| unspaced_script(*c)).count();
-    let one_word = words.len() < 2 && unspaced < 5;
+    // A token that mixes such script with Latin ("iPhone16の評判") is a
+    // phrase as well, so its whole length counts.
+    let unspaced = lower.chars().any(unspaced_script);
+    let one_word = words.len() < 2 && (!unspaced || lower.chars().count() < 5);
     // An exact phrase: two quote marks, unless each follows a digit (inch
     // marks: `27" vs 32" monitor`).
     let inch: Vec<bool> = lower
@@ -1189,11 +1191,15 @@ pub fn posts_apply(query: &str) -> bool {
         .collect();
     let phrase = inch.len() >= 2 && !inch.iter().all(|mark| *mark);
     // A search operator at the start of a word ("site:", not "website:"), a
-    // URL, or a capital OR between two words ("Ray 3.2 OR Ray 4", not
+    // URL, or a capital OR between two words ("Model 3 OR Model Y", not
     // "Portland OR").
     let operator = words.iter().enumerate().any(|(i, w)| {
+        // An operator has its value attached ("before:2024"); "Before:"
+        // alone is a label.
         let bare = w.trim_start_matches(['-', '(']).to_lowercase();
-        OPERATORS.iter().any(|op| bare.starts_with(op))
+        OPERATORS
+            .iter()
+            .any(|op| bare.starts_with(op) && bare.len() > op.len())
             || (*w == "OR" && i > 0 && i + 1 < words.len())
     }) || lower.contains("http://")
         || lower.contains("https://");
@@ -1205,12 +1211,20 @@ pub fn posts_apply(query: &str) -> bool {
 }
 
 /// A character of a script written without spaces between words: kana,
-/// Han, Thai, Lao, Khmer, Myanmar. (Korean is written with spaces.)
+/// Han, Thai, Lao, Tibetan, Khmer, Myanmar. (Korean is written with
+/// spaces.)
 fn unspaced_script(c: char) -> bool {
     matches!(
         c as u32,
-        0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF | 0x3040..=0x30FF | 0x3400..=0x4DBF
+        0x0E00..=0x0FFF
+            | 0x1000..=0x109F
+            | 0x1780..=0x17FF
+            | 0x3005..=0x3007
+            | 0x3040..=0x30FF
+            | 0x3400..=0x4DBF
             | 0x4E00..=0x9FFF
+            | 0xFF66..=0xFF9F
+            | 0x20000..=0x2FA1F
     )
 }
 
@@ -1630,19 +1644,19 @@ mod tests {
     #[test]
     fn rule_12_adds_posts_unless_the_query_is_a_lookup() {
         for q in [
-            "rapamycin dosing protocol longevity side effects",
-            "Lemon Squeezy payouts held founders",
-            "Claude Code subagents workflow tips",
-            "WoW Forever feral druid best weapon leveling",
-            "Google core update November 2026",
+            "creatine loading phase side effects",
+            "Acme Pay payouts delayed sellers",
+            "neovim lsp setup tips",
+            "elden ring strength build best weapon",
+            "chrome update broke extensions",
             "is the uplift v2 standing desk worth it",
             "notion vs obsidian",
             "what do people say about the framework laptop",
             "opinions about remote work",
             // A platform as the subject keeps its pages (it used to run on
             // that platform alone).
-            "TikTok trending sound low volume under voiceover reach test",
-            "YouTube Studio can't schedule video more than two years ahead",
+            "TikTok Shop seller fees explained",
+            "YouTube Studio analytics not updating",
             "twitter algorithm changes 2026",
             // One quote is an inch mark.
             "best 27\" monitor",
@@ -1660,10 +1674,10 @@ mod tests {
         for q in [
             // A name or an id.
             "stripe",
-            "DXhNFjCkTyX",
+            "a1B2c3D4e5F",
             // An exact phrase, an operator, a URL.
-            "\"SAGE KE\" Science of Aging Knowledge Environment ceased publication",
-            "site:edu gerontology library guide",
+            "\"Volume 12\" quarterly newsletter final issue",
+            "site:edu chemistry lab safety guide",
             "summary of https://example.com/post",
             "filetype:pdf annual report 2026",
             // An error or a reference.
@@ -1673,10 +1687,10 @@ mod tests {
             "python regex lookbehind",
             "court opinions about qualified immunity sdk",
             // The boolean operator, and a way to reach someone.
-            "Luma Ray 3.2 OR Ray 4 pricing",
-            "Brave Search enterprise license contact email",
+            "Model 3 OR Model Y lease price",
+            "Acme Corp press office contact email",
             // A quoted phrase that ends in a digit is still a phrase.
-            "\"SAGE KE 2006\" ceased publication",
+            "\"Volume 12 2006\" final issue",
             "-site:pinterest.com standing desk setups",
         ] {
             assert!(!posts_apply(q), "{q}");
@@ -1707,6 +1721,17 @@ mod tests {
         ] {
             assert!(!posts_apply(q), "{q}");
         }
+        // A token that mixes Latin with a few characters of unspaced
+        // script is a phrase, and a label with a colon is not an operator.
+        for q in [
+            "ChatGPT\u{600e}\u{4e48}\u{6837}",
+            "iPhone16\u{306e}\u{8a55}\u{5224}",
+            "\u{4eba}\u{3005}\u{306e}\u{610f}\u{898b}",
+            "Before: 120kg After: 90kg keto results",
+        ] {
+            assert!(posts_apply(q), "{q}");
+        }
+        assert!(!posts_apply("standing desk before:2024"));
     }
 
     /// A question that asks outright what people say is a web search with
@@ -1747,10 +1772,10 @@ mod tests {
     #[test]
     fn a_platform_named_as_the_subject_is_a_mention_not_a_pin() {
         for (q, named) in [
-            ("TikTok trending sound reach test", "tiktok"),
-            ("how to create a tik tok series", "tiktok"),
+            ("TikTok Shop seller fees", "tiktok"),
+            ("how to grow a tik tok account", "tiktok"),
             ("instagram algorithm 2026 changes", "instagram"),
-            ("YouTube Studio schedule limit", "youtube"),
+            ("YouTube Studio analytics delay", "youtube"),
             ("how much do youtubers earn", "youtube"),
         ] {
             assert_eq!(platform_mention(q), Some(named), "{q}");
